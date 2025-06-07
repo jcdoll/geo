@@ -83,10 +83,11 @@ def test_statistics():
 def test_visualization_data():
     """Test getting visualization data"""
     sim = GeologySimulation(width=8, height=6)
-    colors, temp, pressure = sim.get_visualization_data()
+    colors, temp, pressure, power = sim.get_visualization_data()
     
     assert colors.shape == (6, 8, 3)
     assert temp.shape == (6, 8)
     assert pressure.shape == (6, 8)
+    assert power.shape == (6, 8)
     assert colors.dtype == np.uint8
     assert np.all(colors >= 0) and np.all(colors <= 255) 

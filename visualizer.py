@@ -67,10 +67,8 @@ class GeologyVisualizer:
         self.simulation = GeologySimulation(sim_width, sim_height)
         self.running = True
         self.paused = True  # Start paused
-        self.display_mode = 'rocks'  # 'rocks', 'temperature', 'pressure'
+        self.display_mode = 'materials'  # 'materials', 'temperature', 'pressure'
         self.speed_multiplier = 1.0  # 0.5x, 1x, 2x, 4x, 8x, 16x
-        self.base_step_interval = 200  # milliseconds at 1x speed
-        self.last_step_time = 0
         
         # Performance monitoring
         self.step_times = []  # Track recent step durations
@@ -134,7 +132,7 @@ class GeologyVisualizer:
         y += button_height + spacing * 3
         
         # Display mode buttons
-        display_modes = [('Rocks', 'rocks'), ('Temperature', 'temperature'), ('Pressure', 'pressure')]
+        display_modes = [('Materials', 'materials'), ('Temperature', 'temperature'), ('Pressure', 'pressure'), ('Power', 'power')]
         for text, mode in display_modes:
             buttons.append({
                 'rect': pygame.Rect(x, y, button_width, button_height),
@@ -226,8 +224,8 @@ class GeologyVisualizer:
     
     def _get_display_colors(self) -> np.ndarray:
         """Get colors for current display mode"""
-        if self.display_mode == 'rocks':
-            colors, _, _ = self.simulation.get_visualization_data()
+        if self.display_mode == 'materials':
+            colors, _, _, _ = self.simulation.get_visualization_data()
             return colors
         elif self.display_mode == 'temperature':
             # Convert from Kelvin to Celsius for visualization
@@ -245,6 +243,32 @@ class GeologyVisualizer:
             colors = np.zeros((self.sim_height, self.sim_width, 3), dtype=np.uint8)
             colors[:, :, 1] = (pressure_norm * 255).astype(np.uint8)  # Green channel
             colors[:, :, 2] = ((1 - pressure_norm) * 128).astype(np.uint8)  # Blue channel
+            return colors
+        elif self.display_mode == 'power':
+            power_density = self.simulation.power_density
+            
+            # Separate positive (heating) and negative (cooling) values for different scaling
+            heating = np.maximum(0, power_density)
+            cooling = np.maximum(0, -power_density)
+            
+            # Scale heating and cooling separately to make both visible
+            max_heating = np.max(heating) if np.any(heating > 0) else 1e-10
+            max_cooling = np.max(cooling) if np.any(cooling > 0) else 1e-10
+            
+            # Normalize each separately (0 to 1)
+            heating_norm = np.clip(heating / max_heating, 0, 1)
+            cooling_norm = np.clip(cooling / max_cooling, 0, 1)
+            
+            colors = np.zeros((self.sim_height, self.sim_width, 3), dtype=np.uint8)
+            
+            # Red for heat generation (scaled separately)
+            heat_mask = heating > 0
+            colors[heat_mask, 0] = (heating_norm[heat_mask] * 255).astype(np.uint8)
+            
+            # Blue for heat loss (scaled separately)  
+            cool_mask = cooling > 0
+            colors[cool_mask, 2] = (cooling_norm[cool_mask] * 255).astype(np.uint8)
+            
             return colors
     
     def _draw_simulation(self):
@@ -277,7 +301,7 @@ class GeologyVisualizer:
         self.screen.blit(sim_surface, (0, self.status_bar_height))
         
         # Draw color bar for temperature and pressure modes
-        if self.display_mode in ['temperature', 'pressure']:
+        if self.display_mode in ['temperature', 'pressure', 'power']:
             self._draw_color_bar()
     
     def _draw_color_bar(self):
@@ -324,6 +348,35 @@ class GeologyVisualizer:
                                (bar_x, bar_y + bar_height - i - 1), 
                                (bar_x + bar_width, bar_y + bar_height - i - 1))
         
+        elif self.display_mode == 'power':
+            power_density = self.simulation.power_density
+            heating = np.maximum(0, power_density)
+            cooling = np.maximum(0, -power_density)
+            
+            max_heating = np.max(heating) if np.any(heating > 0) else 1e-10
+            max_cooling = np.max(cooling) if np.any(cooling > 0) else 1e-10
+            
+            # Use larger range for main scale reference
+            max_val = max_cooling  # Usually much larger (radiative cooling)
+            min_val = -max_cooling
+            unit = "W/m³"
+            
+            # Draw gradient bar (blue to black to red for power: loss to neutral to generation)
+            for i in range(bar_height):
+                normalized = i / bar_height  # 0 to 1
+                if normalized < 0.5:
+                    # Bottom half: blue (heat loss)
+                    intensity = (0.5 - normalized) * 2  # 1 to 0
+                    color = (0, 0, int(intensity * 255))
+                else:
+                    # Top half: red (heat generation)
+                    intensity = (normalized - 0.5) * 2  # 0 to 1
+                    color = (int(intensity * 255), 0, 0)
+                
+                pygame.draw.line(self.screen, color, 
+                               (bar_x, bar_y + bar_height - i - 1), 
+                               (bar_x + bar_width, bar_y + bar_height - i - 1))
+        
         # Draw border around color bar
         pygame.draw.rect(self.screen, self.colors['text'], 
                         (bar_x, bar_y, bar_width, bar_height), 2)
@@ -331,24 +384,55 @@ class GeologyVisualizer:
         # Draw scale labels
         label_x = bar_x + bar_width + 5
         
-        # Max value at top
-        max_text = f"{max_val:.0f}{unit}"
-        max_surface = self.small_font.render(max_text, True, self.colors['text'])
-        self.screen.blit(max_surface, (label_x, bar_y - 5))
-        
-        # Mid value in middle
-        mid_val = (min_val + max_val) / 2
-        mid_text = f"{mid_val:.0f}{unit}"
-        mid_surface = self.small_font.render(mid_text, True, self.colors['text'])
-        self.screen.blit(mid_surface, (label_x, bar_y + bar_height // 2 - 10))
-        
-        # Min value at bottom
-        min_text = f"{min_val:.0f}{unit}"
-        min_surface = self.small_font.render(min_text, True, self.colors['text'])
-        self.screen.blit(min_surface, (label_x, bar_y + bar_height - 15))
+        if self.display_mode == 'power':
+            # Show separate scales for heating and cooling
+            power_density = self.simulation.power_density
+            heating = np.maximum(0, power_density)
+            cooling = np.maximum(0, -power_density)
+            max_heating = np.max(heating) if np.any(heating > 0) else 1e-10
+            max_cooling = np.max(cooling) if np.any(cooling > 0) else 1e-10
+            
+            # Top: heating scale
+            heat_text = f"+{max_heating:.1e}{unit}"
+            heat_surface = self.small_font.render(heat_text, True, (255, 100, 100))  # Light red
+            self.screen.blit(heat_surface, (label_x, bar_y - 5))
+            
+            # Middle: zero
+            mid_text = f"0{unit}"
+            mid_surface = self.small_font.render(mid_text, True, self.colors['text'])
+            self.screen.blit(mid_surface, (label_x, bar_y + bar_height // 2 - 10))
+            
+            # Bottom: cooling scale  
+            cool_text = f"-{max_cooling:.1e}{unit}"
+            cool_surface = self.small_font.render(cool_text, True, (100, 100, 255))  # Light blue
+            self.screen.blit(cool_surface, (label_x, bar_y + bar_height - 15))
+            
+            # Add note about separate scaling
+            note_text = "(Separate scales)"
+            note_surface = self.small_font.render(note_text, True, (200, 200, 200))
+            self.screen.blit(note_surface, (label_x, bar_y + bar_height + 5))
+        else:
+            # Regular scaling for temperature/pressure
+            max_text = f"{max_val:.0f}{unit}"
+            max_surface = self.small_font.render(max_text, True, self.colors['text'])
+            self.screen.blit(max_surface, (label_x, bar_y - 5))
+            
+            mid_val = (min_val + max_val) / 2
+            mid_text = f"{mid_val:.0f}{unit}"
+            mid_surface = self.small_font.render(mid_text, True, self.colors['text'])
+            self.screen.blit(mid_surface, (label_x, bar_y + bar_height // 2 - 10))
+            
+            min_text = f"{min_val:.0f}{unit}"
+            min_surface = self.small_font.render(min_text, True, self.colors['text'])
+            self.screen.blit(min_surface, (label_x, bar_y + bar_height - 15))
         
         # Draw title above the bar
-        title = "Temperature" if self.display_mode == 'temperature' else "Pressure"
+        if self.display_mode == 'power':
+            title = "Power Density"
+        elif self.display_mode == 'temperature':
+            title = "Temperature"
+        else:
+            title = "Pressure"
         title_surface = self.small_font.render(title, True, self.colors['text'])
         title_x = bar_x + (bar_width - title_surface.get_width()) // 2
         self.screen.blit(title_surface, (title_x, bar_y - 25))
@@ -558,11 +642,13 @@ class GeologyVisualizer:
             elif event.key == pygame.K_t:
                 self.simulation.step_backward()
             elif event.key == pygame.K_1:
-                self.display_mode = 'rocks'
+                self.display_mode = 'materials'
             elif event.key == pygame.K_2:
                 self.display_mode = 'temperature'
             elif event.key == pygame.K_3:
                 self.display_mode = 'pressure'
+            elif event.key == pygame.K_4:
+                self.display_mode = 'power'
             elif event.key == pygame.K_TAB:
                 # Cycle through tabs
                 tabs = ['transitions', 'composition', 'controls']
@@ -601,8 +687,6 @@ class GeologyVisualizer:
     def run(self):
         """Main visualization loop"""
         while self.running:
-            current_time = pygame.time.get_ticks()
-            
             # Handle events
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -622,42 +706,31 @@ class GeologyVisualizer:
             
             # Auto-stepping when playing
             if not self.paused:
-                if self.speed_multiplier <= 4.0:
-                    # For moderate speeds, use time-based stepping
-                    step_interval = int(self.base_step_interval / self.speed_multiplier)
-                    if current_time - self.last_step_time > step_interval:
-                        # Measure step performance
+                if self.speed_multiplier <= 1.0:
+                    # For slow speeds, step every few frames
+                    frame_skip = int(1.0 / self.speed_multiplier)  # 0.5x = every 2 frames
+                    if pygame.time.get_ticks() % (frame_skip * 17) < 17:  # ~60fps timing
                         step_start = pygame.time.get_ticks()
                         self.simulation.step_forward()
                         step_duration = pygame.time.get_ticks() - step_start
-                        
-                        # Track performance
                         self.step_times.append(step_duration)
                         if len(self.step_times) > self.max_step_history:
                             self.step_times.pop(0)
-                        
-                        self.last_step_time = current_time
                 else:
-                    # For high speeds (8x, 16x), use multiple steps per frame
-                    # This bypasses performance bottlenecks from single-step timing
-                    step_interval = self.base_step_interval // 4  # Quarter of base interval
-                    if current_time - self.last_step_time > step_interval:
-                        # Calculate how many steps to take based on speed multiplier
-                        steps_per_burst = int(self.speed_multiplier / 4)  # 8x=2 steps, 16x=4 steps
-                        
-                        # Measure step performance
-                        step_start = pygame.time.get_ticks()
-                        for _ in range(steps_per_burst):
-                            self.simulation.step_forward()
-                        step_duration = pygame.time.get_ticks() - step_start
-                        
-                        # Track performance (duration per single step for comparison)
-                        avg_step_duration = step_duration / steps_per_burst if steps_per_burst > 0 else step_duration
-                        self.step_times.append(avg_step_duration)
-                        if len(self.step_times) > self.max_step_history:
-                            self.step_times.pop(0)
-                        
-                        self.last_step_time = current_time
+                    # For normal and high speeds, run multiple steps per frame
+                    steps_per_frame = int(self.speed_multiplier)
+                    
+                    # Measure step performance
+                    step_start = pygame.time.get_ticks()
+                    for _ in range(steps_per_frame):
+                        self.simulation.step_forward()
+                    step_duration = pygame.time.get_ticks() - step_start
+                    
+                    # Track performance (duration per single step for comparison)
+                    avg_step_duration = step_duration / steps_per_frame if steps_per_frame > 0 else step_duration
+                    self.step_times.append(avg_step_duration)
+                    if len(self.step_times) > self.max_step_history:
+                        self.step_times.pop(0)
             
             # Draw everything
             self.screen.fill(self.colors['background'])

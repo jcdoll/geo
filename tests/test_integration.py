@@ -177,22 +177,24 @@ def test_visualization_data_consistency():
     sim = GeologySimulation(width=10, height=8)
     
     # Get initial visualization data
-    colors1, temp1, pressure1 = sim.get_visualization_data()
+    colors1, temp1, pressure1, power1 = sim.get_visualization_data()
     
     # Data should match simulation arrays
     np.testing.assert_array_equal(temp1, sim.temperature)
     np.testing.assert_array_equal(pressure1, sim.pressure)
+    np.testing.assert_array_equal(power1, sim.power_density)
     
     # Apply changes and step forward
     sim.add_heat_source(5, 4, 2, 900)
     sim.step_forward()
     
     # Get new visualization data
-    colors2, temp2, pressure2 = sim.get_visualization_data()
+    colors2, temp2, pressure2, power2 = sim.get_visualization_data()
     
     # Should still match simulation arrays
     np.testing.assert_array_equal(temp2, sim.temperature)
     np.testing.assert_array_equal(pressure2, sim.pressure)
+    np.testing.assert_array_equal(power2, sim.power_density)
     
     # Data should have changed
     assert not np.array_equal(temp1, temp2)  # Temperature should change

@@ -88,6 +88,9 @@ class GeologySimulation:
         self.pressure_offset = np.zeros((height, width), dtype=np.float64)  # User-applied pressure changes
         self.age = np.zeros((height, width), dtype=np.float64)
         
+        # Power density tracking for visualization (W/m³)
+        self.power_density = np.zeros((height, width), dtype=np.float64)
+        
         # Derived properties (computed from material types)
         self.density = np.zeros((height, width), dtype=np.float64)
         self.thermal_conductivity = np.zeros((height, width), dtype=np.float64)
@@ -249,6 +252,9 @@ class GeologySimulation:
         # Start with current temperature
         new_temp = self.temperature.copy()
         
+        # Reset power density tracking
+        self.power_density.fill(0.0)
+        
         # Skip cells that are space
         non_space_mask = (self.material_types != MaterialType.SPACE)
         
@@ -272,8 +278,25 @@ class GeologySimulation:
         temp_laplacian = ndimage.convolve(self.temperature, kernel, mode='constant', cval=0)
         
         # Calculate temperature changes (vectorized)
-        scaling_factor = self.dt * self.seconds_per_year * 0.0001 / (self.cell_size ** 2)
-        temp_change = thermal_diffusivity * temp_laplacian * scaling_factor
+        # Proper thermal diffusion: α * dt / (dx²)
+        # For numerical stability, we need to ensure the coefficient is < 0.5 (CFL condition)
+        max_alpha = np.max(thermal_diffusivity[thermal_diffusivity > 0]) if np.any(thermal_diffusivity > 0) else 1e-6
+        dt_seconds = self.dt * self.seconds_per_year
+        stability_factor = min(0.25, (0.5 * self.cell_size ** 2) / (max_alpha * dt_seconds))
+        scaling_factor = stability_factor * thermal_diffusivity * dt_seconds / (self.cell_size ** 2)
+        temp_change = scaling_factor * temp_laplacian
+        
+        # Calculate power density from heat diffusion (W/m³)
+        # Power = ρ × cp × ΔT / Δt
+        cell_volume = self.cell_size ** 3
+        mass_valid = valid_thermal & non_space_mask
+        if np.any(mass_valid):
+            power_from_diffusion = np.zeros_like(self.power_density)
+            power_from_diffusion[mass_valid] = (
+                self.density[mass_valid] * self.specific_heat[mass_valid] * 
+                temp_change[mass_valid] / dt_seconds
+            )
+            self.power_density += power_from_diffusion
         
         # Apply changes only to non-space cells
         new_temp[non_space_mask] += temp_change[non_space_mask]
@@ -282,7 +305,7 @@ class GeologySimulation:
         self._apply_radiative_cooling(new_temp, non_space_mask)
         
         # Ensure space stays at cosmic background temperature
-        new_temp[~non_space_mask] = 2.7  # Kelvin
+        new_temp[~non_space_mask] = 2.7
         
         # Safety check: prevent temperatures below absolute zero
         new_temp = np.maximum(new_temp, 0.1)
@@ -322,17 +345,26 @@ class GeologySimulation:
             power_per_area = emissivity * stefan_boltzmann * (T_valid**4 - T_space**4)
             
             # Temperature change calculation (vectorized)
-            energy_loss = power_per_area * self.dt * self.seconds_per_year * (self.cell_size ** 2)
+            dt_seconds = self.dt * self.seconds_per_year
+            energy_loss = power_per_area * dt_seconds * (self.cell_size ** 2)
             mass = density_valid * (self.cell_size ** 3)
             temp_change = -energy_loss / (mass * specific_heat_valid)
+            
+            # Calculate power density from radiative cooling (W/m³)
+            # Convert from power per area to power per volume
+            cell_volume = self.cell_size ** 3
+            power_density_cooling = power_per_area * (self.cell_size ** 2) / cell_volume
+            
+            # Add cooling power to power density tracking (negative = heat loss)
+            cooling_y, cooling_x = cooling_indices
+            valid_y, valid_x = cooling_y[valid_subset], cooling_x[valid_subset]
+            self.power_density[valid_y, valid_x] -= power_density_cooling
             
             # Prevent cooling below space temperature
             max_cooling = T_valid - T_space
             temp_change = np.maximum(temp_change, -max_cooling)
             
             # Apply cooling to the new temperature array
-            cooling_y, cooling_x = cooling_indices
-            valid_y, valid_x = cooling_y[valid_subset], cooling_x[valid_subset]
             new_temp[valid_y, valid_x] += temp_change
 
     def _calculate_center_of_mass(self):
@@ -871,17 +903,35 @@ class GeologySimulation:
         # Stefan-Boltzmann cooling ∝ T⁴, so need balanced internal heating
         # Earth's heat flow ~0.06 W/m² average, ~0.1 W/m² from radioactivity
         
-        # Much more conservative internal heating to prevent runaway magma production
-        # Core heat: remnant from formation + radioactive decay (very deep only)
-        core_heating = 0.05 * np.exp(4.0 * relative_depth)  # K per timestep - very concentrated in deep core
-        # Crustal heat: radioactive decay (K, U, Th in granites) - minimal
-        crustal_heating = 0.02 * relative_depth**2  # K per timestep - quadratic falloff, minimal at surface
-        
-        total_heating = (core_heating + crustal_heating) * self.dt / 2000.0  # Much reduced scaling
-        
-        # Apply heating only to solid materials
-        heat_addition = np.where(solid_mask, total_heating, 0.0)
-        self.temperature += heat_addition
+        # Physics-based radioactive heating (W/m³)
+        # Crustal rocks: ~1-3 µW/m³ from K, U, Th decay
+        # Core: higher due to pressure concentration and primordial heat
+        crustal_heating_rate = 2e-6 * relative_depth**2  # W/m³ - quadratic falloff from center
+        core_heating_rate = 20e-6 * np.exp(3.0 * relative_depth)  # W/m³ - concentrated in deep core
+
+        # Convert power density to temperature change: ΔT = (Power × dt) / (ρ × cp × volume)
+        # Only apply to solid materials (they have meaningful density and specific_heat)
+        cell_volume = self.cell_size ** 3  # m³ per cell
+        dt_seconds = self.dt * self.seconds_per_year
+
+        # Calculate temperature increase from radioactive heating
+        temp_increase = np.zeros_like(self.temperature)
+        valid_heating = solid_mask & (self.density > 0) & (self.specific_heat > 0)
+
+        if np.any(valid_heating):
+            total_power_density = (crustal_heating_rate + core_heating_rate)[valid_heating]  # W/m³
+            mass_per_cell = (self.density * cell_volume)[valid_heating]  # kg
+            specific_heat_values = self.specific_heat[valid_heating]  # J/(kg·K)
+            
+            # ΔT = (Power × time) / (mass × specific_heat)
+            energy_per_cell = total_power_density * cell_volume * dt_seconds  # J
+            temp_increase[valid_heating] = energy_per_cell / (mass_per_cell * specific_heat_values)  # K
+
+        # Apply heating
+        self.temperature += temp_increase
+
+        # Add radioactive heating to power density tracking (positive = heat generation)
+        self.power_density[valid_heating] += total_power_density
     
     def _save_state(self):
         """Save current state for time reversal"""
@@ -894,7 +944,8 @@ class GeologySimulation:
             'pressure': self.pressure.copy(),
             'pressure_offset': self.pressure_offset.copy(),
             'age': self.age.copy(),
-            'time': self.time
+            'time': self.time,
+            'power_density': self.power_density.copy()
         }
         self.history.append(state)
     
@@ -954,6 +1005,7 @@ class GeologySimulation:
             self.pressure_offset = state['pressure_offset']
             self.age = state['age']
             self.time = state['time']
+            self.power_density = state['power_density']
             
             # Mark properties as dirty and update
             self._properties_dirty = True
@@ -1000,8 +1052,8 @@ class GeologySimulation:
         # Recalculate pressure to include the new offset
         self._calculate_planetary_pressure()
     
-    def get_visualization_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Get data for visualization (material colors, temperature, pressure)"""
+    def get_visualization_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Get data for visualization (material colors, temperature, pressure, power)"""
         # Create color array from material types
         colors = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         
@@ -1016,7 +1068,7 @@ class GeologySimulation:
                 props = self.material_db.get_properties(material)
                 colors[mask] = props.color_rgb
         
-        return colors, self.temperature, self.pressure
+        return colors, self.temperature, self.pressure, self.power_density
     
     def get_stats(self) -> dict:
         """Get simulation statistics"""
