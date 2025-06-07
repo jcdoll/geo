@@ -621,7 +621,7 @@ class GeologyVisualizer:
             "  +/-: Change playback speed",
             "  R: Step forward",
             "  T: Step backward",
-            "  1/2/3: Switch display modes",
+            "  1/2/3/4: Switch display modes",
             "  Tab: Cycle sidebar tabs",
             "  Q/W/E: Direct tab selection"
         ]

@@ -68,7 +68,7 @@ def _jit_calculate_pressure(distances, rock_type_ids, planet_radius, cell_size, 
 class GeologySimulation:
     """Main simulation engine for 2D geological processes"""
     
-    def __init__(self, width: int, height: int, cell_size: float = 50.0):
+    def __init__(self, width: int, height: int, cell_size: float = 50.0, quality: int = 1):
         """
         Initialize simulation grid
         
@@ -76,10 +76,14 @@ class GeologySimulation:
             width: Grid width in cells
             height: Grid height in cells  
             cell_size: Size of each cell in meters
+            quality: Quality setting (1=high quality, 2=balanced, 3=fast)
         """
         self.width = width
         self.height = height
         self.cell_size = cell_size  # meters per cell
+        
+        # Performance configuration
+        self._setup_performance_config(quality)
         
         # Core simulation grids
         self.material_types = np.full((height, width), MaterialType.GRANITE, dtype=object)
@@ -133,6 +137,44 @@ class GeologySimulation:
         self._properties_dirty = True
         self._update_material_properties()
         self._calculate_center_of_mass()
+    
+    def _setup_performance_config(self, quality: int):
+        """Setup performance configuration based on quality level"""
+        if quality == 1:
+            # Full quality - maximum accuracy
+            self.process_fraction_mobile = 1.0      # Process all mobile cells
+            self.process_fraction_solid = 1.0       # Process all solid cells  
+            self.process_fraction_air = 1.0         # Process all air cells
+            self.step_interval_differentiation = 1  # Every step
+            self.step_interval_collapse = 1         # Every step
+            self.step_interval_fluid = 1            # Every step
+            self.enable_weathering = True           # Enable weathering
+            self.neighbor_count = 8                 # Use 8 neighbors for full accuracy
+            
+        elif quality == 2:
+            # Balanced quality
+            self.process_fraction_mobile = 0.5      # Process 50% of mobile cells
+            self.process_fraction_solid = 0.5       # Process 50% of solid cells
+            self.process_fraction_air = 0.5         # Process 50% of air cells
+            self.step_interval_differentiation = 2  # Every 2nd step
+            self.step_interval_collapse = 2         # Every 2nd step
+            self.step_interval_fluid = 3            # Every 3rd step
+            self.enable_weathering = False          # Disable weathering
+            self.neighbor_count = 8                 # Use 8 neighbors for good accuracy
+            
+        elif quality == 3:
+            # Fast quality - maximum performance
+            self.process_fraction_mobile = 0.2      # Process 20% of mobile cells
+            self.process_fraction_solid = 0.33     # Process 33% of solid cells
+            self.process_fraction_air = 0.25       # Process 25% of air cells
+            self.step_interval_differentiation = 3  # Every 3rd step
+            self.step_interval_collapse = 4         # Every 4th step
+            self.step_interval_fluid = 5            # Every 5th step
+            self.enable_weathering = False          # Disable weathering
+            self.neighbor_count = 4                 # Use 4 neighbors for performance
+            
+        else:
+            raise ValueError(f"Unknown quality level: {quality}. Use 1 (full), 2 (balanced), or 3 (fast)")
     
     def _setup_neighbors(self):
         """Pre-compute neighbor offset arrays for efficient operations"""
@@ -391,53 +433,43 @@ class GeologySimulation:
             self.total_mass = total_mass
 
     def _calculate_planetary_pressure(self):
-        """Calculate pressure using gravitational model appropriate for a planet"""
+        """Calculate pressure using vectorized gravitational model"""
         # Reset all pressures
         self.pressure.fill(0.0)
         
-        # Get distance array for all cells
+        # Get distance array for all cells (vectorized)
         distances = self._get_distances_from_center()
+        distances_m = distances * self.cell_size
+        distances_m = np.maximum(distances_m, self.cell_size)  # Avoid division by zero
         
-        for y in range(self.height):
-            for x in range(self.width):
-                if self.material_types[y, x] == MaterialType.SPACE:
-                    self.pressure[y, x] = 0.0  # Vacuum
-                    continue
-                
-                # Distance from center of mass
-                distance = distances[y, x]
-                distance_m = distance * self.cell_size  # Convert to meters
-                
-                if distance_m < self.cell_size:  # Avoid division by zero at center
-                    distance_m = self.cell_size
-                
-                # Gravitational acceleration at this point
-                g_local = self.gravity_constant * self.total_mass / (distance_m ** 2)
-                
-                # For atmospheric pressure, use hydrostatic equilibrium
-                if self.material_types[y, x] == MaterialType.AIR:
-                    # Simple atmospheric model - pressure decreases with height
-                    # Height above surface (approximated)
-                    surface_distance = self._get_planet_radius()
-                    height_above_surface = max(0, distance - surface_distance) * self.cell_size
-                    
-                    # Exponential atmosphere
-                    scale_height = 8400  # meters
-                    surface_pressure = 0.1  # MPa (Earth sea level)
-                    self.pressure[y, x] = surface_pressure * np.exp(-height_above_surface / scale_height)
-                else:
-                    # For solid matter, use simplified lithostatic pressure
-                    # This is an approximation - should integrate along gravitational field lines
-                    surface_distance = self._get_planet_radius()
-                    depth = max(0, surface_distance - distance) * self.cell_size  # meters below surface
-                    
-                    if depth > 0:
-                        # Simplified: assume average density and g
-                        avg_density = 3000  # kg/m³ typical crustal density
-                        avg_g = 9.81  # m/s² simplified
-                        self.pressure[y, x] = avg_density * avg_g * depth / 1e6  # Convert to MPa
-                    else:
-                        self.pressure[y, x] = 0.1  # Surface pressure
+        # Create masks for different material types (vectorized)
+        space_mask = (self.material_types == MaterialType.SPACE)
+        air_mask = (self.material_types == MaterialType.AIR)
+        solid_mask = ~(space_mask | air_mask)
+        
+        # Space cells: vacuum pressure (already zero)
+        # self.pressure[space_mask] = 0.0  # Already zero from fill
+        
+        # Air cells: exponential atmosphere (vectorized)
+        if np.any(air_mask):
+            surface_distance = self._get_planet_radius()
+            height_above_surface = np.maximum(0, distances[air_mask] - surface_distance) * self.cell_size
+            scale_height = 8400  # meters
+            surface_pressure = 0.1  # MPa
+            self.pressure[air_mask] = surface_pressure * np.exp(-height_above_surface / scale_height)
+        
+        # Solid materials: lithostatic pressure (vectorized)
+        if np.any(solid_mask):
+            surface_distance = self._get_planet_radius()
+            depth = np.maximum(0, surface_distance - distances[solid_mask]) * self.cell_size
+            
+            # Use vectorized calculation for depth-based pressure
+            avg_density = 3000  # kg/m³
+            avg_g = 9.81  # m/s²
+            lithostatic_pressure = avg_density * avg_g * depth / 1e6  # Convert to MPa
+            surface_pressure = 0.1  # MPa
+            
+            self.pressure[solid_mask] = np.maximum(surface_pressure, lithostatic_pressure)
         
         # Add user-applied pressure offsets
         self.pressure += self.pressure_offset
@@ -580,25 +612,33 @@ class GeologySimulation:
             self._last_differentiation_stats = {'mobile_cells': 0, 'swaps': 0, 'changes_made': False, 'swap_rate': '0/0'}
             return False
         
-        # Pre-calculate temperature factors for all cells (vectorized)
+        # Process subset of mobile cells based on performance configuration
+        mobile_coords = np.where(mobile_mask)
+        total_mobile = len(mobile_coords[0])
+        
+        # Calculate sample size based on performance settings
+        sample_size = max(1, int(total_mobile * self.process_fraction_mobile))
+        if sample_size >= total_mobile:
+            cell_indices = np.arange(total_mobile)
+            np.random.shuffle(cell_indices)
+        else:
+            cell_indices = np.random.choice(total_mobile, size=sample_size, replace=False)
+        
+        # Pre-calculate temperature factors only for cells we'll process
         temp_factors = self._calculate_temperature_factors(mobile_threshold)
         
         swap_count = 0
         changes_made = False
         
-        # Process only mobile cells (much smaller loop) - randomize order to reduce grid artifacts
-        mobile_coords = np.where(mobile_mask)
-        cell_indices = np.arange(len(mobile_coords[0]))
-        np.random.shuffle(cell_indices)  # Random processing order
-        
+        # Process sampled mobile cells
         for i in cell_indices:
             y, x = mobile_coords[0][i], mobile_coords[1][i]
             current_density = self.density[y, x]
             current_distance = distances[y, x]
             current_temp_factor = temp_factors[y, x]
             
-            # Get randomized neighbors to avoid grid artifacts
-            neighbor_offsets = self._get_neighbors(8, shuffle=True)  # 8 neighbors, randomized
+            # Use configurable neighbor count based on quality setting
+            neighbor_offsets = self._get_neighbors(self.neighbor_count, shuffle=True)
             
             # Check neighbors
             for dy, dx in neighbor_offsets:
@@ -614,14 +654,9 @@ class GeologySimulation:
                                  (neighbor_distance > current_distance and neighbor_density > current_density))
                     
                     if should_swap:
-                        # Calculate swap probability with circular bias
+                        # Simplified swap probability calculation
                         density_diff = abs(current_density - neighbor_density)
-                        
-                        # Add circular bias - prefer swaps that improve circularity
-                        distance_diff = abs(neighbor_distance - current_distance)
-                        circular_bias = min(2.0, distance_diff / 5.0)  # Bonus for large distance differences
-                        
-                        swap_probability = min(0.5, (density_diff / 1000.0) * current_temp_factor * circular_bias)
+                        swap_probability = min(0.3, (density_diff / 2000.0) * current_temp_factor)
                         
                         if np.random.random() < swap_probability:
                             # Swap material types
@@ -635,13 +670,13 @@ class GeologySimulation:
             'mobile_cells': int(mobile_cells),
             'swaps': swap_count,
             'changes_made': changes_made,
-            'swap_rate': f"{swap_count}/{mobile_cells}" if mobile_cells > 0 else "0/0"
+            'swap_rate': f"{swap_count}/{sample_size}" if sample_size > 0 else "0/0"
         }
         
         return changes_made
     
     def _apply_gravitational_collapse(self):
-        """Apply gravitational collapse - materials fall into air cavities (fast, multi-step falling)"""
+        """Apply gravitational collapse - materials fall into air cavities (simplified for performance)"""
         changes_made = False
         
         # Get distance array for gravitational direction
@@ -649,8 +684,8 @@ class GeologySimulation:
         fixed_center_y = self.height / 2.0
         distances = self._get_distances_from_center(fixed_center_x, fixed_center_y)
         
-        # Multiple passes to allow materials to fall multiple steps per frame
-        max_fall_steps = 5  # Allow materials to fall up to 5 cells per timestep (more realistic)
+        # Reduced to 2 fall steps for better performance
+        max_fall_steps = 2
         
         for fall_step in range(max_fall_steps):
             step_changes = False
@@ -662,9 +697,14 @@ class GeologySimulation:
             if len(solid_coords[0]) == 0:
                 break
             
-            # Randomize processing order to avoid artifacts
-            cell_indices = np.arange(len(solid_coords[0]))
-            np.random.shuffle(cell_indices)
+            # Process subset of solid materials based on performance configuration
+            total_solid = len(solid_coords[0])
+            sample_size = max(1, int(total_solid * self.process_fraction_solid))
+            if sample_size >= total_solid:
+                cell_indices = np.arange(total_solid)
+                np.random.shuffle(cell_indices)
+            else:
+                cell_indices = np.random.choice(total_solid, size=sample_size, replace=False)
             
             for i in cell_indices:
                 y, x = solid_coords[0][i], solid_coords[1][i]
@@ -675,8 +715,8 @@ class GeologySimulation:
                     
                 current_distance = distances[y, x]
                 
-                # Get randomized neighbors to avoid grid artifacts
-                neighbor_offsets = self._get_neighbors(8, shuffle=True)  # 8 neighbors, randomized
+                # Use configurable neighbor count based on quality setting
+                neighbor_offsets = self._get_neighbors(self.neighbor_count, shuffle=True)
                 
                 best_collapse_target = None
                 best_distance = current_distance
@@ -697,8 +737,8 @@ class GeologySimulation:
                                 best_collapse_target = (ny, nx)
                                 best_distance = neighbor_distance
                 
-                # High probability for immediate fall (gravity acts quickly on unsupported materials)
-                fall_probability = 0.9 if fall_step == 0 else 0.7  # High initial fall, slightly lower for cascading
+                # Reduced fall probability for performance while maintaining behavior
+                fall_probability = 0.5 if fall_step == 0 else 0.3
                 
                 if best_collapse_target and np.random.random() < fall_probability:
                     ny, nx = best_collapse_target
@@ -708,7 +748,7 @@ class GeologySimulation:
                     self.material_types[ny, nx] = self.material_types[y, x]
                     self.material_types[y, x] = displaced_material  # Displaced material moves up
                     
-                    # Also transfer temperature (material carries its heat)
+                    # Transfer temperature (simplified)
                     self.temperature[ny, nx] = self.temperature[y, x]
                     self.temperature[y, x] = (self.temperature[y, x] + 273.15) / 2  # Air is cooler
                     
@@ -722,61 +762,75 @@ class GeologySimulation:
         return changes_made
     
     def _apply_fluid_dynamics(self):
-        """Apply air migration and cavity filling (water vaporization now handled by metamorphic system)"""
+        """Apply air migration and cavity filling"""
         changes_made = False
-        
-        # Note: Water vaporization is now handled by the metamorphic system in _apply_metamorphism()
         
         # Phase 1: Air migration toward surface (buoyancy through porous materials)
         air_coords = np.where(self.material_types == MaterialType.AIR)
-        distances = self._get_distances_from_center()
-        
-        for i in range(len(air_coords[0])):
-            y, x = air_coords[0][i], air_coords[1][i]
-            current_distance = distances[y, x]
+        if len(air_coords[0]) > 0:
+            distances = self._get_distances_from_center()
             
-            # Check neighbors for migration opportunities (randomized order)
-            neighbors = self._get_neighbors(8, shuffle=True)  # 8 neighbors, randomized
+            # Process subset of air cells based on performance configuration
+            total_air = len(air_coords[0])
+            sample_size = max(1, int(total_air * self.process_fraction_air))
+            if sample_size >= total_air:
+                indices = np.arange(total_air)
+                np.random.shuffle(indices)
+            else:
+                indices = np.random.choice(total_air, size=sample_size, replace=False)
             
-            best_neighbor = None
-            best_distance = current_distance
-            
-            for dy, dx in neighbors:
-                ny, nx = y + dy, x + dx
-                if (0 <= ny < self.height and 0 <= nx < self.width and
-                    self.material_types[ny, nx] != MaterialType.SPACE):
-                    
-                    neighbor_distance = distances[ny, nx]
-                    neighbor_material = self.material_types[ny, nx]
-                    
-                    # Air wants to move toward surface (larger distance from center)
-                    # Can migrate through porous materials or displace other materials
-                    neighbor_props = self.material_db.get_properties(neighbor_material)
-                    can_migrate = (
-                        not neighbor_props.is_solid or  # Move through/displace other materials
-                        (neighbor_distance > current_distance and  # Moving toward surface
-                         neighbor_props.porosity > 0.1)  # Through porous material
-                    )
-                    
-                    if can_migrate and neighbor_distance > best_distance:
-                        best_neighbor = (ny, nx)
-                        best_distance = neighbor_distance
-            
-            # Migrate air toward surface with some probability
-            if best_neighbor and np.random.random() < 0.3:  # 30% migration chance per timestep
-                ny, nx = best_neighbor
-                old_material = self.material_types[ny, nx]
+            for i in indices:
+                y, x = air_coords[0][i], air_coords[1][i]
+                current_distance = distances[y, x]
                 
-                # Swap positions
-                self.material_types[y, x] = old_material
-                self.material_types[ny, nx] = MaterialType.AIR
-                changes_made = True
+                # Check neighbors for migration opportunities (randomized order)
+                neighbors = self._get_neighbors(self.neighbor_count, shuffle=True)
+                
+                best_neighbor = None
+                best_distance = current_distance
+                
+                for dy, dx in neighbors:
+                    ny, nx = y + dy, x + dx
+                    if (0 <= ny < self.height and 0 <= nx < self.width and
+                        self.material_types[ny, nx] != MaterialType.SPACE):
+                        
+                        neighbor_distance = distances[ny, nx]
+                        neighbor_material = self.material_types[ny, nx]
+                        
+                        # Air wants to move toward surface (larger distance from center)
+                        # Can migrate through porous materials or displace other materials
+                        # BUT cannot escape into space
+                        neighbor_props = self.material_db.get_properties(neighbor_material)
+                        can_migrate = (
+                            neighbor_material != MaterialType.SPACE and  # Cannot escape to space
+                            (not neighbor_props.is_solid or  # Move through/displace other materials
+                             (neighbor_distance > current_distance and  # Moving toward surface
+                              neighbor_props.porosity > 0.1))  # Through porous material
+                        )
+                        
+                        if can_migrate and neighbor_distance > best_distance:
+                            best_neighbor = (ny, nx)
+                            best_distance = neighbor_distance
+                
+                # Migrate air toward surface with some probability
+                if best_neighbor and np.random.random() < 0.3:  # 30% migration chance per timestep
+                    ny, nx = best_neighbor
+                    old_material = self.material_types[ny, nx]
+                    
+                    # Swap positions
+                    self.material_types[y, x] = old_material
+                    self.material_types[ny, nx] = MaterialType.AIR
+                    changes_made = True
         
         # Phase 2: Cavity filling - materials gradually flow into non-solid spaces
         # This simulates geological settling and compaction over time
+        # Applies to ALL non-solid materials: AIR, WATER, MAGMA, WATER_VAPOR, SPACE
         for y in range(1, self.height-1):
             for x in range(1, self.width-1):
-                current_props = self.material_db.get_properties(self.material_types[y, x])
+                current_material = self.material_types[y, x]
+                current_props = self.material_db.get_properties(current_material)
+                
+                # Handle all non-solid materials (air, water, magma, vapor, space)
                 if not current_props.is_solid:
                     # Look for solid material neighbors that could "fall" into this cavity
                     neighbors = self._get_neighbors(4, shuffle=True)  # 4 cardinal neighbors, randomized
@@ -787,14 +841,16 @@ class GeologySimulation:
                             neighbor_material = self.material_types[ny, nx]
                             
                             # Solid materials can gradually fill cavities (very slow process)
+                            # But cannot displace materials into space
                             neighbor_props = self.material_db.get_properties(neighbor_material)
                             if (neighbor_props.is_solid and neighbor_material != MaterialType.SPACE and
+                                current_material != MaterialType.SPACE and  # Don't displace materials into space
                                 np.random.random() < 0.05):  # 5% chance - slow geological process
                                 
-                                # Material flows into cavity
-                                displaced_material = self.material_types[y, x]
+                                # Material flows into cavity - displaced non-solid material moves to source
+                                displaced_material = current_material
                                 self.material_types[y, x] = neighbor_material
-                                self.material_types[ny, nx] = displaced_material  # Displaced material moves to where material came from
+                                self.material_types[ny, nx] = displaced_material
                                 changes_made = True
                                 break
         
@@ -957,30 +1013,39 @@ class GeologySimulation:
         # Save state for potential reversal
         self._save_state()
         
-        # Use efficient heat diffusion
+        # Core physics (every step)
         self.temperature = self._heat_diffusion()
-        
-        # Add internal heat generation
         self._apply_internal_heat_generation()
         
-        # Update center of mass and pressure
+        # Update center of mass and pressure (every step - needed for thermal calculations)
         self._calculate_center_of_mass()
         self._calculate_planetary_pressure()
         
-        # Apply metamorphic processes
+        # Apply metamorphic processes (every step - fundamental)
         metamorphic_changes = self._apply_metamorphism()
         
-        # Apply gravitational differentiation
-        differentiation_changes = self._apply_gravitational_differentiation()
+        # Run geological processes based on performance configuration
+        step_count = int(self.time / self.dt)
         
-        # Apply gravitational collapse
-        collapse_changes = self._apply_gravitational_collapse()
+        # Gravitational differentiation
+        differentiation_changes = False
+        if step_count % self.step_interval_differentiation == 0:
+            differentiation_changes = self._apply_gravitational_differentiation()
         
-        # Apply water vaporization and air migration
-        fluid_changes = self._apply_fluid_dynamics()
+        # Gravitational collapse
+        collapse_changes = False
+        if step_count % self.step_interval_collapse == 0:
+            collapse_changes = self._apply_gravitational_collapse()
         
-        # Apply surface weathering processes
-        weathering_changes = self._apply_weathering()
+        # Air migration
+        fluid_changes = False
+        if step_count % self.step_interval_fluid == 0:
+            fluid_changes = self._apply_fluid_dynamics()
+        
+        # Weathering (configurable)
+        weathering_changes = False
+        if self.enable_weathering and step_count % 10 == 0:  # Every 10th step when enabled
+            weathering_changes = self._apply_weathering()
         
         # Update material properties if material types changed
         if metamorphic_changes or differentiation_changes or collapse_changes or fluid_changes or weathering_changes:
