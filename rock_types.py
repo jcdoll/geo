@@ -64,31 +64,31 @@ class RockDatabase:
                 density=2650, thermal_conductivity=2.9, specific_heat=790,
                 melting_point=1215, strength=200, porosity=0.01,
                 metamorphic_threshold_temp=650, metamorphic_threshold_pressure=200,
-                color_rgb=(200, 180, 160)
+                color_rgb=(255, 182, 193)  # Light pink - felsic igneous
             ),
             RockType.BASALT: RockProperties(
                 density=3000, thermal_conductivity=1.7, specific_heat=840,
                 melting_point=1200, strength=300, porosity=0.1,
                 metamorphic_threshold_temp=500, metamorphic_threshold_pressure=150,
-                color_rgb=(60, 60, 60)
+                color_rgb=(47, 79, 79)  # Dark slate gray - mafic igneous
             ),
             RockType.OBSIDIAN: RockProperties(
                 density=2400, thermal_conductivity=1.2, specific_heat=840,
                 melting_point=1000, strength=50, porosity=0.01,
                 metamorphic_threshold_temp=600, metamorphic_threshold_pressure=100,
-                color_rgb=(20, 20, 20)
+                color_rgb=(0, 0, 0)  # Black - volcanic glass
             ),
             RockType.PUMICE: RockProperties(
                 density=600, thermal_conductivity=0.5, specific_heat=840,
                 melting_point=1000, strength=20, porosity=0.8,
                 metamorphic_threshold_temp=600, metamorphic_threshold_pressure=100,
-                color_rgb=(200, 200, 200)
+                color_rgb=(245, 245, 245)  # White gray - vesicular volcanic
             ),
             RockType.ANDESITE: RockProperties(
                 density=2800, thermal_conductivity=1.8, specific_heat=840,
                 melting_point=1150, strength=250, porosity=0.05,
                 metamorphic_threshold_temp=550, metamorphic_threshold_pressure=150,
-                color_rgb=(100, 80, 70)
+                color_rgb=(105, 105, 105)  # Dim gray - intermediate volcanic
             ),
             
             # Sedimentary rocks
@@ -96,25 +96,25 @@ class RockDatabase:
                 density=2200, thermal_conductivity=2.5, specific_heat=830,
                 melting_point=1650, strength=100, porosity=0.2,
                 metamorphic_threshold_temp=300, metamorphic_threshold_pressure=50,
-                color_rgb=(220, 200, 150)
+                color_rgb=(238, 203, 173)  # Tan - sandstone
             ),
             RockType.LIMESTONE: RockProperties(
                 density=2600, thermal_conductivity=2.2, specific_heat=880,
                 melting_point=825, strength=150, porosity=0.15,
                 metamorphic_threshold_temp=400, metamorphic_threshold_pressure=100,
-                color_rgb=(240, 240, 220)
+                color_rgb=(255, 255, 224)  # Light yellow - limestone
             ),
             RockType.SHALE: RockProperties(
                 density=2400, thermal_conductivity=1.5, specific_heat=800,
                 melting_point=1200, strength=80, porosity=0.3,
                 metamorphic_threshold_temp=250, metamorphic_threshold_pressure=30,
-                color_rgb=(100, 100, 80)
+                color_rgb=(139, 69, 19)  # Brown - mudstone/shale
             ),
             RockType.CONGLOMERATE: RockProperties(
                 density=2300, thermal_conductivity=2.0, specific_heat=820,
                 melting_point=1500, strength=120, porosity=0.25,
                 metamorphic_threshold_temp=350, metamorphic_threshold_pressure=75,
-                color_rgb=(150, 140, 120)
+                color_rgb=(205, 133, 63)  # Peru brown - conglomerate
             ),
             
             # Metamorphic rocks
@@ -122,31 +122,31 @@ class RockDatabase:
                 density=2700, thermal_conductivity=3.0, specific_heat=790,
                 melting_point=1250, strength=250, porosity=0.02,
                 metamorphic_threshold_temp=800, metamorphic_threshold_pressure=400,
-                color_rgb=(180, 160, 140)
+                color_rgb=(128, 128, 128)  # Gray - high-grade metamorphic
             ),
             RockType.SCHIST: RockProperties(
                 density=2800, thermal_conductivity=2.8, specific_heat=780,
                 melting_point=1300, strength=200, porosity=0.05,
                 metamorphic_threshold_temp=700, metamorphic_threshold_pressure=300,
-                color_rgb=(120, 140, 120)
+                color_rgb=(85, 107, 47)  # Dark olive green - medium-grade metamorphic
             ),
             RockType.SLATE: RockProperties(
                 density=2700, thermal_conductivity=2.0, specific_heat=800,
                 melting_point=1400, strength=180, porosity=0.03,
                 metamorphic_threshold_temp=500, metamorphic_threshold_pressure=200,
-                color_rgb=(80, 80, 100)
+                color_rgb=(112, 128, 144)  # Slate gray - low-grade metamorphic
             ),
             RockType.MARBLE: RockProperties(
                 density=2650, thermal_conductivity=2.5, specific_heat=880,
                 melting_point=1000, strength=120, porosity=0.02,
                 metamorphic_threshold_temp=600, metamorphic_threshold_pressure=250,
-                color_rgb=(250, 250, 240)
+                color_rgb=(255, 250, 250)  # Snow white - metamorphosed limestone
             ),
             RockType.QUARTZITE: RockProperties(
                 density=2650, thermal_conductivity=6.0, specific_heat=800,
                 melting_point=1700, strength=300, porosity=0.01,
                 metamorphic_threshold_temp=800, metamorphic_threshold_pressure=500,
-                color_rgb=(240, 230, 210)
+                color_rgb=(255, 228, 196)  # Bisque - metamorphosed sandstone
             ),
             
             # Special states
@@ -154,19 +154,19 @@ class RockDatabase:
                 density=2800, thermal_conductivity=4.0, specific_heat=1200,
                 melting_point=2000, strength=0, porosity=0,
                 metamorphic_threshold_temp=2000, metamorphic_threshold_pressure=0,
-                color_rgb=(255, 100, 0)
+                color_rgb=(255, 69, 0)  # Red orange - molten rock
             ),
             RockType.WATER: RockProperties(
                 density=1000, thermal_conductivity=0.6, specific_heat=4186,
                 melting_point=0, strength=0, porosity=1,
                 metamorphic_threshold_temp=1000, metamorphic_threshold_pressure=0,
-                color_rgb=(100, 150, 255)
+                color_rgb=(30, 144, 255)  # Dodger blue - water
             ),
             RockType.AIR: RockProperties(
                 density=1.2, thermal_conductivity=0.024, specific_heat=1005,
                 melting_point=-200, strength=0, porosity=1,
                 metamorphic_threshold_temp=1000, metamorphic_threshold_pressure=0,
-                color_rgb=(200, 220, 255)
+                color_rgb=(135, 206, 235)  # Sky blue - atmosphere
             ),
         }
     
@@ -238,6 +238,9 @@ class RockDatabase:
     
     def should_melt(self, rock_type: RockType, temperature: float) -> bool:
         """Check if rock should melt at given temperature"""
+        # Magma is already molten, so it doesn't "melt"
+        if rock_type == RockType.MAGMA:
+            return False
         return temperature >= self.properties[rock_type].melting_point
     
     def get_cooling_product(self, temperature: float, pressure: float, composition: str = "mafic") -> RockType:
