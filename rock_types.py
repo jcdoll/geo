@@ -33,7 +33,9 @@ class RockType(Enum):
     # Special states
     MAGMA = "magma"
     WATER = "water"
+    ICE = "ice"
     AIR = "air"
+    SPACE = "space"
 
 @dataclass
 class RockProperties:
@@ -158,15 +160,27 @@ class RockDatabase:
             ),
             RockType.WATER: RockProperties(
                 density=1000, thermal_conductivity=0.6, specific_heat=4186,
-                melting_point=0, strength=0, porosity=1,
-                metamorphic_threshold_temp=1000, metamorphic_threshold_pressure=0,
+                melting_point=float('inf'), strength=0, porosity=1,  # Water doesn't melt into rock magma
+                metamorphic_threshold_temp=float('inf'), metamorphic_threshold_pressure=float('inf'),
                 color_rgb=(30, 144, 255)  # Dodger blue - water
+            ),
+            RockType.ICE: RockProperties(
+                density=920, thermal_conductivity=2.2, specific_heat=2108,
+                melting_point=0, strength=10, porosity=0.1,  # Ice melts at 0°C to become water
+                metamorphic_threshold_temp=float('inf'), metamorphic_threshold_pressure=float('inf'),
+                color_rgb=(173, 216, 230)  # Light blue - ice
             ),
             RockType.AIR: RockProperties(
                 density=1.2, thermal_conductivity=0.024, specific_heat=1005,
-                melting_point=-200, strength=0, porosity=1,
-                metamorphic_threshold_temp=1000, metamorphic_threshold_pressure=0,
-                color_rgb=(135, 206, 235)  # Sky blue - atmosphere
+                melting_point=float('inf'), strength=0, porosity=1,  # Air doesn't melt
+                metamorphic_threshold_temp=float('inf'), metamorphic_threshold_pressure=float('inf'),
+                color_rgb=(245, 245, 255)  # Very light blue/white - clearly distinguishable as gas
+            ),
+            RockType.SPACE: RockProperties(
+                density=0.0, thermal_conductivity=0.0, specific_heat=0.0,
+                melting_point=float('inf'), strength=0, porosity=1,  # Space doesn't melt
+                metamorphic_threshold_temp=float('inf'), metamorphic_threshold_pressure=float('inf'),
+                color_rgb=(0, 0, 0)  # Black - vacuum of space
             ),
         }
     
@@ -229,19 +243,23 @@ class RockDatabase:
         transitions = self.metamorphic_transitions[rock_type]
         
         # Find the highest grade metamorphic product that conditions allow
+        # Convert temperature from Kelvin to Celsius for comparison with thresholds
+        temp_celsius = temperature - 273.15
         best_product = None
         for product, min_temp, min_pressure in transitions:
-            if temperature >= min_temp and pressure >= min_pressure:
+            if temp_celsius >= min_temp and pressure >= min_pressure:
                 best_product = product
         
         return best_product
     
     def should_melt(self, rock_type: RockType, temperature: float) -> bool:
-        """Check if rock should melt at given temperature"""
+        """Check if rock should melt at given temperature (temperature in Kelvin)"""
         # Magma is already molten, so it doesn't "melt"
         if rock_type == RockType.MAGMA:
             return False
-        return temperature >= self.properties[rock_type].melting_point
+        # Convert melting point from Celsius to Kelvin for comparison
+        melting_point_k = self.properties[rock_type].melting_point + 273.15
+        return temperature >= melting_point_k
     
     def get_cooling_product(self, temperature: float, pressure: float, composition: str = "mafic") -> RockType:
         """Determine igneous rock type from cooling magma"""

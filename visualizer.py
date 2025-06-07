@@ -13,7 +13,7 @@ from rock_types import RockType, RockDatabase
 class GeologyVisualizer:
     """Interactive visualizer for geological simulation"""
     
-    def __init__(self, sim_width: int = 100, sim_height: int = 60, window_width: int = 1200, window_height: int = 800):
+    def __init__(self, sim_width: int = 120, sim_height: int = 120, window_width: int = 1200, window_height: int = 800):
         """
         Initialize the visualizer
         
@@ -36,8 +36,12 @@ class GeologyVisualizer:
         self.status_bar_height = 30
         self.sim_area_height = window_height - self.status_bar_height
         
-        self.cell_width = self.main_panel_width // sim_width
-        self.cell_height = self.sim_area_height // sim_height
+        # Calculate cell size to maintain square aspect ratio
+        cell_size_x = self.main_panel_width // sim_width
+        cell_size_y = self.sim_area_height // sim_height
+        self.cell_size = min(cell_size_x, cell_size_y)  # Use smaller dimension for square cells
+        self.cell_width = self.cell_size
+        self.cell_height = self.cell_size
         
         # Initialize pygame
         self.screen = pygame.display.set_mode((window_width, window_height))
@@ -64,7 +68,7 @@ class GeologyVisualizer:
         self.running = True
         self.paused = True  # Start paused
         self.display_mode = 'rocks'  # 'rocks', 'temperature', 'pressure'
-        self.speed_multiplier = 1.0  # 0.5x, 1x, 2x, 4x, 8x
+        self.speed_multiplier = 1.0  # 0.5x, 1x, 2x, 4x, 8x, 16x
         self.base_step_interval = 200  # milliseconds at 1x speed
         self.last_step_time = 0
         
@@ -114,8 +118,8 @@ class GeologyVisualizer:
         y += button_height + spacing
         
         # Speed control buttons
-        speed_buttons = [('0.5x', 0.5), ('1x', 1.0), ('2x', 2.0), ('4x', 4.0), ('8x', 8.0)]
-        speed_width = button_width // 5 - 1
+        speed_buttons = [('0.5x', 0.5), ('1x', 1.0), ('2x', 2.0), ('4x', 4.0), ('8x', 8.0), ('16x', 16.0)]
+        speed_width = button_width // 6 - 1
         for i, (text, speed) in enumerate(speed_buttons):
             buttons.append({
                 'rect': pygame.Rect(x + i * (speed_width + 2), y, speed_width, button_height),
@@ -193,19 +197,27 @@ class GeologyVisualizer:
         if x >= self.main_panel_width or y >= self.window_height or y < self.status_bar_height:
             return
         
-        # Convert screen coordinates to simulation coordinates
-        sim_x = x // self.cell_width
-        sim_y = (y - self.status_bar_height) // self.cell_height
+        # Calculate centering offsets (same as in _draw_simulation)
+        total_sim_width = self.sim_width * self.cell_width
+        total_sim_height = self.sim_height * self.cell_height
+        offset_x = (self.main_panel_width - total_sim_width) // 2
+        offset_y = (self.sim_area_height - total_sim_height) // 2
         
-        if sim_x >= self.sim_width or sim_y >= self.sim_height:
+        # Convert screen coordinates to simulation coordinates (accounting for centering)
+        sim_x = (x - offset_x) // self.cell_width
+        sim_y = (y - self.status_bar_height - offset_y) // self.cell_height
+        
+        if sim_x < 0 or sim_x >= self.sim_width or sim_y < 0 or sim_y >= self.sim_height:
             return
         
         # Apply tool
         if buttons[0]:  # Left mouse button
             if self.mouse_tool == 'heat':
-                self.simulation.add_heat_source(sim_x, sim_y, self.tool_radius, 
-                                               self.simulation.temperature[sim_y, sim_x] + self.tool_intensity)
+                # Add heat in Kelvin - convert tool intensity from Celsius
+                target_temp = self.simulation.temperature[sim_y, sim_x] + self.tool_intensity
+                self.simulation.add_heat_source(sim_x, sim_y, self.tool_radius, target_temp)
             elif self.mouse_tool == 'pressure':
+                # Apply pressure increase in MPa
                 self.simulation.apply_tectonic_stress(sim_x, sim_y, self.tool_radius, self.tool_intensity)
     
     def _get_display_colors(self) -> np.ndarray:
@@ -214,9 +226,10 @@ class GeologyVisualizer:
             colors, _, _ = self.simulation.get_visualization_data()
             return colors
         elif self.display_mode == 'temperature':
-            temp = self.simulation.temperature
+            # Convert from Kelvin to Celsius for visualization
+            temp_celsius = self.simulation.temperature - 273.15
             # Normalize temperature to color range
-            temp_norm = np.clip((temp - np.min(temp)) / (np.max(temp) - np.min(temp) + 1e-10), 0, 1)
+            temp_norm = np.clip((temp_celsius - np.min(temp_celsius)) / (np.max(temp_celsius) - np.min(temp_celsius) + 1e-10), 0, 1)
             colors = np.zeros((self.sim_height, self.sim_width, 3), dtype=np.uint8)
             colors[:, :, 0] = (temp_norm * 255).astype(np.uint8)  # Red channel
             colors[:, :, 2] = ((1 - temp_norm) * 255).astype(np.uint8)  # Blue channel
@@ -234,21 +247,107 @@ class GeologyVisualizer:
         """Draw the simulation grid"""
         colors = self._get_display_colors()
         
+        # Calculate centering offsets for the simulation area
+        total_sim_width = self.sim_width * self.cell_width
+        total_sim_height = self.sim_height * self.cell_height
+        
+        # Center the simulation within the main panel
+        offset_x = (self.main_panel_width - total_sim_width) // 2
+        offset_y = (self.sim_area_height - total_sim_height) // 2
+        
         # Create surface for faster blitting
         sim_surface = pygame.Surface((self.main_panel_width, self.sim_area_height))
+        sim_surface.fill(self.colors['background'])  # Fill with background color
         
         for y in range(self.sim_height):
             for x in range(self.sim_width):
                 color = tuple(colors[y, x])
                 rect = pygame.Rect(
-                    x * self.cell_width, 
-                    y * self.cell_height,
+                    offset_x + x * self.cell_width, 
+                    offset_y + y * self.cell_height,
                     self.cell_width, 
                     self.cell_height
                 )
                 pygame.draw.rect(sim_surface, color, rect)
         
         self.screen.blit(sim_surface, (0, self.status_bar_height))
+        
+        # Draw color bar for temperature and pressure modes
+        if self.display_mode in ['temperature', 'pressure']:
+            self._draw_color_bar()
+    
+    def _draw_color_bar(self):
+        """Draw color bar legend for temperature or pressure mode"""
+        bar_width = 20
+        bar_height = 200
+        bar_x = self.main_panel_width - bar_width - 80  # More space from sidebar
+        bar_y = self.status_bar_height + 50  # Below status bar
+        
+        # Get min/max values and create color gradient
+        if self.display_mode == 'temperature':
+            temp_celsius = self.simulation.temperature - 273.15
+            min_val = np.min(temp_celsius)
+            max_val = np.max(temp_celsius)
+            unit = "°C"
+            
+            # Draw gradient bar (blue to red for temperature)
+            for i in range(bar_height):
+                normalized = i / bar_height
+                color = (
+                    int(normalized * 255),  # Red
+                    0,                      # Green
+                    int((1 - normalized) * 255)  # Blue
+                )
+                pygame.draw.line(self.screen, color, 
+                               (bar_x, bar_y + bar_height - i - 1), 
+                               (bar_x + bar_width, bar_y + bar_height - i - 1))
+                
+        elif self.display_mode == 'pressure':
+            pressure = self.simulation.pressure
+            min_val = np.min(pressure)
+            max_val = np.max(pressure)
+            unit = "MPa"
+            
+            # Draw gradient bar (black to green for pressure)
+            for i in range(bar_height):
+                normalized = i / bar_height
+                color = (
+                    0,                      # Red
+                    int(normalized * 255),  # Green
+                    int((1 - normalized) * 128)  # Blue
+                )
+                pygame.draw.line(self.screen, color, 
+                               (bar_x, bar_y + bar_height - i - 1), 
+                               (bar_x + bar_width, bar_y + bar_height - i - 1))
+        
+        # Draw border around color bar
+        pygame.draw.rect(self.screen, self.colors['text'], 
+                        (bar_x, bar_y, bar_width, bar_height), 2)
+        
+        # Draw scale labels
+        label_x = bar_x + bar_width + 5
+        
+        # Max value at top
+        max_text = f"{max_val:.0f}{unit}"
+        max_surface = self.small_font.render(max_text, True, self.colors['text'])
+        self.screen.blit(max_surface, (label_x, bar_y - 5))
+        
+        # Mid value in middle
+        mid_val = (min_val + max_val) / 2
+        mid_text = f"{mid_val:.0f}{unit}"
+        mid_surface = self.small_font.render(mid_text, True, self.colors['text'])
+        self.screen.blit(mid_surface, (label_x, bar_y + bar_height // 2 - 10))
+        
+        # Min value at bottom
+        min_text = f"{min_val:.0f}{unit}"
+        min_surface = self.small_font.render(min_text, True, self.colors['text'])
+        self.screen.blit(min_surface, (label_x, bar_y + bar_height - 15))
+        
+        # Draw title above the bar
+        title = "Temperature" if self.display_mode == 'temperature' else "Pressure"
+        title_surface = self.small_font.render(title, True, self.colors['text'])
+        title_x = bar_x + (bar_width - title_surface.get_width()) // 2
+        self.screen.blit(title_surface, (title_x, bar_y - 25))
     
     def _draw_status_bar(self):
         """Draw status information at the top"""
@@ -466,13 +565,13 @@ class GeologyVisualizer:
                 self.sidebar_tab = 'controls'
             elif event.key == pygame.K_MINUS or event.key == pygame.K_KP_MINUS:
                 # Decrease speed
-                speeds = [0.5, 1.0, 2.0, 4.0, 8.0]
+                speeds = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
                 current_idx = speeds.index(self.speed_multiplier) if self.speed_multiplier in speeds else 1
                 if current_idx > 0:
                     self.speed_multiplier = speeds[current_idx - 1]
             elif event.key == pygame.K_PLUS or event.key == pygame.K_EQUALS or event.key == pygame.K_KP_PLUS:
                 # Increase speed
-                speeds = [0.5, 1.0, 2.0, 4.0, 8.0]
+                speeds = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
                 current_idx = speeds.index(self.speed_multiplier) if self.speed_multiplier in speeds else 1
                 if current_idx < len(speeds) - 1:
                     self.speed_multiplier = speeds[current_idx + 1]
@@ -486,7 +585,7 @@ class GeologyVisualizer:
             self.tool_intensity = max(1, self.tool_intensity + event.y * 10)
         else:
             # Adjust radius
-            self.tool_radius = max(1, min(10, self.tool_radius + event.y))
+            self.tool_radius = max(1, min(20, self.tool_radius + event.y))
     
     def run(self):
         """Main visualization loop"""
