@@ -7,9 +7,9 @@ import numpy as np
 from numba import jit
 from typing import Tuple, Optional
 try:
-    from .rock_types import RockType, RockDatabase
+    from .materials import MaterialType, MaterialDatabase
 except ImportError:
-    from rock_types import RockType, RockDatabase
+    from materials import MaterialType, MaterialDatabase
 from scipy import ndimage
 
 # JIT-compiled performance-critical functions
@@ -82,13 +82,13 @@ class GeologySimulation:
         self.cell_size = cell_size  # meters per cell
         
         # Core simulation grids
-        self.rock_types = np.full((height, width), RockType.GRANITE, dtype=object)
+        self.material_types = np.full((height, width), MaterialType.GRANITE, dtype=object)
         self.temperature = np.zeros((height, width), dtype=np.float64)
         self.pressure = np.zeros((height, width), dtype=np.float64)
         self.pressure_offset = np.zeros((height, width), dtype=np.float64)  # User-applied pressure changes
         self.age = np.zeros((height, width), dtype=np.float64)
         
-        # Derived properties (computed from rock types)
+        # Derived properties (computed from material types)
         self.density = np.zeros((height, width), dtype=np.float64)
         self.thermal_conductivity = np.zeros((height, width), dtype=np.float64)
         self.specific_heat = np.zeros((height, width), dtype=np.float64)
@@ -108,8 +108,8 @@ class GeologySimulation:
         self.total_mass = 0.0  # Will be calculated
         self.center_of_mass = (width / 2, height / 2)  # Will be calculated dynamically
         
-        # Rock database
-        self.rock_db = RockDatabase()
+        # Material database
+        self.material_db = MaterialDatabase()
         
         # History for time reversal
         self.max_history = 1000
@@ -148,7 +148,7 @@ class GeologySimulation:
     def _setup_planetary_conditions(self):
         """Set up initial planetary conditions with emergent circular shape"""
         # Initialize everything as space
-        self.rock_types.fill(RockType.SPACE)
+        self.material_types.fill(MaterialType.SPACE)
         self.temperature.fill(2.7)  # Space temperature (~3K cosmic background radiation)
         self.pressure.fill(0.0)  # Vacuum
         
@@ -163,7 +163,7 @@ class GeologySimulation:
                 distance = np.sqrt((x - center_x)**2 + (y - center_y)**2)
                 
                 if distance <= planet_radius:
-                    # Within planet - set rock type and temperature based on distance from center
+                    # Within planet - set material type and temperature based on distance from center
                     relative_depth = distance / planet_radius  # 0 at center, 1 at surface
                     
                     # Temperature: "dirty iceball" formation - cold surface, hot core (in Kelvin)
@@ -180,29 +180,29 @@ class GeologySimulation:
                     
                     # "Dirty iceball" formation - include ice pockets in outer regions
                     if relative_depth > 0.6:  # Outer 40% of planet - more ice
-                        rock_types = [
-                            RockType.GRANITE, RockType.BASALT, RockType.SANDSTONE, 
-                            RockType.LIMESTONE, RockType.SHALE, RockType.ICE, RockType.ICE, RockType.ICE  # More ice in outer regions
+                        material_types = [
+                            MaterialType.GRANITE, MaterialType.BASALT, MaterialType.SANDSTONE, 
+                            MaterialType.LIMESTONE, MaterialType.SHALE, MaterialType.ICE, MaterialType.ICE, MaterialType.ICE  # More ice in outer regions
                         ]
                     elif relative_depth > 0.3:  # Middle regions - some ice
-                        rock_types = [
-                            RockType.GRANITE, RockType.BASALT, RockType.GNEISS, 
-                            RockType.SANDSTONE, RockType.LIMESTONE, RockType.SHALE,
-                            RockType.MARBLE, RockType.QUARTZITE, RockType.ICE  # Some ice
+                        material_types = [
+                            MaterialType.GRANITE, MaterialType.BASALT, MaterialType.GNEISS, 
+                            MaterialType.SANDSTONE, MaterialType.LIMESTONE, MaterialType.SHALE,
+                            MaterialType.MARBLE, MaterialType.QUARTZITE, MaterialType.ICE  # Some ice
                         ]
                     else:  # Inner core - mostly rocks, minimal ice
-                        rock_types = [
-                            RockType.GRANITE, RockType.BASALT, RockType.GNEISS, 
-                            RockType.SANDSTONE, RockType.LIMESTONE, RockType.SHALE,
-                            RockType.MARBLE, RockType.QUARTZITE, RockType.SCHIST,
-                            RockType.SLATE, RockType.ANDESITE
+                        material_types = [
+                            MaterialType.GRANITE, MaterialType.BASALT, MaterialType.GNEISS, 
+                            MaterialType.SANDSTONE, MaterialType.LIMESTONE, MaterialType.SHALE,
+                            MaterialType.MARBLE, MaterialType.QUARTZITE, MaterialType.SCHIST,
+                            MaterialType.SLATE, MaterialType.ANDESITE
                         ]
                     
-                    self.rock_types[y, x] = np.random.choice(rock_types)
+                    self.material_types[y, x] = np.random.choice(material_types)
                     
                     # Convert hot material to magma based on temperature
                     if self.temperature[y, x] > 1200 + 273.15:  # Hot enough to melt
-                        self.rock_types[y, x] = RockType.MAGMA
+                        self.material_types[y, x] = MaterialType.MAGMA
                         
                     # Add some surface variation (not perfectly circular)
                     if relative_depth > 0.85:  # Near surface
@@ -211,7 +211,7 @@ class GeologySimulation:
                         if relative_depth + noise > 1.0:
                             # Sometimes extend into space or create atmosphere
                             if np.random.random() < 0.3:  # 30% chance of atmosphere
-                                self.rock_types[y, x] = RockType.AIR
+                                self.material_types[y, x] = MaterialType.AIR
                                 self.temperature[y, x] = surface_temp  # Already in K
         
         # Calculate initial pressure using gravitational model
@@ -222,21 +222,21 @@ class GeologySimulation:
         if not self._properties_dirty:
             return  # Skip if properties haven't changed
         
-        # Get unique rock types to minimize property lookups
-        # Convert to set to avoid sorting issues with RockType enums
-        unique_rocks = set(self.rock_types.flatten())
+        # Get unique material types to minimize property lookups
+        # Convert to set to avoid sorting issues with MaterialType enums
+        unique_materials = set(self.material_types.flatten())
         
-        # Pre-compute properties for each unique rock type
+        # Pre-compute properties for each unique material type
         prop_lookup = {}
-        for rock in unique_rocks:
-            if rock not in self._material_props_cache:
-                props = self.rock_db.get_properties(rock)
-                self._material_props_cache[rock] = (props.density, props.thermal_conductivity, props.specific_heat)
-            prop_lookup[rock] = self._material_props_cache[rock]
+        for material in unique_materials:
+            if material not in self._material_props_cache:
+                props = self.material_db.get_properties(material)
+                self._material_props_cache[material] = (props.density, props.thermal_conductivity, props.specific_heat)
+            prop_lookup[material] = self._material_props_cache[material]
         
         # Vectorized assignment using advanced indexing
-        for rock, (density, k_thermal, c_heat) in prop_lookup.items():
-            mask = (self.rock_types == rock)
+        for material, (density, k_thermal, c_heat) in prop_lookup.items():
+            mask = (self.material_types == material)
             if np.any(mask):
                 self.density[mask] = density
                 self.thermal_conductivity[mask] = k_thermal
@@ -250,7 +250,7 @@ class GeologySimulation:
         new_temp = self.temperature.copy()
         
         # Skip cells that are space
-        non_space_mask = (self.rock_types != RockType.SPACE)
+        non_space_mask = (self.material_types != MaterialType.SPACE)
         
         # Create thermal diffusivity array (vectorized)
         valid_thermal = (self.density > 0) & (self.specific_heat > 0) & (self.thermal_conductivity > 0)
@@ -336,34 +336,28 @@ class GeologySimulation:
             new_temp[valid_y, valid_x] += temp_change
 
     def _calculate_center_of_mass(self):
-        """Calculate center of mass using efficient numpy operations"""
-        # Create mask for non-space cells
-        matter_mask = (self.rock_types != RockType.SPACE)
+        """Calculate center of mass for the planet using vectorized operations"""
+        # Only consider cells that contain matter (not space)
+        matter_mask = (self.material_types != MaterialType.SPACE)
         
         if not np.any(matter_mask):
-            self.center_of_mass = (self.width / 2, self.height / 2)
-            self.total_mass = 0.0
-            return
-        
-        # Calculate cell masses (vectorized)
-        cell_volume = self.cell_size ** 3
-        cell_masses = self.density * cell_volume
-        matter_masses = cell_masses[matter_mask]
+            return  # No matter, keep current center
         
         # Get coordinates of matter cells
         matter_y, matter_x = np.where(matter_mask)
         
+        # Calculate cell masses (vectorized)
+        cell_volume = self.cell_size ** 2  # 2D simulation
+        cell_masses = self.density[matter_mask] * cell_volume
+        
         # Calculate center of mass (vectorized)
-        total_mass = np.sum(matter_masses)
+        total_mass = np.sum(cell_masses)
         if total_mass > 0:
-            weighted_x = np.sum(matter_masses * matter_x) / total_mass
-            weighted_y = np.sum(matter_masses * matter_y) / total_mass
-            self.center_of_mass = (weighted_x, weighted_y)
+            center_x = np.sum(cell_masses * matter_x) / total_mass
+            center_y = np.sum(cell_masses * matter_y) / total_mass
+            self.center_of_mass = (center_x, center_y)
             self.total_mass = total_mass
-        else:
-            self.center_of_mass = (self.width / 2, self.height / 2)
-            self.total_mass = 0.0
-    
+
     def _calculate_planetary_pressure(self):
         """Calculate pressure using gravitational model appropriate for a planet"""
         # Reset all pressures
@@ -374,7 +368,7 @@ class GeologySimulation:
         
         for y in range(self.height):
             for x in range(self.width):
-                if self.rock_types[y, x] == RockType.SPACE:
+                if self.material_types[y, x] == MaterialType.SPACE:
                     self.pressure[y, x] = 0.0  # Vacuum
                     continue
                 
@@ -389,7 +383,7 @@ class GeologySimulation:
                 g_local = self.gravity_constant * self.total_mass / (distance_m ** 2)
                 
                 # For atmospheric pressure, use hydrostatic equilibrium
-                if self.rock_types[y, x] == RockType.AIR:
+                if self.material_types[y, x] == MaterialType.AIR:
                     # Simple atmospheric model - pressure decreases with height
                     # Height above surface (approximated)
                     surface_distance = self._get_planet_radius()
@@ -421,29 +415,29 @@ class GeologySimulation:
         changes_made = False
         
         # Skip space cells
-        non_space_mask = (self.rock_types != RockType.SPACE)
+        non_space_mask = (self.material_types != MaterialType.SPACE)
         
         # General transition system - applies to all materials (vectorized)
         temp_celsius = self.temperature - 273.15  # Convert K to C for transition system
         pressure_mpa = self.pressure / 1e6  # Convert Pa to MPa
         
-        # Process all rock types that have transitions
-        transition_rocks = list(RockType)  # Process all rock types
+        # Process all material types that have transitions
+        transition_materials = list(MaterialType)  # Process all material types
         
-        for rock_type in transition_rocks:
-            rock_mask = (self.rock_types == rock_type)
-            if not np.any(rock_mask):
+        for material_type in transition_materials:
+            material_mask = (self.material_types == material_type)
+            if not np.any(material_mask):
                 continue
                 
-            props = self.rock_db.get_properties(rock_type)
+            props = self.material_db.get_properties(material_type)
             if not props.transitions:
                 continue
                 
-            # Check each transition for this rock type
+            # Check each transition for this material type
             for transition in props.transitions:
                 # Create vectorized condition check
                 condition_mask = (
-                    rock_mask & 
+                    material_mask & 
                     (temp_celsius >= transition.min_temp) &
                     (temp_celsius <= transition.max_temp) &
                     (pressure_mpa >= transition.min_pressure) &
@@ -451,11 +445,11 @@ class GeologySimulation:
                 )
                 
                 if np.any(condition_mask):
-                    self.rock_types[condition_mask] = transition.target
+                    self.material_types[condition_mask] = transition.target
                     changes_made = True
         
         # Note: Rock melting and magma cooling are now handled by the general transition system above
-        # This provides more flexibility and allows rocks to have different melting points and cooling products
+        # This provides more flexibility and allows materials to have different melting points and cooling products
         
         # Mark properties as dirty if changes were made
         if changes_made:
@@ -472,16 +466,31 @@ class GeologySimulation:
         return np.sqrt((x_coords - center_x)**2 + (y_coords - center_y)**2)
     
     def _get_mobile_mask(self, temperature_threshold: float = None) -> np.ndarray:
-        """Get mask for cells that are mobile (hot and not space)"""
+        """Get mask for mobile (liquid/gas) materials"""
         if temperature_threshold is None:
-            temperature_threshold = 700 + 273.15  # Default mobile threshold
+            temperature_threshold = 800.0 + 273.15  # Default: 800°C in Kelvin
         
-        return ((self.temperature >= temperature_threshold) & 
-                (self.rock_types != RockType.SPACE))
+        return ((self.temperature > temperature_threshold) & 
+                (self.material_types != MaterialType.SPACE))
     
     def _get_solid_mask(self) -> np.ndarray:
-        """Get mask for cells that contain solid matter (not space)"""
-        return (self.rock_types != RockType.SPACE)
+        """Get mask for solid materials (excluding space)"""
+        return (self.material_types != MaterialType.SPACE)
+    
+    def _get_solid_material_mask(self) -> np.ndarray:
+        """Get mask for solid materials (excluding space, air, water, magma)"""
+        solid_mask = np.zeros_like(self.material_types, dtype=bool)
+        
+        # Get unique material types to avoid repeated property lookups
+        # Convert to set to avoid sorting issues with MaterialType enums
+        unique_materials = set(self.material_types.flatten())
+        
+        for material in unique_materials:
+            props = self.material_db.get_properties(material)
+            if props.density > 2000:  # Solid materials are typically denser than 2000 kg/m³
+                solid_mask |= (self.material_types == material)
+        
+        return solid_mask
     
     def _get_planet_radius(self) -> float:
         """Get planet radius in cells"""
@@ -525,7 +534,7 @@ class GeologySimulation:
     
     def _apply_gravitational_differentiation(self):
         """Apply gravitational sorting using efficient operations"""
-        mobile_threshold = 700 + 273.15  # K - rocks become mobile when hot/plastic
+        mobile_threshold = 700 + 273.15  # K - materials become mobile when hot/plastic
         
         # Use fixed geometric center instead of dynamic center of mass for more circular results
         fixed_center_x = self.width / 2.0
@@ -583,8 +592,8 @@ class GeologySimulation:
                         swap_probability = min(0.5, (density_diff / 1000.0) * current_temp_factor * circular_bias)
                         
                         if np.random.random() < swap_probability:
-                            # Swap rock types
-                            self.rock_types[y, x], self.rock_types[ny, nx] = self.rock_types[ny, nx], self.rock_types[y, x]
+                            # Swap material types
+                            self.material_types[y, x], self.material_types[ny, nx] = self.material_types[ny, nx], self.material_types[y, x]
                             changes_made = True
                             swap_count += 1
                             break  # Only one swap per cell per timestep
@@ -600,7 +609,7 @@ class GeologySimulation:
         return changes_made
     
     def _apply_gravitational_collapse(self):
-        """Apply gravitational collapse - rocks fall into air cavities (fast, multi-step falling)"""
+        """Apply gravitational collapse - materials fall into air cavities (fast, multi-step falling)"""
         changes_made = False
         
         # Get distance array for gravitational direction
@@ -608,15 +617,15 @@ class GeologySimulation:
         fixed_center_y = self.height / 2.0
         distances = self._get_distances_from_center(fixed_center_x, fixed_center_y)
         
-        # Multiple passes to allow rocks to fall multiple steps per frame
-        max_fall_steps = 5  # Allow rocks to fall up to 5 cells per timestep (more realistic)
+        # Multiple passes to allow materials to fall multiple steps per frame
+        max_fall_steps = 5  # Allow materials to fall up to 5 cells per timestep (more realistic)
         
         for fall_step in range(max_fall_steps):
             step_changes = False
             
-            # Find all solid rocks (not air, water, space, or magma which flows differently)
-            solid_rock_mask = ~np.isin(self.rock_types, [RockType.AIR, RockType.WATER, RockType.SPACE, RockType.MAGMA])
-            solid_coords = np.where(solid_rock_mask)
+            # Find all solid materials (materials that other materials can't fall through)
+            solid_material_mask = self._get_solid_material_mask()
+            solid_coords = np.where(solid_material_mask)
             
             if len(solid_coords[0]) == 0:
                 break
@@ -628,8 +637,8 @@ class GeologySimulation:
             for i in cell_indices:
                 y, x = solid_coords[0][i], solid_coords[1][i]
                 
-                # Skip if this rock was already moved in this step
-                if self.rock_types[y, x] == RockType.AIR:
+                # Skip if this material was already moved in this step
+                if self.material_types[y, x] == MaterialType.AIR:
                     continue
                     
                 current_distance = distances[y, x]
@@ -644,10 +653,11 @@ class GeologySimulation:
                     ny, nx = y + dy, x + dx
                     if (0 <= ny < self.height and 0 <= nx < self.width):
                         neighbor_distance = distances[ny, nx]
-                        neighbor_rock = self.rock_types[ny, nx]
+                        neighbor_material = self.material_types[ny, nx]
                         
-                        # Rock can collapse into air cavities that are closer to center
-                        if (neighbor_rock == RockType.AIR and 
+                        # Material can collapse into non-solid materials that are closer to center
+                        neighbor_props = self.material_db.get_properties(neighbor_material)
+                        if (not neighbor_props.is_solid and 
                             neighbor_distance < current_distance):
                             
                             # Prefer the cavity closest to center for maximum gravitational effect
@@ -655,17 +665,18 @@ class GeologySimulation:
                                 best_collapse_target = (ny, nx)
                                 best_distance = neighbor_distance
                 
-                # High probability for immediate fall (gravity acts quickly on unsupported rocks)
+                # High probability for immediate fall (gravity acts quickly on unsupported materials)
                 fall_probability = 0.9 if fall_step == 0 else 0.7  # High initial fall, slightly lower for cascading
                 
                 if best_collapse_target and np.random.random() < fall_probability:
                     ny, nx = best_collapse_target
                     
-                    # Rock falls into air cavity
-                    self.rock_types[ny, nx] = self.rock_types[y, x]
-                    self.rock_types[y, x] = RockType.AIR  # Leaves air behind
+                    # Material falls into non-solid material
+                    displaced_material = self.material_types[ny, nx]
+                    self.material_types[ny, nx] = self.material_types[y, x]
+                    self.material_types[y, x] = displaced_material  # Displaced material moves up
                     
-                    # Also transfer temperature (rock carries its heat)
+                    # Also transfer temperature (material carries its heat)
                     self.temperature[ny, nx] = self.temperature[y, x]
                     self.temperature[y, x] = (self.temperature[y, x] + 273.15) / 2  # Air is cooler
                     
@@ -685,7 +696,7 @@ class GeologySimulation:
         # Note: Water vaporization is now handled by the metamorphic system in _apply_metamorphism()
         
         # Phase 1: Air migration toward surface (buoyancy through porous materials)
-        air_coords = np.where(self.rock_types == RockType.AIR)
+        air_coords = np.where(self.material_types == MaterialType.AIR)
         distances = self._get_distances_from_center()
         
         for i in range(len(air_coords[0])):
@@ -701,18 +712,18 @@ class GeologySimulation:
             for dy, dx in neighbors:
                 ny, nx = y + dy, x + dx
                 if (0 <= ny < self.height and 0 <= nx < self.width and
-                    self.rock_types[ny, nx] != RockType.SPACE):
+                    self.material_types[ny, nx] != MaterialType.SPACE):
                     
                     neighbor_distance = distances[ny, nx]
-                    neighbor_rock = self.rock_types[ny, nx]
+                    neighbor_material = self.material_types[ny, nx]
                     
                     # Air wants to move toward surface (larger distance from center)
-                    # Can migrate through porous materials or displace other fluids
+                    # Can migrate through porous materials or displace other materials
+                    neighbor_props = self.material_db.get_properties(neighbor_material)
                     can_migrate = (
-                        neighbor_rock == RockType.WATER or  # Displace water
-                        neighbor_rock == RockType.AIR or    # Move through air
+                        not neighbor_props.is_solid or  # Move through/displace other materials
                         (neighbor_distance > current_distance and  # Moving toward surface
-                         self._get_porosity(neighbor_rock) > 0.1)  # Through porous rock
+                         neighbor_props.porosity > 0.1)  # Through porous material
                     )
                     
                     if can_migrate and neighbor_distance > best_distance:
@@ -722,56 +733,57 @@ class GeologySimulation:
             # Migrate air toward surface with some probability
             if best_neighbor and np.random.random() < 0.3:  # 30% migration chance per timestep
                 ny, nx = best_neighbor
-                old_rock = self.rock_types[ny, nx]
+                old_material = self.material_types[ny, nx]
                 
                 # Swap positions
-                self.rock_types[y, x] = old_rock
-                self.rock_types[ny, nx] = RockType.AIR
+                self.material_types[y, x] = old_material
+                self.material_types[ny, nx] = MaterialType.AIR
                 changes_made = True
         
-        # Phase 2: Cavity filling - rocks gradually flow into air-filled spaces
+        # Phase 2: Cavity filling - materials gradually flow into non-solid spaces
         # This simulates geological settling and compaction over time
         for y in range(1, self.height-1):
             for x in range(1, self.width-1):
-                if self.rock_types[y, x] == RockType.AIR:
-                    # Look for solid rock neighbors that could "fall" into this cavity
+                current_props = self.material_db.get_properties(self.material_types[y, x])
+                if not current_props.is_solid:
+                    # Look for solid material neighbors that could "fall" into this cavity
                     neighbors = self._get_neighbors(4, shuffle=True)  # 4 cardinal neighbors, randomized
                     
                     for dy, dx in neighbors:
                         ny, nx = y + dy, x + dx
                         if (0 <= ny < self.height and 0 <= nx < self.width):
-                            neighbor_rock = self.rock_types[ny, nx]
+                            neighbor_material = self.material_types[ny, nx]
                             
-                            # Solid rocks can gradually fill cavities (very slow process)
-                            if (neighbor_rock not in [RockType.SPACE, RockType.AIR, RockType.WATER] and
+                            # Solid materials can gradually fill cavities (very slow process)
+                            neighbor_props = self.material_db.get_properties(neighbor_material)
+                            if (neighbor_props.is_solid and neighbor_material != MaterialType.SPACE and
                                 np.random.random() < 0.05):  # 5% chance - slow geological process
                                 
-                                # Rock flows into cavity
-                                self.rock_types[y, x] = neighbor_rock
-                                self.rock_types[ny, nx] = RockType.AIR  # Leaves air behind
+                                # Material flows into cavity
+                                displaced_material = self.material_types[y, x]
+                                self.material_types[y, x] = neighbor_material
+                                self.material_types[ny, nx] = displaced_material  # Displaced material moves to where material came from
                                 changes_made = True
                                 break
         
         return changes_made
     
-    def _get_porosity(self, rock_type):
-        """Get porosity of a rock type for fluid migration calculations"""
-        if rock_type == RockType.SPACE:
-            return 0.0
-        props = self.rock_db.get_properties(rock_type)
+    def _get_porosity(self, material_type):
+        """Get porosity for a material type"""
+        props = self.material_db.get_properties(material_type)
         return props.porosity
     
     def _apply_weathering(self):
         """Apply surface weathering processes - chemical and physical weathering"""
         changes_made = False
         
-        # Weathering only affects surface and near-surface rocks
+        # Weathering only affects surface and near-surface materials
         distances = self._get_distances_from_center()
         planet_radius = self._get_planet_radius()
         
         # Define surface zone (within 10% of planet radius from surface)
         surface_distance = planet_radius * 0.9  # 90% of radius = near surface
-        surface_mask = (distances >= surface_distance) & (self.rock_types != RockType.SPACE)
+        surface_mask = (distances >= surface_distance) & (self.material_types != MaterialType.SPACE)
         
         if not np.any(surface_mask):
             return False
@@ -785,10 +797,10 @@ class GeologySimulation:
         # Process each surface cell
         for i in range(len(surface_coords[0])):
             y, x = surface_coords[0][i], surface_coords[1][i]
-            rock_type = self.rock_types[y, x]
+            material_type = self.material_types[y, x]
             
-            # Skip if not a weatherable rock type
-            if rock_type not in self.rock_db.weathering_products:
+            # Skip if not a weatherable material type
+            if material_type not in self.material_db.weathering_products:
                 continue
             
             temperature = temp_celsius[y, x]
@@ -807,7 +819,7 @@ class GeologySimulation:
             for dy, dx in neighbors:
                 ny, nx = y + dy, x + dx
                 if (0 <= ny < self.height and 0 <= nx < self.width and
-                    self.rock_types[ny, nx] == RockType.WATER):
+                    self.material_types[ny, nx] == MaterialType.WATER):
                     water_factor = 3.0  # 3x enhancement with water contact
                     break
             
@@ -831,11 +843,11 @@ class GeologySimulation:
             
             # Apply weathering with probability
             if np.random.random() < total_weathering * self.dt:
-                # Get weathering products for this rock type
-                products = self.rock_db.weathering_products[rock_type]
-                new_rock = np.random.choice(products)
+                # Get weathering products for this material type
+                products = self.material_db.weathering_products[material_type]
+                new_material = np.random.choice(products)
                 
-                self.rock_types[y, x] = new_rock
+                self.material_types[y, x] = new_material
                 changes_made = True
                 
                 # Weathering can create loose material that's easier to transport
@@ -850,7 +862,7 @@ class GeologySimulation:
         distances = self._get_distances_from_center()
         solid_mask = self._get_solid_mask()
         
-        # Heat generation rate based on depth (more heat from radioactive decay in deep rocks)
+        # Heat generation rate based on depth (more heat from radioactive decay in deep materials)
         planet_radius = self._get_planet_radius()
         relative_depth = np.clip(1.0 - distances / planet_radius, 0.0, 1.0)
         
@@ -877,7 +889,7 @@ class GeologySimulation:
             self.history.pop(0)
         
         state = {
-            'rock_types': self.rock_types.copy(),
+            'material_types': self.material_types.copy(),
             'temperature': self.temperature.copy(),
             'pressure': self.pressure.copy(),
             'pressure_offset': self.pressure_offset.copy(),
@@ -919,7 +931,7 @@ class GeologySimulation:
         # Apply surface weathering processes
         weathering_changes = self._apply_weathering()
         
-        # Update material properties if rock types changed
+        # Update material properties if material types changed
         if metamorphic_changes or differentiation_changes or collapse_changes or fluid_changes or weathering_changes:
             self._update_material_properties()
         
@@ -928,7 +940,7 @@ class GeologySimulation:
         self.time += self.dt
         
         # Final safety check: ensure SPACE cells stay as SPACE and at cosmic background temp
-        space_mask = (self.rock_types == RockType.SPACE)
+        space_mask = (self.material_types == MaterialType.SPACE)
         self.temperature[space_mask] = 2.7  # Kelvin
         self.pressure[space_mask] = 0.0
     
@@ -936,7 +948,7 @@ class GeologySimulation:
         """Reverse simulation by one time step"""
         if len(self.history) > 0:
             state = self.history.pop()
-            self.rock_types = state['rock_types']
+            self.material_types = state['material_types']
             self.temperature = state['temperature']
             self.pressure = state['pressure']
             self.pressure_offset = state['pressure_offset']
@@ -989,19 +1001,19 @@ class GeologySimulation:
         self._calculate_planetary_pressure()
     
     def get_visualization_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Get data for visualization (rock colors, temperature, pressure)"""
-        # Create color array from rock types
+        """Get data for visualization (material colors, temperature, pressure)"""
+        # Create color array from material types
         colors = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         
-        # Get unique rock types and their colors
-        # Convert to set to avoid sorting issues with RockType enums
-        unique_rocks = set(self.rock_types.flatten())
+        # Get unique material types and their colors
+        # Convert to set to avoid sorting issues with MaterialType enums
+        unique_materials = set(self.material_types.flatten())
         
         # Efficient color assignment
-        for rock in unique_rocks:
-            mask = (self.rock_types == rock)
+        for material in unique_materials:
+            mask = (self.material_types == material)
             if np.any(mask):
-                props = self.rock_db.get_properties(rock)
+                props = self.material_db.get_properties(material)
                 colors[mask] = props.color_rgb
         
         return colors, self.temperature, self.pressure
@@ -1009,10 +1021,13 @@ class GeologySimulation:
     def get_stats(self) -> dict:
         """Get simulation statistics"""
         # Convert to string values for unique counting
-        rock_strings = np.array([rock.value for rock in self.rock_types.flatten()])
-        unique_rocks, counts = np.unique(rock_strings, return_counts=True)
-        rock_percentages = {rock: count/len(self.rock_types.flatten())*100 
-                          for rock, count in zip(unique_rocks, counts)}
+        material_strings = np.array([material.value for material in self.material_types.flatten()])
+        unique_materials, counts = np.unique(material_strings, return_counts=True)
+        material_percentages = {material: count/len(self.material_types.flatten())*100 
+                               for material, count in zip(unique_materials, counts)}
+        
+        # Sort by percentage in descending order
+        sorted_materials = dict(sorted(material_percentages.items(), key=lambda x: x[1], reverse=True))
         
         stats = {
             'time': self.time,
@@ -1021,7 +1036,7 @@ class GeologySimulation:
             'max_temperature': np.max(self.temperature) - 273.15,   # Convert to Celsius for display
             'avg_pressure': np.mean(self.pressure),
             'max_pressure': np.max(self.pressure),
-            'rock_composition': rock_percentages,
+            'material_composition': sorted_materials,
             'history_length': len(self.history)
         }
         

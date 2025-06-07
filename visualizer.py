@@ -8,7 +8,7 @@ import numpy as np
 import sys
 from typing import Tuple, Optional
 from simulation_engine import GeologySimulation
-from rock_types import RockType, RockDatabase
+from materials import MaterialType, MaterialDatabase
 
 class GeologyVisualizer:
     """Interactive visualizer for geological simulation"""
@@ -464,26 +464,26 @@ class GeologyVisualizer:
         stats = self.simulation.get_stats()
         
         # Header
-        header = self.small_font.render("Rock Composition:", True, self.colors['green'])
+        header = self.small_font.render("Material Composition:", True, self.colors['green'])
         self.screen.blit(header, (x_offset, y_offset))
         y_offset += 20
         
-        # Rock composition with colors
-        for rock_type, percentage in stats['rock_composition'].items():
+        # Material composition with colors (already sorted by percentage in descending order)
+        for material_type, percentage in stats['material_composition'].items():
             try:
-                rock_enum = RockType(rock_type)
-                rock_color = self.simulation.rock_db.get_properties(rock_enum).color_rgb
+                material_enum = MaterialType(material_type)
+                material_color = self.simulation.material_db.get_properties(material_enum).color_rgb
                 
                 # Draw color square
                 color_rect = pygame.Rect(x_offset, y_offset + 2, 12, 12)
-                pygame.draw.rect(self.screen, rock_color, color_rect)
+                pygame.draw.rect(self.screen, material_color, color_rect)
                 pygame.draw.rect(self.screen, self.colors['text'], color_rect, 1)
                 
-                text = f"{rock_type}: {percentage:.1f}%"
+                text = f"{material_type}: {percentage:.1f}%"
                 surface = self.small_font.render(text, True, self.colors['text'])
                 self.screen.blit(surface, (x_offset + 18, y_offset))
             except:
-                text = f"{rock_type}: {percentage:.1f}%"
+                text = f"{material_type}: {percentage:.1f}%"
                 surface = self.small_font.render(text, True, self.colors['text'])
                 self.screen.blit(surface, (x_offset, y_offset))
             

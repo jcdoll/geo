@@ -1,6 +1,6 @@
 """
-Rock classification system for geological simulation.
-Defines rock types, properties, and metamorphic transitions.
+Material classification system for geological simulation.
+Defines material types, properties, and transitions.
 """
 
 import numpy as np
@@ -8,7 +8,7 @@ from enum import Enum
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional
 
-class RockType(Enum):
+class MaterialType(Enum):
     """Primary rock classifications"""
     # Igneous rocks
     GRANITE = "granite"
@@ -34,13 +34,14 @@ class RockType(Enum):
     MAGMA = "magma"
     WATER = "water"
     ICE = "ice"
+    WATER_VAPOR = "water_vapor"
     AIR = "air"
     SPACE = "space"
 
 @dataclass
 class TransitionRule:
     """Defines a material transition under specific P-T conditions"""
-    target: RockType  # What this material transitions to
+    target: MaterialType  # What this material transitions to
     min_temp: float  # Minimum temperature (°C)
     max_temp: float  # Maximum temperature (°C) 
     min_pressure: float  # Minimum pressure (MPa)
@@ -53,8 +54,8 @@ class TransitionRule:
                 self.min_pressure <= pressure <= self.max_pressure)
 
 @dataclass
-class RockProperties:
-    """Physical and chemical properties of rock types"""
+class MaterialProperties:
+    """Physical and chemical properties of material types"""
     density: float  # kg/m³
     thermal_conductivity: float  # W/(m·K)
     specific_heat: float  # J/(kg·K)
@@ -62,6 +63,7 @@ class RockProperties:
     porosity: float  # fraction (0-1)
     color_rgb: Tuple[int, int, int]  # RGB color for visualization
     transitions: List[TransitionRule] = field(default_factory=list)  # All possible transitions for this material
+    is_solid: bool = True  # Whether rocks cannot fall through this material (default: solid)
     
     def get_applicable_transition(self, temperature: float, pressure: float) -> Optional[TransitionRule]:
         """Find the first applicable transition for given P-T conditions"""
@@ -74,241 +76,251 @@ class RockProperties:
         """Find all applicable transitions for given P-T conditions (for complex phase diagrams)"""
         return [t for t in self.transitions if t.is_applicable(temperature, pressure)]
 
-class RockDatabase:
-    """Database of rock properties and metamorphic transitions"""
+class MaterialDatabase:
+    """Database of material properties and transitions"""
     
     def __init__(self):
-        self.properties = self._init_rock_properties()
+        self.properties = self._init_material_properties()
         self.weathering_products = self._init_weathering_products()
     
-    def _init_rock_properties(self) -> Dict[RockType, RockProperties]:
+    def _init_material_properties(self) -> Dict[MaterialType, MaterialProperties]:
         """Initialize physical properties for all rock types"""
         return {
             # Igneous rocks
-            RockType.GRANITE: RockProperties(
+            MaterialType.GRANITE: MaterialProperties(
                 density=2650, thermal_conductivity=2.9, specific_heat=790,
                 strength=200, porosity=0.01,
                 color_rgb=(255, 182, 193),  # Light pink - felsic igneous
                 transitions=[
-                    TransitionRule(RockType.MAGMA, 1215, float('inf'), 0, float('inf'), "Melting to magma"),
-                    TransitionRule(RockType.GNEISS, 650, 1215, 200, float('inf'), "Metamorphism to gneiss")
+                    TransitionRule(MaterialType.MAGMA, 1215, float('inf'), 0, float('inf'), "Melting to magma"),
+                    TransitionRule(MaterialType.GNEISS, 650, 1215, 200, float('inf'), "Metamorphism to gneiss")
                 ]
             ),
-            RockType.BASALT: RockProperties(
+            MaterialType.BASALT: MaterialProperties(
                 density=3000, thermal_conductivity=1.7, specific_heat=840,
                 strength=300, porosity=0.1,
                 color_rgb=(47, 79, 79),  # Dark slate gray - mafic igneous
                 transitions=[
-                    TransitionRule(RockType.MAGMA, 1200, float('inf'), 0, float('inf'), "Melting to magma"),
-                    TransitionRule(RockType.SCHIST, 500, 1200, 150, float('inf'), "Metamorphism to schist")
+                    TransitionRule(MaterialType.MAGMA, 1200, float('inf'), 0, float('inf'), "Melting to magma"),
+                    TransitionRule(MaterialType.SCHIST, 500, 1200, 150, float('inf'), "Metamorphism to schist")
                 ]
             ),
-            RockType.OBSIDIAN: RockProperties(
+            MaterialType.OBSIDIAN: MaterialProperties(
                 density=2400, thermal_conductivity=1.2, specific_heat=840,
                 strength=50, porosity=0.01,
                 color_rgb=(0, 0, 0),  # Black - volcanic glass
                 transitions=[
-                    TransitionRule(RockType.MAGMA, 1000, float('inf'), 0, float('inf'), "Melting to magma")
+                    TransitionRule(MaterialType.MAGMA, 1000, float('inf'), 0, float('inf'), "Melting to magma")
                 ]
             ),
-            RockType.PUMICE: RockProperties(
+            MaterialType.PUMICE: MaterialProperties(
                 density=600, thermal_conductivity=0.5, specific_heat=840,
                 strength=20, porosity=0.8,
                 color_rgb=(245, 245, 245),  # White gray - vesicular volcanic
                 transitions=[
-                    TransitionRule(RockType.MAGMA, 1000, float('inf'), 0, float('inf'), "Melting to magma")
+                    TransitionRule(MaterialType.MAGMA, 1000, float('inf'), 0, float('inf'), "Melting to magma")
                 ]
             ),
-            RockType.ANDESITE: RockProperties(
+            MaterialType.ANDESITE: MaterialProperties(
                 density=2800, thermal_conductivity=1.8, specific_heat=840,
                 strength=250, porosity=0.05,
                 color_rgb=(105, 105, 105),  # Dim gray - intermediate volcanic
                 transitions=[
-                    TransitionRule(RockType.MAGMA, 1150, float('inf'), 0, float('inf'), "Melting to magma")
+                    TransitionRule(MaterialType.MAGMA, 1150, float('inf'), 0, float('inf'), "Melting to magma")
                 ]
             ),
             
             # Sedimentary rocks
-            RockType.SANDSTONE: RockProperties(
+            MaterialType.SANDSTONE: MaterialProperties(
                 density=2200, thermal_conductivity=2.5, specific_heat=830,
                 strength=100, porosity=0.2,
                 color_rgb=(238, 203, 173),  # Tan - sandstone
                 transitions=[
-                    TransitionRule(RockType.MAGMA, 1650, float('inf'), 0, float('inf'), "Melting to magma"),
-                    TransitionRule(RockType.QUARTZITE, 300, 1650, 50, float('inf'), "Metamorphism to quartzite")
+                    TransitionRule(MaterialType.MAGMA, 1650, float('inf'), 0, float('inf'), "Melting to magma"),
+                    TransitionRule(MaterialType.QUARTZITE, 300, 1650, 50, float('inf'), "Metamorphism to quartzite")
                 ]
             ),
-            RockType.LIMESTONE: RockProperties(
+            MaterialType.LIMESTONE: MaterialProperties(
                 density=2600, thermal_conductivity=2.2, specific_heat=880,
                 strength=150, porosity=0.15,
                 color_rgb=(255, 255, 224),  # Light yellow - limestone
                 transitions=[
-                    TransitionRule(RockType.MAGMA, 825, float('inf'), 0, float('inf'), "Melting to magma"),
-                    TransitionRule(RockType.MARBLE, 400, 825, 100, float('inf'), "Metamorphism to marble")
+                    TransitionRule(MaterialType.MAGMA, 825, float('inf'), 0, float('inf'), "Melting to magma"),
+                    TransitionRule(MaterialType.MARBLE, 400, 825, 100, float('inf'), "Metamorphism to marble")
                 ]
             ),
-            RockType.SHALE: RockProperties(
+            MaterialType.SHALE: MaterialProperties(
                 density=2400, thermal_conductivity=1.5, specific_heat=800,
                 strength=80, porosity=0.3,
                 color_rgb=(139, 69, 19),  # Brown - mudstone/shale
                 transitions=[
-                    TransitionRule(RockType.MAGMA, 1200, float('inf'), 0, float('inf'), "Melting to magma"),
-                    TransitionRule(RockType.SLATE, 250, 1200, 30, float('inf'), "Low-grade metamorphism to slate"),
-                    TransitionRule(RockType.SCHIST, 500, 1200, 200, float('inf'), "Medium-grade metamorphism to schist"),
-                    TransitionRule(RockType.GNEISS, 700, 1200, 400, float('inf'), "High-grade metamorphism to gneiss")
+                    TransitionRule(MaterialType.MAGMA, 1200, float('inf'), 0, float('inf'), "Melting to magma"),
+                    TransitionRule(MaterialType.SLATE, 250, 1200, 30, float('inf'), "Low-grade metamorphism to slate"),
+                    TransitionRule(MaterialType.SCHIST, 500, 1200, 200, float('inf'), "Medium-grade metamorphism to schist"),
+                    TransitionRule(MaterialType.GNEISS, 700, 1200, 400, float('inf'), "High-grade metamorphism to gneiss")
                 ]
             ),
-            RockType.CONGLOMERATE: RockProperties(
+            MaterialType.CONGLOMERATE: MaterialProperties(
                 density=2300, thermal_conductivity=2.0, specific_heat=820,
                 strength=120, porosity=0.25,
                 color_rgb=(205, 133, 63),  # Peru brown - conglomerate
                 transitions=[
-                    TransitionRule(RockType.MAGMA, 1500, float('inf'), 0, float('inf'), "Melting to magma"),
-                    TransitionRule(RockType.GNEISS, 600, 1500, 300, float('inf'), "High-grade metamorphism to gneiss")
+                    TransitionRule(MaterialType.MAGMA, 1500, float('inf'), 0, float('inf'), "Melting to magma"),
+                    TransitionRule(MaterialType.GNEISS, 600, 1500, 300, float('inf'), "High-grade metamorphism to gneiss")
                 ]
             ),
             
             # Metamorphic rocks
-            RockType.GNEISS: RockProperties(
+            MaterialType.GNEISS: MaterialProperties(
                 density=2700, thermal_conductivity=3.0, specific_heat=790,
                 strength=250, porosity=0.02,
                 color_rgb=(128, 128, 128),  # Gray - high-grade metamorphic
                 transitions=[
-                    TransitionRule(RockType.MAGMA, 1250, float('inf'), 0, float('inf'), "Melting to magma")
+                    TransitionRule(MaterialType.MAGMA, 1250, float('inf'), 0, float('inf'), "Melting to magma")
                 ]
             ),
-            RockType.SCHIST: RockProperties(
+            MaterialType.SCHIST: MaterialProperties(
                 density=2800, thermal_conductivity=2.8, specific_heat=780,
                 strength=200, porosity=0.05,
                 color_rgb=(85, 107, 47),  # Dark olive green - medium-grade metamorphic
                 transitions=[
-                    TransitionRule(RockType.MAGMA, 1300, float('inf'), 0, float('inf'), "Melting to magma"),
-                    TransitionRule(RockType.GNEISS, 700, 1300, 400, float('inf'), "High-grade metamorphism to gneiss")
+                    TransitionRule(MaterialType.MAGMA, 1300, float('inf'), 0, float('inf'), "Melting to magma"),
+                    TransitionRule(MaterialType.GNEISS, 700, 1300, 400, float('inf'), "High-grade metamorphism to gneiss")
                 ]
             ),
-            RockType.SLATE: RockProperties(
+            MaterialType.SLATE: MaterialProperties(
                 density=2700, thermal_conductivity=2.0, specific_heat=800,
                 strength=180, porosity=0.03,
                 color_rgb=(112, 128, 144),  # Slate gray - low-grade metamorphic
                 transitions=[
-                    TransitionRule(RockType.MAGMA, 1400, float('inf'), 0, float('inf'), "Melting to magma"),
-                    TransitionRule(RockType.SCHIST, 500, 1400, 200, float('inf'), "Metamorphism to schist"),
-                    TransitionRule(RockType.GNEISS, 700, 1400, 400, float('inf'), "High-grade metamorphism to gneiss")
+                    TransitionRule(MaterialType.MAGMA, 1400, float('inf'), 0, float('inf'), "Melting to magma"),
+                    TransitionRule(MaterialType.SCHIST, 500, 1400, 200, float('inf'), "Metamorphism to schist"),
+                    TransitionRule(MaterialType.GNEISS, 700, 1400, 400, float('inf'), "High-grade metamorphism to gneiss")
                 ]
             ),
-            RockType.MARBLE: RockProperties(
+            MaterialType.MARBLE: MaterialProperties(
                 density=2650, thermal_conductivity=2.5, specific_heat=880,
                 strength=120, porosity=0.02,
                 color_rgb=(255, 250, 250),  # Snow white - metamorphosed limestone
                 transitions=[
-                    TransitionRule(RockType.MAGMA, 825, float('inf'), 0, float('inf'), "Melting to magma")
+                    TransitionRule(MaterialType.MAGMA, 825, float('inf'), 0, float('inf'), "Melting to magma")
                 ]
             ),
-            RockType.QUARTZITE: RockProperties(
+            MaterialType.QUARTZITE: MaterialProperties(
                 density=2650, thermal_conductivity=6.0, specific_heat=800,
                 strength=300, porosity=0.01,
                 color_rgb=(255, 228, 196),  # Bisque - metamorphosed sandstone
                 transitions=[
-                    TransitionRule(RockType.MAGMA, 1700, float('inf'), 0, float('inf'), "Melting to magma")
+                    TransitionRule(MaterialType.MAGMA, 1700, float('inf'), 0, float('inf'), "Melting to magma")
                 ]
             ),
             
             # Special states
-            RockType.MAGMA: RockProperties(
+            MaterialType.MAGMA: MaterialProperties(
                 density=2800, thermal_conductivity=4.0, specific_heat=1200,
                 strength=0, porosity=0,
                 color_rgb=(255, 69, 0),  # Red orange - molten rock
                 transitions=[
-                    TransitionRule(RockType.GRANITE, float('-inf'), 800, 0, float('inf'), "Cooling to granite")
-                ]
+                    TransitionRule(MaterialType.GRANITE, float('-inf'), 800, 0, float('inf'), "Cooling to granite")
+                ],
+                is_solid=False  # Molten rock - rocks can sink through it
             ),
-            RockType.WATER: RockProperties(
+            MaterialType.WATER: MaterialProperties(
                 density=1000, thermal_conductivity=0.6, specific_heat=4186,
                 strength=0, porosity=1,
                 color_rgb=(30, 144, 255),  # Dodger blue - water
                 transitions=[
-                    TransitionRule(RockType.ICE, float('-inf'), 0, 0, float('inf'), "Freezing to ice"),
-                    TransitionRule(RockType.AIR, 100, float('inf'), 0, float('inf'), "Vaporization to steam")
-                ]
+                    TransitionRule(MaterialType.ICE, float('-inf'), 0, 0, float('inf'), "Freezing to ice"),
+                    TransitionRule(MaterialType.WATER_VAPOR, 100, float('inf'), 0, float('inf'), "Vaporization to water vapor")
+                ],
+                is_solid=False  # Liquid - rocks can sink through it
             ),
-            RockType.ICE: RockProperties(
+            MaterialType.ICE: MaterialProperties(
                 density=920, thermal_conductivity=2.2, specific_heat=2108,
                 strength=10, porosity=0.1,
                 color_rgb=(173, 216, 230),  # Light blue - ice
                 transitions=[
-                    TransitionRule(RockType.WATER, 0, float('inf'), 0, float('inf'), "Melting to water"),
-                    # Could add sublimation: ICE -> AIR under low pressure conditions
-                    TransitionRule(RockType.AIR, -10, 0, 0, 0.1, "Sublimation to vapor")
+                    TransitionRule(MaterialType.WATER, 0, float('inf'), 0, float('inf'), "Melting to water"),
+                    TransitionRule(MaterialType.WATER_VAPOR, -10, 0, 0, 0.1, "Sublimation to water vapor")
                 ]
             ),
-            RockType.AIR: RockProperties(
+            MaterialType.WATER_VAPOR: MaterialProperties(
+                density=0.6, thermal_conductivity=0.025, specific_heat=2010,
+                strength=0, porosity=1,
+                color_rgb=(192, 224, 255),  # Light blue-white - humid air/steam
+                transitions=[
+                    TransitionRule(MaterialType.WATER, float('-inf'), 100, 0, float('inf'), "Condensation to water")
+                ],
+                is_solid=False  # Gas - rocks can fall through it
+            ),
+            MaterialType.AIR: MaterialProperties(
                 density=1.2, thermal_conductivity=0.024, specific_heat=1005,
                 strength=0, porosity=1,
-                color_rgb=(245, 245, 255),  # Very light blue/white - clearly distinguishable as gas
-                transitions=[
-                    TransitionRule(RockType.WATER, float('-inf'), 100, 1.0, float('inf'), "Condensation to water")
-                ]
+                color_rgb=(245, 245, 255),  # Very light blue/white - dry air
+                transitions=[],  # Dry air doesn't transition (no water content to condense)
+                is_solid=False  # Gas - rocks can fall through it
             ),
-            RockType.SPACE: RockProperties(
+            MaterialType.SPACE: MaterialProperties(
                 density=0.0, thermal_conductivity=0.0, specific_heat=0.0,
                 strength=0, porosity=1,
                 color_rgb=(0, 0, 0),  # Black - vacuum of space
-                transitions=[]  # Space doesn't transition to anything
+                transitions=[],  # Space doesn't transition to anything
+                is_solid=False  # Vacuum - rocks can fall through it
             ),
         }
     
-    def _init_weathering_products(self) -> Dict[RockType, List[RockType]]:
+    def _init_weathering_products(self) -> Dict[MaterialType, List[MaterialType]]:
         """Define weathering products for surface processes"""
         return {
-            RockType.GRANITE: [RockType.SANDSTONE],
-            RockType.BASALT: [RockType.SHALE],
-            RockType.GNEISS: [RockType.SANDSTONE],
-            RockType.SCHIST: [RockType.SHALE],
-            RockType.SLATE: [RockType.SHALE],
-            RockType.MARBLE: [RockType.LIMESTONE],
-            RockType.QUARTZITE: [RockType.SANDSTONE],
-            RockType.PUMICE: [RockType.SANDSTONE],
-            RockType.ANDESITE: [RockType.SHALE],
-            RockType.CONGLOMERATE: [RockType.SANDSTONE]
+            MaterialType.GRANITE: [MaterialType.SANDSTONE],
+            MaterialType.BASALT: [MaterialType.SHALE],
+            MaterialType.GNEISS: [MaterialType.SANDSTONE],
+            MaterialType.SCHIST: [MaterialType.SHALE],
+            MaterialType.SLATE: [MaterialType.SHALE],
+            MaterialType.MARBLE: [MaterialType.LIMESTONE],
+            MaterialType.QUARTZITE: [MaterialType.SANDSTONE],
+            MaterialType.PUMICE: [MaterialType.SANDSTONE],
+            MaterialType.ANDESITE: [MaterialType.SHALE],
+            MaterialType.CONGLOMERATE: [MaterialType.SANDSTONE]
         }
     
-    def get_metamorphic_product(self, rock_type: RockType, temperature: float, pressure: float) -> Optional[RockType]:
+    def get_metamorphic_product(self, material_type: MaterialType, temperature: float, pressure: float) -> Optional[MaterialType]:
         """Determine metamorphic product based on P-T conditions using new transition system"""
-        props = self.get_properties(rock_type)
+        props = self.get_properties(material_type)
         transition = props.get_applicable_transition(temperature, pressure)
         return transition.target if transition else None
     
-    def should_melt(self, rock_type: RockType, temperature: float) -> bool:
-        """Check if rock should melt at given temperature using new transition system"""
+    def should_melt(self, material_type: MaterialType, temperature: float) -> bool:
+        """Check if material should melt at given temperature using new transition system"""
         # Magma is already molten, so it doesn't "melt"
-        if rock_type == RockType.MAGMA:
+        if material_type == MaterialType.MAGMA:
             return False
             
-        props = self.get_properties(rock_type)
+        props = self.get_properties(material_type)
         # Check if any transition leads to MAGMA
         for transition in props.transitions:
-            if (transition.target == RockType.MAGMA and 
+            if (transition.target == MaterialType.MAGMA and 
                 transition.min_temp <= temperature <= transition.max_temp):
                 return True
         return False
     
-    def get_cooling_product(self, temperature: float, pressure: float, composition: str = "mafic") -> RockType:
+    def get_cooling_product(self, temperature: float, pressure: float, composition: str = "mafic") -> MaterialType:
         """Determine igneous rock type from cooling magma"""
         if composition == "felsic":
             if pressure > 100:  # Deep intrusive
-                return RockType.GRANITE
+                return MaterialType.GRANITE
             else:  # Shallow/extrusive
-                return RockType.OBSIDIAN if temperature < 900 else RockType.PUMICE
+                return MaterialType.OBSIDIAN if temperature < 900 else MaterialType.PUMICE
         else:  # mafic composition
             if pressure > 50:
-                return RockType.BASALT
+                return MaterialType.BASALT
             else:
-                return RockType.ANDESITE
+                return MaterialType.ANDESITE
     
-    def get_properties(self, rock_type: RockType) -> RockProperties:
-        """Get properties for a rock type"""
-        return self.properties[rock_type]
+    def get_properties(self, material_type: MaterialType) -> MaterialProperties:
+        """Get properties for a material type"""
+        return self.properties[material_type]
     
-    def get_weathering_products(self, rock_type: RockType) -> List[RockType]:
-        """Get weathering products for a rock type"""
-        return self.weathering_products.get(rock_type, []) 
+    def get_weathering_products(self, material_type: MaterialType) -> List[MaterialType]:
+        """Get weathering products for a material type"""
+        return self.weathering_products.get(material_type, []) 

@@ -67,16 +67,16 @@ def test_statistics():
     stats = sim.get_stats()
     
     required_keys = ['time', 'avg_temperature', 'max_temperature', 
-                    'avg_pressure', 'max_pressure', 'rock_composition', 
+                    'avg_pressure', 'max_pressure', 'material_composition', 
                     'dt', 'history_length']
     
     for key in required_keys:
         assert key in stats
     
-    assert len(stats['rock_composition']) > 0
+    assert len(stats['material_composition']) > 0
     
-    # Rock composition should sum to ~100%
-    total = sum(stats['rock_composition'].values())
+    # Material composition should sum to ~100%
+    total = sum(stats['material_composition'].values())
     assert abs(total - 100.0) < 0.1
 
 
