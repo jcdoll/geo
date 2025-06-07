@@ -6,7 +6,64 @@ Handles heat transfer, pressure calculation, and rock state evolution.
 import numpy as np
 from numba import jit
 from typing import Tuple, Optional
-from rock_types import RockType, RockDatabase
+try:
+    from .rock_types import RockType, RockDatabase
+except ImportError:
+    from rock_types import RockType, RockDatabase
+from scipy import ndimage
+
+# JIT-compiled performance-critical functions
+@jit(nopython=True)
+def _jit_apply_convolution_diffusion(temperature, thermal_diffusivity, kernel, dt_factor):
+    """JIT-compiled convolution for heat diffusion"""
+    height, width = temperature.shape
+    new_temp = temperature.copy()
+    
+    for y in range(1, height-1):
+        for x in range(1, width-1):
+            if thermal_diffusivity[y, x] > 0:
+                # Apply 3x3 convolution manually for speed
+                laplacian = 0.0
+                for ky in range(-1, 2):
+                    for kx in range(-1, 2):
+                        laplacian += temperature[y+ky, x+kx] * kernel[ky+1, kx+1]
+                
+                temp_change = thermal_diffusivity[y, x] * laplacian * dt_factor
+                new_temp[y, x] += temp_change
+    
+    return new_temp
+
+@jit(nopython=True)
+def _jit_calculate_pressure(distances, rock_type_ids, planet_radius, cell_size, total_mass, gravity_constant):
+    """JIT-compiled pressure calculation"""
+    height, width = distances.shape
+    pressure = np.zeros_like(distances)
+    
+    for y in range(height):
+        for x in range(width):
+            rock_id = rock_type_ids[y, x]
+            if rock_id == 0:  # Space (assuming SPACE has ID 0)
+                pressure[y, x] = 0.0
+                continue
+            
+            distance = distances[y, x]
+            distance_m = distance * cell_size
+            
+            if distance_m < cell_size:
+                distance_m = cell_size
+            
+            # Simplified lithostatic pressure
+            surface_distance = planet_radius
+            depth = max(0.0, surface_distance - distance) * cell_size
+            
+            if depth > 0:
+                avg_density = 3000.0  # kg/m³
+                avg_g = 9.81  # m/s²
+                pressure[y, x] = avg_density * avg_g * depth / 1e6  # MPa
+            else:
+                pressure[y, x] = 0.1  # Surface pressure
+    
+    return pressure
 
 class GeologySimulation:
     """Main simulation engine for 2D geological processes"""
@@ -38,7 +95,7 @@ class GeologySimulation:
         
         # Simulation parameters
         self.time = 0.0
-        self.dt = 1000.0  # years per time step
+        self.dt = 50.0  # years per time step (reduced for gradual ice melting)
         
         # Unit conversion constants
         self.seconds_per_year = 365.25 * 24 * 3600
@@ -59,10 +116,34 @@ class GeologySimulation:
         self.history = []
         self.history_step = 0
         
+        # Performance optimization caches
+        self._material_props_cache = {}  # Cache for material property lookups
+        self._neighbor_cache = {}        # Cache for neighbor offset calculations
+        self._distance_cache = None      # Cache for distance calculations
+        self._properties_dirty = True    # Flag to track when material properties need updating
+        
+        # Pre-compute neighbor arrays for vectorized operations
+        self._setup_neighbors()
+        
         # Initialize as an emergent planet
         self._setup_planetary_conditions()
+        self._properties_dirty = True
         self._update_material_properties()
         self._calculate_center_of_mass()
+    
+    def _setup_neighbors(self):
+        """Pre-compute neighbor offset arrays for efficient operations"""
+        # 4-neighbor offsets (cardinal directions)
+        self.neighbors_4 = np.array([(-1, 0), (1, 0), (0, -1), (0, 1)])
+        
+        # 8-neighbor offsets (cardinal + diagonal)
+        self.neighbors_8 = np.array([(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)])
+        
+        # Distance factors for diagonal neighbors (1/√2 ≈ 0.707)
+        self.distance_factors_8 = np.array([0.707, 1.0, 0.707, 1.0, 1.0, 0.707, 1.0, 0.707])
+        
+        # Pre-compute coordinate grids for vectorized operations
+        self.y_coords, self.x_coords = np.ogrid[:self.height, :self.width]
     
     def _setup_planetary_conditions(self):
         """Set up initial planetary conditions with emergent circular shape"""
@@ -85,17 +166,17 @@ class GeologySimulation:
                     # Within planet - set rock type and temperature based on distance from center
                     relative_depth = distance / planet_radius  # 0 at center, 1 at surface
                     
-                    # Temperature: hotter planet for more diffusion and segregation (in Kelvin)
-                    core_temp = 1800.0 + 273.15  # K - much hotter core for more activity
-                    surface_temp = 25.0 + 273.15  # K - warmer surface
+                    # Temperature: "dirty iceball" formation - cold surface, hot core (in Kelvin)
+                    core_temp = 1800.0 + 273.15  # K - hot core for activity
+                    surface_temp = -30.0 + 273.15  # K - cold surface to preserve ice
                     
                     # Use exponential decay with gentler gradient for more extensive hot zone
                     decay_constant = 1.5  # Gentler decay = larger hot zone
                     temp_gradient = (core_temp - surface_temp) * np.exp(-decay_constant * relative_depth)
                     self.temperature[y, x] = surface_temp + temp_gradient
                     
-                    # Add some randomness for more interesting geology (reduced to prevent surface melting)
-                    self.temperature[y, x] += np.random.normal(0, 15)
+                    # Add some randomness for more interesting geology (further reduced to preserve ice)
+                    self.temperature[y, x] += np.random.normal(0, 5)
                     
                     # "Dirty iceball" formation - include ice pockets in outer regions
                     if relative_depth > 0.6:  # Outer 40% of planet - more ice
@@ -137,38 +218,149 @@ class GeologySimulation:
         self._calculate_planetary_pressure()
     
     def _update_material_properties(self):
-        """Update material property grids based on current rock types"""
-        for y in range(self.height):
-            for x in range(self.width):
-                rock_type = self.rock_types[y, x]
-                props = self.rock_db.get_properties(rock_type)
-                
-                self.density[y, x] = props.density
-                self.thermal_conductivity[y, x] = props.thermal_conductivity
-                self.specific_heat[y, x] = props.specific_heat
+        """Update of material property grids using efficient numpy operations"""
+        if not self._properties_dirty:
+            return  # Skip if properties haven't changed
+        
+        # Get unique rock types to minimize property lookups
+        # Convert to set to avoid sorting issues with RockType enums
+        unique_rocks = set(self.rock_types.flatten())
+        
+        # Pre-compute properties for each unique rock type
+        prop_lookup = {}
+        for rock in unique_rocks:
+            if rock not in self._material_props_cache:
+                props = self.rock_db.get_properties(rock)
+                self._material_props_cache[rock] = (props.density, props.thermal_conductivity, props.specific_heat)
+            prop_lookup[rock] = self._material_props_cache[rock]
+        
+        # Vectorized assignment using advanced indexing
+        for rock, (density, k_thermal, c_heat) in prop_lookup.items():
+            mask = (self.rock_types == rock)
+            if np.any(mask):
+                self.density[mask] = density
+                self.thermal_conductivity[mask] = k_thermal
+                self.specific_heat[mask] = c_heat
+        
+        self._properties_dirty = False
     
+    def _heat_diffusion(self) -> np.ndarray:
+        """Heat diffusion using scipy convolution for efficient computation"""
+        # Start with current temperature
+        new_temp = self.temperature.copy()
+        
+        # Skip cells that are space
+        non_space_mask = (self.rock_types != RockType.SPACE)
+        
+        # Create thermal diffusivity array (vectorized)
+        valid_thermal = (self.density > 0) & (self.specific_heat > 0) & (self.thermal_conductivity > 0)
+        thermal_diffusivity = np.zeros_like(self.temperature)
+        thermal_diffusivity[valid_thermal] = (
+            self.thermal_conductivity[valid_thermal] / 
+            (self.density[valid_thermal] * self.specific_heat[valid_thermal])
+        )
+        
+        # Convolution kernel for 8-neighbor heat diffusion with distance weighting
+        # Weight matrix: diagonals get 1/√2, cardinals get 1.0, center gets negative sum
+        kernel = np.array([
+            [0.707, 1.0, 0.707],
+            [1.0,  -6.83, 1.0],   # -6.83 ≈ -(4*1.0 + 4*0.707)
+            [0.707, 1.0, 0.707]
+        ]) / 8.0  # Normalize
+        
+        # Apply diffusion using convolution (much faster than nested loops)
+        temp_laplacian = ndimage.convolve(self.temperature, kernel, mode='constant', cval=0)
+        
+        # Calculate temperature changes (vectorized)
+        scaling_factor = self.dt * self.seconds_per_year * 0.0001 / (self.cell_size ** 2)
+        temp_change = thermal_diffusivity * temp_laplacian * scaling_factor
+        
+        # Apply changes only to non-space cells
+        new_temp[non_space_mask] += temp_change[non_space_mask]
+        
+        # Stefan-Boltzmann cooling to space (vectorized for boundary cells)
+        self._apply_radiative_cooling(new_temp, non_space_mask)
+        
+        # Ensure space stays at cosmic background temperature
+        new_temp[~non_space_mask] = 2.7  # Kelvin
+        
+        # Safety check: prevent temperatures below absolute zero
+        new_temp = np.maximum(new_temp, 0.1)
+        
+        return new_temp
+    
+    def _apply_radiative_cooling(self, new_temp: np.ndarray, non_space_mask: np.ndarray):
+        """Apply Stefan-Boltzmann cooling to cells adjacent to space"""
+        # Find cells adjacent to space using morphological operations (fast)
+        space_mask = ~non_space_mask
+        
+        # Dilate space mask to find cells adjacent to space
+        adjacent_to_space = ndimage.binary_dilation(space_mask, structure=np.ones((3,3))) & non_space_mask
+        
+        if not np.any(adjacent_to_space):
+            return
+        
+        # Apply Stefan-Boltzmann cooling (vectorized)
+        T_surface = self.temperature[adjacent_to_space]
+        T_space = 2.7
+        
+        # Stefan-Boltzmann law (vectorized calculation)
+        valid_cooling = (T_surface > T_space) & (self.density[adjacent_to_space] > 0) & (self.specific_heat[adjacent_to_space] > 0)
+        
+        if np.any(valid_cooling):
+            # Get indices of valid cooling cells
+            cooling_indices = np.where(adjacent_to_space)
+            valid_subset = valid_cooling
+            
+            T_valid = T_surface[valid_subset]
+            density_valid = self.density[cooling_indices][valid_subset]
+            specific_heat_valid = self.specific_heat[cooling_indices][valid_subset]
+            
+            # Stefan-Boltzmann calculation (vectorized)
+            stefan_boltzmann = 5.67e-8
+            emissivity = 0.9
+            power_per_area = emissivity * stefan_boltzmann * (T_valid**4 - T_space**4)
+            
+            # Temperature change calculation (vectorized)
+            energy_loss = power_per_area * self.dt * self.seconds_per_year * (self.cell_size ** 2)
+            mass = density_valid * (self.cell_size ** 3)
+            temp_change = -energy_loss / (mass * specific_heat_valid)
+            
+            # Prevent cooling below space temperature
+            max_cooling = T_valid - T_space
+            temp_change = np.maximum(temp_change, -max_cooling)
+            
+            # Apply cooling to the new temperature array
+            cooling_y, cooling_x = cooling_indices
+            valid_y, valid_x = cooling_y[valid_subset], cooling_x[valid_subset]
+            new_temp[valid_y, valid_x] += temp_change
+
     def _calculate_center_of_mass(self):
-        """Calculate the center of mass of all matter in the simulation"""
-        total_mass = 0.0
-        weighted_x = 0.0
-        weighted_y = 0.0
+        """Calculate center of mass using efficient numpy operations"""
+        # Create mask for non-space cells
+        matter_mask = (self.rock_types != RockType.SPACE)
         
-        for y in range(self.height):
-            for x in range(self.width):
-                if self.rock_types[y, x] != RockType.SPACE:
-                    # Mass of this cell
-                    cell_volume = self.cell_size ** 3  # m³ (treating as 3D cube)
-                    cell_mass = self.density[y, x] * cell_volume  # kg
-                    
-                    total_mass += cell_mass
-                    weighted_x += cell_mass * x
-                    weighted_y += cell_mass * y
+        if not np.any(matter_mask):
+            self.center_of_mass = (self.width / 2, self.height / 2)
+            self.total_mass = 0.0
+            return
         
+        # Calculate cell masses (vectorized)
+        cell_volume = self.cell_size ** 3
+        cell_masses = self.density * cell_volume
+        matter_masses = cell_masses[matter_mask]
+        
+        # Get coordinates of matter cells
+        matter_y, matter_x = np.where(matter_mask)
+        
+        # Calculate center of mass (vectorized)
+        total_mass = np.sum(matter_masses)
         if total_mass > 0:
-            self.center_of_mass = (weighted_x / total_mass, weighted_y / total_mass)
+            weighted_x = np.sum(matter_masses * matter_x) / total_mass
+            weighted_y = np.sum(matter_masses * matter_y) / total_mass
+            self.center_of_mass = (weighted_x, weighted_y)
             self.total_mass = total_mass
         else:
-            # Fallback if no matter exists
             self.center_of_mass = (self.width / 2, self.height / 2)
             self.total_mass = 0.0
     
@@ -224,114 +416,50 @@ class GeologySimulation:
         # Add user-applied pressure offsets
         self.pressure += self.pressure_offset
     
-    def _heat_diffusion_step_planetary(self) -> np.ndarray:
-        """Fast, stable heat diffusion with simplified planetary boundary conditions"""
-        new_temp = self.temperature.copy()
-        
-        # Simple diffusion with cooling to space - much faster and stable
-        for y in range(self.height):
-            for x in range(self.width):
-                if self.rock_types[y, x] == RockType.SPACE:
-                    continue
-                
-                # Conductive heat transfer with neighbors
-                heat_change = 0.0
-                neighbors = [(y, x+1), (y, x-1), (y+1, x), (y-1, x)]
-                
-                for ny, nx in neighbors:
-                    if self.rock_types[ny, nx] == RockType.SPACE:
-                        # Stefan-Boltzmann radiative cooling to space (proper physics)
-                        T_surface = self.temperature[y, x]  # Already in Kelvin
-                        T_space = 2.7  # Cosmic background radiation
-                        if T_surface > T_space and self.density[y, x] > 0 and self.specific_heat[y, x] > 0:
-                            # Stefan-Boltzmann: power ∝ T⁴ - T_space⁴
-                            stefan_boltzmann = 5.67e-8  # W/(m²⋅K⁴)
-                            emissivity = 0.9
-                            power_per_area = emissivity * stefan_boltzmann * (T_surface**4 - T_space**4)  # W/m²
-                            
-                            # Convert to temperature change using proper thermodynamics
-                            # Energy loss = power × time × surface_area
-                            # Temperature change = energy_loss / (mass × specific_heat)
-                            # mass = density × volume = density × cell_size³
-                            # surface_area = cell_size² (for one face exposed to space)
-                            
-                            energy_loss_per_timestep = power_per_area * self.dt * self.seconds_per_year * (self.cell_size ** 2)  # Joules
-                            mass = self.density[y, x] * (self.cell_size ** 3)  # kg
-                            temp_change = -energy_loss_per_timestep / (mass * self.specific_heat[y, x])  # K
-                            
-                            # Prevent cooling below space temperature (can't be colder than space)
-                            max_cooling = T_surface - T_space
-                            temp_change = max(temp_change, -max_cooling)
-                            
-                            heat_change += temp_change
-                    else:
-                        # Simple conductive diffusion
-                        if (self.density[y, x] > 0 and self.specific_heat[y, x] > 0 and
-                            self.thermal_conductivity[y, x] > 0):
-                            
-                            temp_diff = self.temperature[ny, nx] - self.temperature[y, x]
-                            
-                            # Simplified diffusion rate (dimensionally correct)
-                            alpha = (self.thermal_conductivity[y, x] / 
-                                   (self.density[y, x] * self.specific_heat[y, x]))
-                            
-                            # Scale to geological time with stability factor
-                            diffusion_rate = alpha * temp_diff / (self.cell_size ** 2)
-                            temp_change = diffusion_rate * self.dt * self.seconds_per_year * 0.001  # Much smaller for gradual changes
-                            
-                            heat_change += temp_change
-                
-                new_temp[y, x] += heat_change
-        
-        # Ensure space stays at cosmic background temperature
-        new_temp[self.rock_types == RockType.SPACE] = 2.7  # Kelvin
-        
-        # Safety check: prevent any temperature from going below absolute zero
-        new_temp = np.maximum(new_temp, 0.1)  # Minimum 0.1K to avoid numerical issues
-        
-        return new_temp
-    
     def _apply_metamorphism(self):
-        """Apply metamorphic transitions based on P-T conditions"""
+        """Apply metamorphism using efficient boolean mask operations"""
         changes_made = False
         
-        for y in range(self.height):
-            for x in range(self.width):
-                current_rock = self.rock_types[y, x]
+        # Skip space cells
+        non_space_mask = (self.rock_types != RockType.SPACE)
+        
+        # General transition system - applies to all materials (vectorized)
+        temp_celsius = self.temperature - 273.15  # Convert K to C for transition system
+        pressure_mpa = self.pressure / 1e6  # Convert Pa to MPa
+        
+        # Process all rock types that have transitions
+        transition_rocks = list(RockType)  # Process all rock types
+        
+        for rock_type in transition_rocks:
+            rock_mask = (self.rock_types == rock_type)
+            if not np.any(rock_mask):
+                continue
                 
-                # Skip SPACE cells - they should never change
-                if current_rock == RockType.SPACE:
-                    continue
-                    
-                temp = self.temperature[y, x]
-                pressure = self.pressure[y, x]
+            props = self.rock_db.get_properties(rock_type)
+            if not props.transitions:
+                continue
                 
-                # Check for ice melting to water first
-                if current_rock == RockType.ICE and temp >= 0 + 273.15:  # 0°C melting point
-                    self.rock_types[y, x] = RockType.WATER
+            # Check each transition for this rock type
+            for transition in props.transitions:
+                # Create vectorized condition check
+                condition_mask = (
+                    rock_mask & 
+                    (temp_celsius >= transition.min_temp) &
+                    (temp_celsius <= transition.max_temp) &
+                    (pressure_mpa >= transition.min_pressure) &
+                    (pressure_mpa <= transition.max_pressure)
+                )
+                
+                if np.any(condition_mask):
+                    self.rock_types[condition_mask] = transition.target
                     changes_made = True
-                    continue
-                
-                # Check for rock melting to magma
-                if (self.rock_db.should_melt(current_rock, temp) and 
-                    current_rock not in [RockType.MAGMA, RockType.ICE, RockType.WATER, RockType.AIR, RockType.SPACE]):
-                    self.rock_types[y, x] = RockType.MAGMA
-                    changes_made = True
-                    continue
-                
-                # Check for metamorphic transitions
-                new_rock = self.rock_db.get_metamorphic_product(current_rock, temp, pressure)
-                if new_rock and new_rock != current_rock:
-                    self.rock_types[y, x] = new_rock
-                    changes_made = True
-                
-                # Handle magma cooling
-                if current_rock == RockType.MAGMA and temp < 800 + 273.15:  # 800°C in Kelvin
-                    # Determine composition based on location (simplified)
-                    composition = "felsic" if y < self.height * 0.5 else "mafic"
-                    new_rock = self.rock_db.get_cooling_product(temp, pressure, composition)
-                    self.rock_types[y, x] = new_rock
-                    changes_made = True
+        
+        # Note: Rock melting and magma cooling are now handled by the general transition system above
+        # This provides more flexibility and allows rocks to have different melting points and cooling products
+        
+        # Mark properties as dirty if changes were made
+        if changes_made:
+            self._properties_dirty = True
         
         return changes_made
     
@@ -359,19 +487,44 @@ class GeologySimulation:
         """Get planet radius in cells"""
         return min(self.width, self.height) * self.planet_radius_fraction / 2
     
-    def _get_randomized_neighbors(self) -> list:
-        """Get 8-neighbor offsets in randomized order to avoid grid artifacts"""
-        neighbors = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
-        np.random.shuffle(neighbors)
+    def _get_neighbors(self, num_neighbors: int = 8, shuffle: bool = True) -> list:
+        """Get neighbor offsets with standardized selection
+        
+        This is the unified neighbor selection method used throughout the simulation:
+        - Heat diffusion: 8 neighbors with distance weighting for realistic thermal flow
+        - Gravitational differentiation: 8 neighbors for comprehensive sorting
+        - Gravitational collapse: 8 neighbors for realistic falling
+        - Air migration: 8 neighbors for natural buoyancy patterns
+        - Cavity filling: 4 neighbors for simple geological settling
+        
+        Args:
+            num_neighbors: 4 for cardinal directions only, 8 for cardinal + diagonal
+            shuffle: Whether to randomize order to avoid grid artifacts (default: True)
+            
+        Returns:
+            List of (dy, dx) tuples representing relative neighbor offsets
+        """
+        if num_neighbors == 4:
+            # Cardinal directions only
+            neighbors = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        elif num_neighbors == 8:
+            # Cardinal + diagonal directions
+            neighbors = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+        else:
+            raise ValueError(f"num_neighbors must be 4 or 8, got {num_neighbors}")
+        
+        if shuffle:
+            np.random.shuffle(neighbors)
+        
         return neighbors
-    
+        
     def _calculate_temperature_factors(self, threshold: float, scale: float = 200.0, max_factor: float = 10.0) -> np.ndarray:
         """Calculate exponential temperature factors for mobility"""
         temp_excess = np.maximum(0, self.temperature - threshold)
         return np.minimum(max_factor, np.exp(temp_excess / scale))
     
     def _apply_gravitational_differentiation(self):
-        """Apply gravitational sorting using vectorized operations - much faster"""
+        """Apply gravitational sorting using efficient operations"""
         mobile_threshold = 700 + 273.15  # K - rocks become mobile when hot/plastic
         
         # Use fixed geometric center instead of dynamic center of mass for more circular results
@@ -404,7 +557,7 @@ class GeologySimulation:
             current_temp_factor = temp_factors[y, x]
             
             # Get randomized neighbors to avoid grid artifacts
-            neighbor_offsets = self._get_randomized_neighbors()
+            neighbor_offsets = self._get_neighbors(8, shuffle=True)  # 8 neighbors, randomized
             
             # Check neighbors
             for dy, dx in neighbor_offsets:
@@ -447,7 +600,7 @@ class GeologySimulation:
         return changes_made
     
     def _apply_gravitational_collapse(self):
-        """Apply gravitational collapse - rocks fall into air cavities (no structural support)"""
+        """Apply gravitational collapse - rocks fall into air cavities (fast, multi-step falling)"""
         changes_made = False
         
         # Get distance array for gravitational direction
@@ -455,70 +608,83 @@ class GeologySimulation:
         fixed_center_y = self.height / 2.0
         distances = self._get_distances_from_center(fixed_center_x, fixed_center_y)
         
-        # Find all solid rocks (not air, water, space, or magma which flows differently)
-        solid_rock_mask = ~np.isin(self.rock_types, [RockType.AIR, RockType.WATER, RockType.SPACE, RockType.MAGMA])
-        solid_coords = np.where(solid_rock_mask)
+        # Multiple passes to allow rocks to fall multiple steps per frame
+        max_fall_steps = 5  # Allow rocks to fall up to 5 cells per timestep (more realistic)
         
-        # Randomize processing order to avoid artifacts
-        cell_indices = np.arange(len(solid_coords[0]))
-        np.random.shuffle(cell_indices)
-        
-        for i in cell_indices:
-            y, x = solid_coords[0][i], solid_coords[1][i]
-            current_distance = distances[y, x]
+        for fall_step in range(max_fall_steps):
+            step_changes = False
             
-            # Get randomized neighbors to avoid grid artifacts
-            neighbor_offsets = self._get_randomized_neighbors()
+            # Find all solid rocks (not air, water, space, or magma which flows differently)
+            solid_rock_mask = ~np.isin(self.rock_types, [RockType.AIR, RockType.WATER, RockType.SPACE, RockType.MAGMA])
+            solid_coords = np.where(solid_rock_mask)
             
-            best_collapse_target = None
-            best_distance = current_distance
+            if len(solid_coords[0]) == 0:
+                break
             
-            for dy, dx in neighbor_offsets:
-                ny, nx = y + dy, x + dx
-                if (0 <= ny < self.height and 0 <= nx < self.width):
-                    neighbor_distance = distances[ny, nx]
-                    neighbor_rock = self.rock_types[ny, nx]
+            # Randomize processing order to avoid artifacts
+            cell_indices = np.arange(len(solid_coords[0]))
+            np.random.shuffle(cell_indices)
+            
+            for i in cell_indices:
+                y, x = solid_coords[0][i], solid_coords[1][i]
+                
+                # Skip if this rock was already moved in this step
+                if self.rock_types[y, x] == RockType.AIR:
+                    continue
                     
-                    # Rock can collapse into air cavities that are closer to center
-                    if (neighbor_rock == RockType.AIR and 
-                        neighbor_distance < current_distance):
+                current_distance = distances[y, x]
+                
+                # Get randomized neighbors to avoid grid artifacts
+                neighbor_offsets = self._get_neighbors(8, shuffle=True)  # 8 neighbors, randomized
+                
+                best_collapse_target = None
+                best_distance = current_distance
+                
+                for dy, dx in neighbor_offsets:
+                    ny, nx = y + dy, x + dx
+                    if (0 <= ny < self.height and 0 <= nx < self.width):
+                        neighbor_distance = distances[ny, nx]
+                        neighbor_rock = self.rock_types[ny, nx]
                         
-                        # Prefer the cavity closest to center for maximum gravitational effect
-                        if neighbor_distance < best_distance:
-                            best_collapse_target = (ny, nx)
-                            best_distance = neighbor_distance
+                        # Rock can collapse into air cavities that are closer to center
+                        if (neighbor_rock == RockType.AIR and 
+                            neighbor_distance < current_distance):
+                            
+                            # Prefer the cavity closest to center for maximum gravitational effect
+                            if neighbor_distance < best_distance:
+                                best_collapse_target = (ny, nx)
+                                best_distance = neighbor_distance
+                
+                # High probability for immediate fall (gravity acts quickly on unsupported rocks)
+                fall_probability = 0.9 if fall_step == 0 else 0.7  # High initial fall, slightly lower for cascading
+                
+                if best_collapse_target and np.random.random() < fall_probability:
+                    ny, nx = best_collapse_target
+                    
+                    # Rock falls into air cavity
+                    self.rock_types[ny, nx] = self.rock_types[y, x]
+                    self.rock_types[y, x] = RockType.AIR  # Leaves air behind
+                    
+                    # Also transfer temperature (rock carries its heat)
+                    self.temperature[ny, nx] = self.temperature[y, x]
+                    self.temperature[y, x] = (self.temperature[y, x] + 273.15) / 2  # Air is cooler
+                    
+                    step_changes = True
+                    changes_made = True
             
-            # Collapse into air cavity with high probability (gravity is strong)
-            if best_collapse_target and np.random.random() < 0.7:  # 70% collapse chance - gravity is relentless
-                ny, nx = best_collapse_target
-                
-                # Rock falls into air cavity
-                self.rock_types[ny, nx] = self.rock_types[y, x]
-                self.rock_types[y, x] = RockType.AIR  # Leaves air behind
-                
-                # Also transfer temperature (rock carries its heat)
-                self.temperature[ny, nx] = self.temperature[y, x]
-                self.temperature[y, x] = (self.temperature[y, x] + 273.15) / 2  # Air is cooler
-                
-                changes_made = True
+            # If no changes in this step, stop the cascading process
+            if not step_changes:
+                break
         
         return changes_made
     
     def _apply_fluid_dynamics(self):
-        """Apply water vaporization, air migration, and cavity filling"""
+        """Apply air migration and cavity filling (water vaporization now handled by metamorphic system)"""
         changes_made = False
-        vaporization_temp = 100 + 273.15  # K - water boiling point
         
-        # Phase 1: Water vaporization
-        water_mask = (self.rock_types == RockType.WATER)
-        hot_water_mask = water_mask & (self.temperature >= vaporization_temp)
+        # Note: Water vaporization is now handled by the metamorphic system in _apply_metamorphism()
         
-        if np.any(hot_water_mask):
-            # Convert hot water to air (steam)
-            self.rock_types[hot_water_mask] = RockType.AIR
-            changes_made = True
-        
-        # Phase 2: Air migration toward surface (buoyancy through porous materials)
+        # Phase 1: Air migration toward surface (buoyancy through porous materials)
         air_coords = np.where(self.rock_types == RockType.AIR)
         distances = self._get_distances_from_center()
         
@@ -526,14 +692,14 @@ class GeologySimulation:
             y, x = air_coords[0][i], air_coords[1][i]
             current_distance = distances[y, x]
             
-            # Check neighbors for migration opportunities
-            neighbors = [(y-1, x), (y+1, x), (y, x-1), (y, x+1),  # cardinal directions
-                        (y-1, x-1), (y-1, x+1), (y+1, x-1), (y+1, x+1)]  # diagonals
+            # Check neighbors for migration opportunities (randomized order)
+            neighbors = self._get_neighbors(8, shuffle=True)  # 8 neighbors, randomized
             
             best_neighbor = None
             best_distance = current_distance
             
-            for ny, nx in neighbors:
+            for dy, dx in neighbors:
+                ny, nx = y + dy, x + dx
                 if (0 <= ny < self.height and 0 <= nx < self.width and
                     self.rock_types[ny, nx] != RockType.SPACE):
                     
@@ -563,15 +729,16 @@ class GeologySimulation:
                 self.rock_types[ny, nx] = RockType.AIR
                 changes_made = True
         
-        # Phase 3: Cavity filling - rocks gradually flow into air-filled spaces
+        # Phase 2: Cavity filling - rocks gradually flow into air-filled spaces
         # This simulates geological settling and compaction over time
         for y in range(1, self.height-1):
             for x in range(1, self.width-1):
                 if self.rock_types[y, x] == RockType.AIR:
                     # Look for solid rock neighbors that could "fall" into this cavity
-                    neighbors = [(y-1, x), (y+1, x), (y, x-1), (y, x+1)]
+                    neighbors = self._get_neighbors(4, shuffle=True)  # 4 cardinal neighbors, randomized
                     
-                    for ny, nx in neighbors:
+                    for dy, dx in neighbors:
+                        ny, nx = y + dy, x + dx
                         if (0 <= ny < self.height and 0 <= nx < self.width):
                             neighbor_rock = self.rock_types[ny, nx]
                             
@@ -593,6 +760,89 @@ class GeologySimulation:
             return 0.0
         props = self.rock_db.get_properties(rock_type)
         return props.porosity
+    
+    def _apply_weathering(self):
+        """Apply surface weathering processes - chemical and physical weathering"""
+        changes_made = False
+        
+        # Weathering only affects surface and near-surface rocks
+        distances = self._get_distances_from_center()
+        planet_radius = self._get_planet_radius()
+        
+        # Define surface zone (within 10% of planet radius from surface)
+        surface_distance = planet_radius * 0.9  # 90% of radius = near surface
+        surface_mask = (distances >= surface_distance) & (self.rock_types != RockType.SPACE)
+        
+        if not np.any(surface_mask):
+            return False
+        
+        # Get surface coordinates
+        surface_coords = np.where(surface_mask)
+        
+        # Temperature in Celsius for weathering calculations
+        temp_celsius = self.temperature - 273.15
+        
+        # Process each surface cell
+        for i in range(len(surface_coords[0])):
+            y, x = surface_coords[0][i], surface_coords[1][i]
+            rock_type = self.rock_types[y, x]
+            
+            # Skip if not a weatherable rock type
+            if rock_type not in self.rock_db.weathering_products:
+                continue
+            
+            temperature = temp_celsius[y, x]
+            
+            # Calculate weathering factors
+            
+            # 1. Chemical weathering (enhanced by heat and water)
+            chemical_factor = 0.0
+            if temperature > 0:  # Above freezing
+                # Arrhenius-like temperature dependence (doubles every 10°C)
+                chemical_factor = np.exp((temperature - 15) / 14.4)  # Reference: 15°C
+            
+            # Water presence enhances chemical weathering
+            water_factor = 1.0
+            neighbors = self._get_neighbors(8, shuffle=False)
+            for dy, dx in neighbors:
+                ny, nx = y + dy, x + dx
+                if (0 <= ny < self.height and 0 <= nx < self.width and
+                    self.rock_types[ny, nx] == RockType.WATER):
+                    water_factor = 3.0  # 3x enhancement with water contact
+                    break
+            
+            chemical_factor *= water_factor
+            
+            # 2. Physical weathering (freeze-thaw cycles, thermal expansion)
+            physical_factor = 0.0
+            
+            # Freeze-thaw weathering (most effective around 0°C)
+            if -10 <= temperature <= 10:  # Freeze-thaw zone
+                freeze_thaw_intensity = 1.0 - abs(temperature / 10.0)
+                physical_factor += freeze_thaw_intensity * 2.0
+            
+            # Thermal expansion weathering (extreme temperatures)
+            if temperature > 40 or temperature < -20:
+                thermal_stress = min(abs(temperature - 20) / 100.0, 1.0)
+                physical_factor += thermal_stress
+            
+            # 3. Combine weathering factors
+            total_weathering = (chemical_factor + physical_factor) * 0.00001  # Very slow process
+            
+            # Apply weathering with probability
+            if np.random.random() < total_weathering * self.dt:
+                # Get weathering products for this rock type
+                products = self.rock_db.weathering_products[rock_type]
+                new_rock = np.random.choice(products)
+                
+                self.rock_types[y, x] = new_rock
+                changes_made = True
+                
+                # Weathering can create loose material that's easier to transport
+                # Slightly reduce temperature due to endothermic weathering reactions
+                self.temperature[y, x] = max(self.temperature[y, x] - 2, 2.7)
+        
+        return changes_made
     
     def _apply_internal_heat_generation(self):
         """Apply internal heat generation from radioactive decay and other sources"""
@@ -637,17 +887,17 @@ class GeologySimulation:
         self.history.append(state)
     
     def step_forward(self, dt: Optional[float] = None):
-        """Advance simulation by one time step"""
+        """Advance simulation by one time step - optimized version"""
         if dt is not None:
             self.dt = dt
         
         # Save state for potential reversal
         self._save_state()
         
-        # Heat diffusion with planetary boundary conditions
-        self.temperature = self._heat_diffusion_step_planetary()
+        # Use efficient heat diffusion
+        self.temperature = self._heat_diffusion()
         
-        # Add internal heat generation (radioactive decay, tidal heating, etc.)
+        # Add internal heat generation
         self._apply_internal_heat_generation()
         
         # Update center of mass and pressure
@@ -657,17 +907,20 @@ class GeologySimulation:
         # Apply metamorphic processes
         metamorphic_changes = self._apply_metamorphism()
         
-        # Apply gravitational differentiation (density sorting)
+        # Apply gravitational differentiation
         differentiation_changes = self._apply_gravitational_differentiation()
         
-        # Apply gravitational collapse (rocks falling into air cavities)
+        # Apply gravitational collapse
         collapse_changes = self._apply_gravitational_collapse()
         
         # Apply water vaporization and air migration
         fluid_changes = self._apply_fluid_dynamics()
         
+        # Apply surface weathering processes
+        weathering_changes = self._apply_weathering()
+        
         # Update material properties if rock types changed
-        if metamorphic_changes or differentiation_changes or collapse_changes or fluid_changes:
+        if metamorphic_changes or differentiation_changes or collapse_changes or fluid_changes or weathering_changes:
             self._update_material_properties()
         
         # Update age
@@ -690,6 +943,8 @@ class GeologySimulation:
             self.age = state['age']
             self.time = state['time']
             
+            # Mark properties as dirty and update
+            self._properties_dirty = True
             self._update_material_properties()
             return True
         return False
@@ -714,9 +969,8 @@ class GeologySimulation:
         # Create intensity field with soft falloff
         intensity = self._create_gaussian_intensity_field(x, y, radius)
         
-        # Apply heat with much higher base temperature
-        base_temp_increase = 800.0  # K - much more effective heating
-        temp_addition = intensity * base_temp_increase
+        # Apply heat using the specified temperature increase
+        temp_addition = intensity * temperature
         
         # Apply the temperature increase
         self.temperature = np.maximum(self.temperature, self.temperature + temp_addition)
@@ -730,17 +984,25 @@ class GeologySimulation:
                     if 0 <= ny < self.height and 0 <= nx < self.width:
                         # Add to pressure offset so it persists across recalculations
                         self.pressure_offset[ny, nx] += pressure_increase
+        
+        # Recalculate pressure to include the new offset
+        self._calculate_planetary_pressure()
     
     def get_visualization_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Get data for visualization (rock colors, temperature, pressure)"""
         # Create color array from rock types
         colors = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         
-        for y in range(self.height):
-            for x in range(self.width):
-                rock_type = self.rock_types[y, x]
-                props = self.rock_db.get_properties(rock_type)
-                colors[y, x] = props.color_rgb
+        # Get unique rock types and their colors
+        # Convert to set to avoid sorting issues with RockType enums
+        unique_rocks = set(self.rock_types.flatten())
+        
+        # Efficient color assignment
+        for rock in unique_rocks:
+            mask = (self.rock_types == rock)
+            if np.any(mask):
+                props = self.rock_db.get_properties(rock)
+                colors[mask] = props.color_rgb
         
         return colors, self.temperature, self.pressure
     

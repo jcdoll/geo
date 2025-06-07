@@ -72,6 +72,10 @@ class GeologyVisualizer:
         self.base_step_interval = 200  # milliseconds at 1x speed
         self.last_step_time = 0
         
+        # Performance monitoring
+        self.step_times = []  # Track recent step durations
+        self.max_step_history = 30  # Keep last 30 step times
+        
         # Interaction state
         self.mouse_tool = 'heat'  # 'heat', 'pressure'
         self.tool_radius = 3
@@ -358,9 +362,16 @@ class GeologyVisualizer:
         pygame.draw.rect(self.screen, (40, 40, 40), status_rect)
         pygame.draw.line(self.screen, self.colors['text'], (0, self.status_bar_height-1), (self.window_width, self.status_bar_height-1))
         
-        # Status text
+        # Status text with performance info
         play_status = "PAUSED" if self.paused else f"PLAYING {self.speed_multiplier}x"
-        status_text = f"{play_status} | Time: {stats['time']:.0f}y | Temp: {stats['avg_temperature']:.0f}°C (max {stats['max_temperature']:.0f}°C) | Pressure: {stats['avg_pressure']:.1f} MPa | Tool: {self.mouse_tool.title()} (R:{self.tool_radius}, I:{self.tool_intensity})"
+        
+        # Add performance info
+        perf_info = ""
+        if self.step_times:
+            avg_step_time = sum(self.step_times) / len(self.step_times)
+            perf_info = f" | Step: {avg_step_time:.1f}ms"
+        
+        status_text = f"{play_status} | Time: {stats['time']:.0f}y | Temp: {stats['avg_temperature']:.0f}°C (max {stats['max_temperature']:.0f}°C) | Pressure: {stats['avg_pressure']:.1f} MPa | Tool: {self.mouse_tool.title()} (R:{self.tool_radius}, I:{self.tool_intensity}){perf_info}"
         
         text_surface = self.small_font.render(status_text, True, self.colors['text'])
         self.screen.blit(text_surface, (5, 5))
@@ -611,10 +622,42 @@ class GeologyVisualizer:
             
             # Auto-stepping when playing
             if not self.paused:
-                step_interval = int(self.base_step_interval / self.speed_multiplier)
-                if current_time - self.last_step_time > step_interval:
-                    self.simulation.step_forward()
-                    self.last_step_time = current_time
+                if self.speed_multiplier <= 4.0:
+                    # For moderate speeds, use time-based stepping
+                    step_interval = int(self.base_step_interval / self.speed_multiplier)
+                    if current_time - self.last_step_time > step_interval:
+                        # Measure step performance
+                        step_start = pygame.time.get_ticks()
+                        self.simulation.step_forward()
+                        step_duration = pygame.time.get_ticks() - step_start
+                        
+                        # Track performance
+                        self.step_times.append(step_duration)
+                        if len(self.step_times) > self.max_step_history:
+                            self.step_times.pop(0)
+                        
+                        self.last_step_time = current_time
+                else:
+                    # For high speeds (8x, 16x), use multiple steps per frame
+                    # This bypasses performance bottlenecks from single-step timing
+                    step_interval = self.base_step_interval // 4  # Quarter of base interval
+                    if current_time - self.last_step_time > step_interval:
+                        # Calculate how many steps to take based on speed multiplier
+                        steps_per_burst = int(self.speed_multiplier / 4)  # 8x=2 steps, 16x=4 steps
+                        
+                        # Measure step performance
+                        step_start = pygame.time.get_ticks()
+                        for _ in range(steps_per_burst):
+                            self.simulation.step_forward()
+                        step_duration = pygame.time.get_ticks() - step_start
+                        
+                        # Track performance (duration per single step for comparison)
+                        avg_step_duration = step_duration / steps_per_burst if steps_per_burst > 0 else step_duration
+                        self.step_times.append(avg_step_duration)
+                        if len(self.step_times) > self.max_step_history:
+                            self.step_times.pop(0)
+                        
+                        self.last_step_time = current_time
             
             # Draw everything
             self.screen.fill(self.colors['background'])
