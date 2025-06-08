@@ -7,8 +7,14 @@ import pygame
 import numpy as np
 import sys
 from typing import Tuple, Optional
-from simulation_engine import GeologySimulation
-from materials import MaterialType, MaterialDatabase
+
+# Handle both relative and absolute imports
+try:
+    from .simulation_engine import GeologySimulation
+    from .materials import MaterialType, MaterialDatabase
+except ImportError:
+    from simulation_engine import GeologySimulation
+    from materials import MaterialType, MaterialDatabase
 import matplotlib
 matplotlib.use('Agg')  # Force non-interactive backend before importing pyplot
 import matplotlib.pyplot as plt
@@ -83,10 +89,10 @@ class GeologyVisualizer:
         self.mouse_tool = 'heat'  # 'heat', 'pressure'
         self.tool_radius = 3
         self.tool_intensity = 100
-        self.selected_tile = None  # (x, y) coordinates of selected tile for info display
+        self.selected_tile = None  # (x, y) coordinates of selected tile
         
         # UI state
-        self.sidebar_tab = 'transitions'  # 'transitions', 'composition', 'controls'
+        self.sidebar_tab = 'controls'  # 'controls', 'stats', 'composition', 'graphs', 'info'
         
         # UI elements
         self.buttons = self._create_buttons()
@@ -163,12 +169,19 @@ class GeologyVisualizer:
         
         y += spacing * 2
         
-        # Tab buttons
-        tabs = [('Transitions', 'transitions'), ('Composition', 'composition'), ('Controls', 'controls'), ('Graphs', 'graphs')]
-        tab_width = button_width // 4 - 2
+        # Tab buttons in 2x3 grid
+        tabs = [('Controls', 'controls'), ('Stats', 'stats'), ('Composition', 'composition'), ('Graphs', 'graphs'), ('Info', 'info')]
+        tab_width = button_width // 3 - 2
+        tab_height = button_height - 5
         for i, (text, tab) in enumerate(tabs):
+            if i < 3:  # First row: Controls, Stats, Composition
+                row = 0
+                col = i
+            else:  # Second row: Graphs, Info
+                row = 1
+                col = i - 3
             buttons.append({
-                'rect': pygame.Rect(x + i * (tab_width + 2), y, tab_width, button_height),
+                'rect': pygame.Rect(x + col * (tab_width + 2), y + row * (tab_height + 2), tab_width, tab_height),
                 'text': text,
                 'action': f'tab_{tab}',
                 'color': self.colors['button']
@@ -210,12 +223,11 @@ class GeologyVisualizer:
         return offset_x, offset_y
     
     def _handle_right_click(self, pos: Tuple[int, int]):
-        """Handle right-click for tile info"""
+        """Handle right-click for selecting tiles and showing info"""
         x, y = pos
         
         # Check if click is in simulation area
         if x >= self.main_panel_width or y < self.status_bar_height:
-            self.selected_tile = None
             return
         
         # Get centering offsets
@@ -225,11 +237,9 @@ class GeologyVisualizer:
         sim_x = (x - offset_x) // self.cell_width
         sim_y = (y - self.status_bar_height - offset_y) // self.cell_height
         
-        # Validate coordinates
+        # Validate coordinates and select tile
         if 0 <= sim_x < self.sim_width and 0 <= sim_y < self.sim_height:
             self.selected_tile = (sim_x, sim_y)
-        else:
-            self.selected_tile = None
     
     def _handle_mouse_drag(self, pos: Tuple[int, int], buttons: Tuple[bool, bool, bool]):
         """Handle mouse dragging on simulation area"""
@@ -332,24 +342,75 @@ class GeologyVisualizer:
         
         self.screen.blit(sim_surface, (0, self.status_bar_height))
         
-        # Draw white box around selected tile
+        # Draw selected tile highlight
         if self.selected_tile:
-            sim_x, sim_y = self.selected_tile
-            tile_screen_x = offset_x + sim_x * self.cell_width
-            tile_screen_y = offset_y + sim_y * self.cell_height
-            
-            # Draw white border around the selected tile
-            border_rect = pygame.Rect(
-                tile_screen_x, 
-                self.status_bar_height + tile_screen_y,
-                self.cell_width, 
-                self.cell_height
-            )
-            pygame.draw.rect(self.screen, (255, 255, 255), border_rect, 2)  # White border, 2 pixels thick
+            x, y = self.selected_tile
+            if 0 <= x < self.sim_width and 0 <= y < self.sim_height:
+                highlight_rect = pygame.Rect(
+                    offset_x + x * self.cell_width,
+                    self.status_bar_height + offset_y + y * self.cell_height,
+                    self.cell_width,
+                    self.cell_height
+                )
+                # Draw white highlight border (original color)
+                pygame.draw.rect(self.screen, (255, 255, 255), highlight_rect, 2)
+        
+        # Draw selected tile info in top-right of simulation area
+        self._draw_selected_tile_info()
         
         # Draw color bar for temperature and pressure modes
         if self.display_mode in ['temperature', 'pressure', 'power']:
             self._draw_color_bar()
+    
+    def _draw_selected_tile_info(self):
+        """Draw selected tile information in top-right of simulation area"""
+        if not self.selected_tile:
+            return
+            
+        x, y = self.selected_tile
+        if not (0 <= x < self.sim_width and 0 <= y < self.sim_height):
+            return
+            
+        # Get tile data
+        material = self.simulation.material_types[y, x]
+        temp = self.simulation.temperature[y, x] - 273.15  # Convert to Celsius
+        pressure = self.simulation.pressure[y, x]
+        age = self.simulation.age[y, x]
+        
+        # Position in top-left of simulation area
+        info_x = 10  # 10px from left edge
+        info_y = self.status_bar_height + 10  # 10px below status bar
+        
+        # Create info lines
+        info_lines = [
+            "Selected Tile:",
+            f"Position: ({x}, {y})",
+            f"Material: {material.name}",
+            f"Temperature: {temp:.1f}°C", 
+            f"Pressure: {pressure:.2f} MPa",
+            f"Age: {age:.0f} years"
+        ]
+        
+        # Draw semi-transparent background
+        max_width = max(self.small_font.size(line)[0] for line in info_lines)
+        bg_width = max_width + 20
+        bg_height = len(info_lines) * 16 + 10
+        bg_rect = pygame.Rect(info_x - 10, info_y - 5, bg_width, bg_height)
+        
+        # Create surface with alpha for transparency
+        bg_surface = pygame.Surface((bg_width, bg_height))
+        bg_surface.set_alpha(200)  # Semi-transparent
+        bg_surface.fill((40, 40, 40))  # Dark background
+        self.screen.blit(bg_surface, (info_x - 10, info_y - 5))
+        
+        # Draw border
+        pygame.draw.rect(self.screen, self.colors['text'], bg_rect, 1)
+        
+        # Draw info text
+        for i, line in enumerate(info_lines):
+            color = self.colors['green'] if i == 0 else self.colors['text']  # Header in green
+            text_surface = self.small_font.render(line, True, color)
+            self.screen.blit(text_surface, (info_x, info_y + i * 16))
     
     def _draw_color_bar(self):
         """Draw color bar legend for temperature or pressure mode"""
@@ -641,15 +702,18 @@ class GeologyVisualizer:
             avg_step_time = sum(self.step_times) / len(self.step_times)
             perf_info = f" | Step: {avg_step_time:.1f}ms"
         
-        status_text = f"{play_status} | Time: {stats['time']:.0f}y | Temp: {stats['avg_temperature']:.0f}°C (max {stats['max_temperature']:.0f}°C) | Pressure: {stats['avg_pressure']:.1f} MPa | Tool: {self.mouse_tool.title()} (R:{self.tool_radius}, I:{self.tool_intensity}){perf_info}"
+        # Add stability factor info if time step was reduced
+        stability_info = ""
+        if stats.get('stability_factor', 1.0) < 1.0:
+            stability_info = f" | Stability: {stats['stability_factor']:.3f} (dt reduced for CFL)"
+        
+        status_text = f"{play_status} | Time: {stats['time']:.0f}y | Temp: {stats['avg_temperature']:.0f}°C (max {stats['max_temperature']:.0f}°C) | Pressure: {stats['avg_pressure']:.1f} MPa | Tool: {self.mouse_tool.title()} (R:{self.tool_radius}, I:{self.tool_intensity}){perf_info}{stability_info}"
         
         text_surface = self.small_font.render(status_text, True, self.colors['text'])
         self.screen.blit(text_surface, (5, 5))
     
-    def _draw_transition_diagram(self):
+    def _draw_info_tab(self, x_offset: int, y_offset: int):
         """Draw rock type transition diagram"""
-        x_offset = self.main_panel_width + 10
-        y_offset = 440  # Start below the tab buttons with more spacing
         
         # Title
         title = self.small_font.render("Rock Transitions:", True, self.colors['text'])
@@ -720,17 +784,20 @@ class GeologyVisualizer:
         x_offset = self.main_panel_width + 10
         y_offset = 440  # Start below the tab buttons with more spacing
         
-        if self.sidebar_tab == 'transitions':
-            self._draw_transition_diagram()
+        if self.sidebar_tab == 'controls':
+            self._draw_controls_tab(x_offset, y_offset)
+        
+        elif self.sidebar_tab == 'stats':
+            self._draw_stats_tab(x_offset, y_offset)
         
         elif self.sidebar_tab == 'composition':
             self._draw_composition_tab(x_offset, y_offset)
         
-        elif self.sidebar_tab == 'controls':
-            self._draw_controls_tab(x_offset, y_offset)
-        
         elif self.sidebar_tab == 'graphs':
             self._draw_graphs_tab(x_offset, y_offset)
+        
+        elif self.sidebar_tab == 'info':
+            self._draw_info_tab(x_offset, y_offset)
     
     def _draw_composition_tab(self, x_offset: int, y_offset: int):
         """Draw rock composition information"""
@@ -742,7 +809,9 @@ class GeologyVisualizer:
         y_offset += 20
         
         # Material composition with colors (already sorted by percentage in descending order)
-        for material_type, percentage in stats['material_composition'].items():
+        # Filter out space since it's not a geological material
+        filtered_composition = {k: v for k, v in stats['material_composition'].items() if k != 'space'}
+        for material_type, percentage in filtered_composition.items():
             try:
                 material_enum = MaterialType(material_type)
                 material_color = self.simulation.material_db.get_properties(material_enum).color_rgb
@@ -769,7 +838,6 @@ class GeologyVisualizer:
         y_offset += 16
         
         stat_texts = [
-            f"Time Step: {stats['dt']:.0f} years",
             f"Max Pressure: {stats['max_pressure']:.1f} MPa",
             f"History Length: {stats['history_length']}",
         ]
@@ -777,6 +845,40 @@ class GeologyVisualizer:
         for text in stat_texts:
             surface = self.small_font.render(text, True, self.colors['text'])
             self.screen.blit(surface, (x_offset, y_offset))
+            y_offset += 14
+    
+    def _draw_stats_tab(self, x_offset: int, y_offset: int):
+        """Draw simulation statistics"""
+        stats = self.simulation.get_stats()
+        
+        # Header
+        header = self.small_font.render("Simulation Stats:", True, self.colors['green'])
+        self.screen.blit(header, (x_offset, y_offset))
+        y_offset += 20
+        
+        # Time and simulation stats
+        stat_texts = [
+            f"Time Step: {stats['dt']:.0f} years",
+            f"Effective dt: {stats['effective_dt']:.1f} years",
+            f"Stability Factor: {stats['stability_factor']:.3f}",
+            "",
+            f"Simulation Time: {stats['time']:.0f} years",
+            f"History Length: {stats['history_length']} steps",
+            "",
+            f"Temperature Range:",
+            f"  Average: {stats['avg_temperature']:.0f}°C",
+            f"  Maximum: {stats['max_temperature']:.0f}°C",
+            "",
+            f"Pressure Range:",
+            f"  Average: {stats['avg_pressure']:.1f} MPa",
+            f"  Maximum: {stats['max_pressure']:.1f} MPa",
+        ]
+        
+        for text in stat_texts:
+            if text:  # Skip empty lines
+                color = self.colors['yellow'] if 'Factor' in text and stats['stability_factor'] < 1.0 else self.colors['text']
+                surface = self.small_font.render(text, True, color)
+                self.screen.blit(surface, (x_offset, y_offset))
             y_offset += 14
     
     def _draw_controls_tab(self, x_offset: int, y_offset: int):
@@ -787,11 +889,17 @@ class GeologyVisualizer:
         y_offset += 20
         
         play_status = "PAUSED" if self.paused else f"PLAYING {self.speed_multiplier}x"
+        # Get current quality level
+        current_quality = getattr(self.simulation, '_quality_level', 1)
+        quality_names = {1: "Full", 2: "Balanced", 3: "Fast"}
+        quality_name = quality_names.get(current_quality, f"Level {current_quality}")
+        
         tool_texts = [
             f"Status: {play_status}",
             f"Tool: {self.mouse_tool.title()}",
             f"Radius: {self.tool_radius}",
             f"Intensity: {self.tool_intensity}",
+            f"Quality: {quality_name} ({current_quality})",
         ]
         
         for text in tool_texts:
@@ -804,7 +912,7 @@ class GeologyVisualizer:
         instructions = [
             "Controls:",
             "  Left click + drag: Apply tool",
-            "  Right click: Show tile info",
+            "  Right click: Select tile (show info)",
             "  Mouse wheel: Adjust radius", 
             "  Shift + wheel: Adjust intensity",
             "  Space: Play/Pause",
@@ -813,7 +921,7 @@ class GeologyVisualizer:
             "  T: Step backward",
             "  1/2/3/4: Switch display modes",
             "  Tab: Cycle sidebar tabs",
-            "  Q/W/E/G: Direct tab selection"
+            "  Q: Change quality setting"
         ]
         
         for i, instruction in enumerate(instructions):
@@ -821,30 +929,6 @@ class GeologyVisualizer:
             surface = self.small_font.render(instruction, True, color)
             self.screen.blit(surface, (x_offset, y_offset))
             y_offset += 14
-        
-        # Tile info display
-        if self.selected_tile:
-            y_offset += 15
-            tile_header = self.small_font.render("Selected Tile Info:", True, self.colors['green'])
-            self.screen.blit(tile_header, (x_offset, y_offset))
-            y_offset += 16
-            
-            sim_x, sim_y = self.selected_tile
-            material = self.simulation.material_types[sim_y, sim_x]
-            temperature = self.simulation.temperature[sim_y, sim_x] - 273.15  # Convert to Celsius
-            pressure = self.simulation.pressure[sim_y, sim_x]  # Already in MPa
-            
-            tile_info = [
-                f"Coords: ({sim_x}, {sim_y})",
-                f"Material: {material.value}",
-                f"Temp: {temperature:.1f}°C",
-                f"Pressure: {pressure:.2f} MPa"
-            ]
-            
-            for info_line in tile_info:
-                surface = self.small_font.render(info_line, True, self.colors['text'])
-                self.screen.blit(surface, (x_offset, y_offset))
-                y_offset += 14
     
     def _draw_graphs_tab(self, x_offset: int, y_offset: int):
         """Draw compact graphs in the sidebar"""
@@ -982,44 +1066,56 @@ class GeologyVisualizer:
         """Handle keyboard input"""
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_SPACE:
+                # SPACE: Play/Pause simulation
                 self.paused = not self.paused
-            elif event.key == pygame.K_r:
-                self.simulation.step_forward()
-            elif event.key == pygame.K_t:
+            elif event.key == pygame.K_LEFT:
+                # Left arrow: Step backward
                 self.simulation.step_backward()
-            elif event.key == pygame.K_1:
-                self.display_mode = 'materials'
-            elif event.key == pygame.K_2:
-                self.display_mode = 'temperature'
-            elif event.key == pygame.K_3:
-                self.display_mode = 'pressure'
-            elif event.key == pygame.K_4:
-                self.display_mode = 'power'
-            elif event.key == pygame.K_TAB:
-                # Cycle through tabs
-                tabs = ['transitions', 'composition', 'controls', 'graphs']
-                current_idx = tabs.index(self.sidebar_tab)
-                self.sidebar_tab = tabs[(current_idx + 1) % len(tabs)]
-            elif event.key == pygame.K_q:
-                self.sidebar_tab = 'transitions'
-            elif event.key == pygame.K_w:
-                self.sidebar_tab = 'composition'
-            elif event.key == pygame.K_e:
-                self.sidebar_tab = 'controls'
-            elif event.key == pygame.K_g:
-                self.sidebar_tab = 'graphs'
-            elif event.key == pygame.K_MINUS or event.key == pygame.K_KP_MINUS:
-                # Decrease speed
-                speeds = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
-                current_idx = speeds.index(self.speed_multiplier) if self.speed_multiplier in speeds else 1
-                if current_idx > 0:
-                    self.speed_multiplier = speeds[current_idx - 1]
-            elif event.key == pygame.K_PLUS or event.key == pygame.K_EQUALS or event.key == pygame.K_KP_PLUS:
-                # Increase speed
+            elif event.key == pygame.K_RIGHT:
+                # Right arrow: Step forward
+                self.simulation.step_forward()
+            elif event.key == pygame.K_UP:
+                # Up arrow: Increase simulation speed
                 speeds = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
                 current_idx = speeds.index(self.speed_multiplier) if self.speed_multiplier in speeds else 1
                 if current_idx < len(speeds) - 1:
                     self.speed_multiplier = speeds[current_idx + 1]
+            elif event.key == pygame.K_DOWN:
+                # Down arrow: Decrease simulation speed
+                speeds = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
+                current_idx = speeds.index(self.speed_multiplier) if self.speed_multiplier in speeds else 1
+                if current_idx > 0:
+                    self.speed_multiplier = speeds[current_idx - 1]
+            elif event.key == pygame.K_1:
+                # 1: Material view
+                self.display_mode = 'materials'
+            elif event.key == pygame.K_2:
+                # 2: Temperature view
+                self.display_mode = 'temperature'
+            elif event.key == pygame.K_3:
+                # 3: Pressure view
+                self.display_mode = 'pressure'
+            elif event.key == pygame.K_4:
+                # 4: Power view
+                self.display_mode = 'power'
+            elif event.key == pygame.K_r:
+                # R: Reset simulation
+                self.simulation._setup_planetary_conditions()
+                self.simulation.age = 0.0
+                self.simulation.time = 0.0
+                self.simulation.history.clear()
+                self.simulation._update_material_properties()
+            elif event.key == pygame.K_q:
+                # Q: Change quality setting (cycle between 1=Full, 2=Balanced, 3=Fast)
+                current_quality = getattr(self.simulation, '_quality_level', 1)
+                new_quality = (current_quality % 3) + 1
+                self.simulation._setup_performance_config(new_quality)
+                self.simulation._quality_level = new_quality
+            elif event.key == pygame.K_TAB:
+                # Tab: Cycle through sidebar tabs
+                tabs = ['controls', 'stats', 'composition', 'graphs', 'info']
+                current_idx = tabs.index(self.sidebar_tab)
+                self.sidebar_tab = tabs[(current_idx + 1) % len(tabs)]
     
     def _handle_mouse_wheel(self, event):
         """Handle mouse wheel for tool adjustment"""
@@ -1098,15 +1194,19 @@ def main():
     """Run the geology simulator"""
     print("Starting Geology Simulator...")
     print("Controls:")
-    print("  Left click + drag: Apply selected tool")
+    print("  Mouse: Click and drag to add heat sources")
+    print("  Right Click: Select tile (show info)")
+    print("  Shift + Right Click: Add tectonic stress")
+    print("  SPACE: Play/Pause simulation")
+    print("  Left/Right arrows: Step backward/forward")
+    print("  Up/Down arrows: Adjust simulation speed")
+    print("  1-4: Switch visualization modes (Material, Temperature, Pressure, Power)")
+    print("  R: Reset simulation")
+    print("  G: Toggle graphs display")
+    print("  Q: Change quality setting (1=Full, 2=Balanced, 3=Fast)")
+    print("  Tab: Cycle through sidebar tabs")
     print("  Mouse wheel: Adjust tool radius")
     print("  Shift + mouse wheel: Adjust tool intensity")
-    print("  Space: Play/Pause simulation")
-    print("  R: Step forward")
-    print("  T: Step backward")
-    print("  1/2/3/4: Switch display modes")
-    print("  Tab: Cycle sidebar tabs")
-    print("  Q/W/E/G: Direct tab selection")
     
     visualizer = GeologyVisualizer()
     visualizer.run()

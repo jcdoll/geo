@@ -102,7 +102,7 @@ class GeologySimulation:
         
         # Simulation parameters
         self.time = 0.0
-        self.dt = 50.0  # years per time step (reduced for gradual ice melting)
+        self.dt = 10.0
         
         # Unit conversion constants
         self.seconds_per_year = 365.25 * 24 * 3600
@@ -117,6 +117,49 @@ class GeologySimulation:
         
         # Material database
         self.material_db = MaterialDatabase()
+        
+        # General physics settings (not performance-dependent)
+        self.atmospheric_diffusivity_enhancement = 1.2  # Enhanced heat transfer in atmosphere
+        self.interface_diffusivity_enhancement = 1.5    # Enhanced heat transfer at material interfaces
+        self.surface_radiation_depth_fraction = 0.1     # Fraction of cell depth that participates in surface radiation
+        self.radiative_cooling_efficiency = 0.2         # Cooling efficiency factor for Stefan-Boltzmann radiation
+        
+        # Temperature constants
+        self.space_temperature = 2.7                    # Cosmic background temperature (K)
+        self.reference_temperature = 273.15             # Reference temperature for thermal expansion (K)
+        self.core_temperature = 400.0 + 273.15         # Initial planetary core temperature (K) - closer to equilibrium
+        self.surface_temperature = 15.0 + 273.15       # Initial planetary surface temperature (K) - closer to equilibrium
+        self.temperature_decay_constant = 2.0          # Temperature gradient decay factor - steeper gradient
+        self.melting_temperature = 1200 + 273.15       # General melting temperature threshold (K)
+        self.core_heating_depth_scale = 1.0            # Exponential scale factor for core heating vs depth
+        
+        # Pressure constants  
+        self.surface_pressure = 0.1                     # Surface pressure (MPa)
+        self.atmospheric_scale_height = 8400            # Atmospheric scale height (m)
+        self.average_gravity = 9.81                     # Average gravitational acceleration (m/s²)
+        self.average_solid_density = 3000               # Average solid rock density (kg/m³)
+        self.average_fluid_density = 2000               # Average fluid density (kg/m³)
+        
+        # Solar and greenhouse constants (balanced for stable temperatures)
+        self.solar_constant = 1361                      # Solar constant (W/m²)
+        self.planetary_distance_factor = 0.01          # Distance factor for solar intensity - increased to balance cooling
+        self.atmospheric_absorption = 0.25             # Atmospheric absorption fraction - realistic 25%
+        self.base_greenhouse_effect = 0.5              # Base greenhouse effect fraction - increased to retain heat
+        self.max_greenhouse_effect = 0.8               # Maximum greenhouse effect fraction
+        self.greenhouse_vapor_scaling = 1000.0         # Water vapor mass scaling for greenhouse effect
+        
+        # Material mobility probabilities
+        self.gravitational_fall_probability = 0.5       # Initial fall probability for collapse
+        self.gravitational_fall_probability_later = 0.3 # Later fall probability for collapse
+        self.fluid_migration_probability = 0.3          # Air/fluid migration probability
+        self.density_swap_probability = 0.3             # Density stratification swap probability
+        
+        # Planet formation constants
+        self.ice_region_depth = 0.6                    # Depth fraction where ice becomes common
+        self.mantle_region_depth = 0.3                 # Depth fraction for mantle region
+        self.surface_region_depth = 0.85               # Depth fraction for surface variations
+        self.atmosphere_formation_probability = 0.3    # Probability of atmosphere formation at surface
+        self.surface_variation_noise = 0.1             # Surface irregularity noise factor
         
         # History for time reversal
         self.max_history = 1000
@@ -163,9 +206,6 @@ class GeologySimulation:
             self.density_sample_fraction = 1.0     # Process all cells for density sorting
             self.density_min_sample_size = 100     # Minimum cells to process
             self.density_ratio_threshold = 1.05    # Minimum 5% density difference for swapping
-            self.atmospheric_diffusivity_enhancement = 5.0  # Enhanced heat transfer in atmosphere
-            self.interface_diffusivity_enhancement = 2.0    # Enhanced heat transfer at material interfaces
-            self.max_temperature_clamp = 5000.0    # Maximum temperature limit (K)
             self.max_fall_steps = 5                # Maximum gravitational collapse iterations
             self.enable_weathering = True           # Enable weathering
             self.neighbor_count = 8                 # Use 8 neighbors for full accuracy
@@ -181,9 +221,6 @@ class GeologySimulation:
             self.density_sample_fraction = 0.5     # Process 50% of cells for density sorting
             self.density_min_sample_size = 50      # Minimum cells to process
             self.density_ratio_threshold = 1.1     # Minimum 10% density difference for swapping
-            self.atmospheric_diffusivity_enhancement = 3.0  # Moderate atmospheric enhancement
-            self.interface_diffusivity_enhancement = 1.5    # Moderate interface enhancement
-            self.max_temperature_clamp = 4000.0    # Lower temperature limit for stability
             self.max_fall_steps = 3                # Moderate gravitational collapse iterations
             self.enable_weathering = False          # Disable weathering
             self.neighbor_count = 8                 # Use 8 neighbors for good accuracy
@@ -199,18 +236,13 @@ class GeologySimulation:
             self.density_sample_fraction = 0.2     # Process 20% of cells for density sorting
             self.density_min_sample_size = 25      # Minimum cells to process
             self.density_ratio_threshold = 1.2     # Minimum 20% density difference for swapping
-            self.atmospheric_diffusivity_enhancement = 2.0  # Minimal atmospheric enhancement
-            self.interface_diffusivity_enhancement = 1.2    # Minimal interface enhancement
-            self.max_temperature_clamp = 3000.0    # Conservative temperature limit
             self.max_fall_steps = 2                # Minimal gravitational collapse iterations
             self.enable_weathering = False          # Disable weathering
             self.neighbor_count = 4                 # Use 4 neighbors for performance
             
         else:
             raise ValueError(f"Unknown quality level: {quality}. Use 1 (full), 2 (balanced), or 3 (fast)")
-        
-        # Always use the fastest vectorized algorithms for maximum performance!
-    
+
     def _setup_neighbors(self):
         """Pre-compute neighbor offset arrays for efficient operations"""
         # 4-neighbor offsets (cardinal directions)
@@ -229,7 +261,7 @@ class GeologySimulation:
         """Set up initial planetary conditions with emergent circular shape"""
         # Initialize everything as space
         self.material_types.fill(MaterialType.SPACE)
-        self.temperature.fill(2.7)  # Space temperature (~3K cosmic background radiation)
+        self.temperature.fill(self.space_temperature)  # Space temperature (~3K cosmic background radiation)
         self.pressure.fill(0.0)  # Vacuum
         
         # Calculate initial planet radius in cells
@@ -247,24 +279,19 @@ class GeologySimulation:
                     relative_depth = distance / planet_radius  # 0 at center, 1 at surface
                     
                     # Temperature: "dirty iceball" formation - cold surface, hot core (in Kelvin)
-                    core_temp = 1800.0 + 273.15  # K - hot core for activity
-                    surface_temp = -30.0 + 273.15  # K - cold surface to preserve ice
-                    
-                    # Use exponential decay with gentler gradient for more extensive hot zone
-                    decay_constant = 1.5  # Gentler decay = larger hot zone
-                    temp_gradient = (core_temp - surface_temp) * np.exp(-decay_constant * relative_depth)
-                    self.temperature[y, x] = surface_temp + temp_gradient
+                    temp_gradient = (self.core_temperature - self.surface_temperature) * np.exp(-self.temperature_decay_constant * relative_depth)
+                    self.temperature[y, x] = self.surface_temperature + temp_gradient
                     
                     # Add some randomness for more interesting geology (further reduced to preserve ice)
                     self.temperature[y, x] += np.random.normal(0, 5)
                     
                     # "Dirty iceball" formation - include ice pockets in outer regions
-                    if relative_depth > 0.6:  # Outer 40% of planet - more ice
+                    if relative_depth > self.ice_region_depth:  # Outer regions - more ice
                         material_types = [
                             MaterialType.GRANITE, MaterialType.BASALT, MaterialType.SANDSTONE, 
                             MaterialType.LIMESTONE, MaterialType.SHALE, MaterialType.ICE, MaterialType.ICE, MaterialType.ICE  # More ice in outer regions
                         ]
-                    elif relative_depth > 0.3:  # Middle regions - some ice
+                    elif relative_depth > self.mantle_region_depth:  # Middle regions - some ice
                         material_types = [
                             MaterialType.GRANITE, MaterialType.BASALT, MaterialType.GNEISS, 
                             MaterialType.SANDSTONE, MaterialType.LIMESTONE, MaterialType.SHALE,
@@ -281,18 +308,18 @@ class GeologySimulation:
                     self.material_types[y, x] = np.random.choice(material_types)
                     
                     # Convert hot material to magma based on temperature
-                    if self.temperature[y, x] > 1200 + 273.15:  # Hot enough to melt
+                    if self.temperature[y, x] > self.melting_temperature:  # Hot enough to melt
                         self.material_types[y, x] = MaterialType.MAGMA
                         
                     # Add some surface variation (not perfectly circular)
-                    if relative_depth > 0.85:  # Near surface
+                    if relative_depth > self.surface_region_depth:  # Near surface
                         # Add some randomness to make surface irregular
-                        noise = np.random.random() * 0.1
+                        noise = np.random.random() * self.surface_variation_noise
                         if relative_depth + noise > 1.0:
                             # Sometimes extend into space or create atmosphere
-                            if np.random.random() < 0.3:  # 30% chance of atmosphere
+                            if np.random.random() < self.atmosphere_formation_probability:  # Chance of atmosphere
                                 self.material_types[y, x] = MaterialType.AIR
-                                self.temperature[y, x] = surface_temp  # Already in K
+                                self.temperature[y, x] = self.surface_temperature
         
         # Calculate initial pressure using gravitational model
         self._calculate_planetary_pressure()
@@ -324,7 +351,7 @@ class GeologySimulation:
         
         self._properties_dirty = False
     
-    def _heat_diffusion(self) -> np.ndarray:
+    def _heat_diffusion(self) -> tuple[np.ndarray, float]:
         """Heat diffusion using scipy convolution for efficient computation"""
         # Start with current temperature
         new_temp = self.temperature.copy()
@@ -358,11 +385,11 @@ class GeologySimulation:
                 if is_non_solid:
                     self._non_solid_mask |= (self.material_types == material_type)
         
-        # Enhanced convective heat transfer for atmospheric gases
+        # Enhanced convective heat transfer for atmospheric gases (limited enhancement)
         atmosphere_mask = (
             (self.material_types == MaterialType.AIR) |
             (self.material_types == MaterialType.WATER_VAPOR)
-        )        
+        )
         if np.any(atmosphere_mask):
             thermal_diffusivity[atmosphere_mask] *= self.atmospheric_diffusivity_enhancement
         
@@ -388,7 +415,7 @@ class GeologySimulation:
                     current_diffs = np.abs(current_temps - neighbor_temps)
                     temp_diffs[y_grid, x_grid] = np.maximum(temp_diffs[y_grid, x_grid], current_diffs)
                 
-                # Enhance diffusivity where non-solid materials have large temp differences
+                # Enhance diffusivity where non-solid materials have large temp differences (limited)
                 enhancement_mask = non_solid_edges & (temp_diffs > 100)
                 if np.any(enhancement_mask):
                     thermal_diffusivity[enhancement_mask] *= self.interface_diffusivity_enhancement
@@ -399,7 +426,7 @@ class GeologySimulation:
             # Weight matrix: diagonals get 1/√2, cardinals get 1.0, center gets negative sum
             self._diffusion_kernel = np.array([
                 [0.707, 1.0, 0.707],
-                [1.0,  -6.83, 1.0],   # -6.83 ≈ -(4*1.0 + 4*0.707)
+                [1.0,  -6.828, 1.0],   # -6.828 to three decimal places for zero sum kernel
                 [0.707, 1.0, 0.707]
             ]) / 8.0  # Normalize
         
@@ -408,14 +435,27 @@ class GeologySimulation:
         # Apply diffusion using convolution (much faster than nested loops)
         temp_laplacian = ndimage.convolve(self.temperature, kernel, mode='constant', cval=0)
         
-        # Calculate temperature changes (vectorized)
-        # Proper thermal diffusion: α * dt / (dx²)
-        # For numerical stability, we need to ensure the coefficient is < 0.5 (CFL condition)
-        max_alpha = np.max(thermal_diffusivity[thermal_diffusivity > 0]) if np.any(thermal_diffusivity > 0) else 1e-6
+        # Calculate temperature changes using proper thermal diffusion physics
+        # Heat equation: ∂T/∂t = α ∇²T where α = k/(ρ*cp) is thermal diffusivity
         dt_seconds = self.dt * self.seconds_per_year
-        stability_factor = min(0.25, (0.5 * self.cell_size ** 2) / (max_alpha * dt_seconds))
-        scaling_factor = stability_factor * thermal_diffusivity * dt_seconds / (self.cell_size ** 2)
-        temp_change = scaling_factor * temp_laplacian
+        dx_squared = self.cell_size ** 2
+        
+        # Calculate proper thermal diffusion coefficient: α * dt / dx²
+        diffusion_coefficient = thermal_diffusivity * dt_seconds / dx_squared
+        
+        # Check CFL stability condition
+        max_stable_coeff = 0.25
+        max_required_coeff = np.max(diffusion_coefficient[non_space_mask])
+        
+        stability_factor = 1.0
+        if max_required_coeff > max_stable_coeff:
+            # Calculate how much we need to reduce the time step
+            stability_factor = max_stable_coeff / max_required_coeff
+            effective_dt_seconds = dt_seconds * stability_factor
+            diffusion_coefficient = thermal_diffusivity * effective_dt_seconds / dx_squared
+        
+        # Calculate temperature change: ΔT = α * dt/dx² * ∇²T
+        temp_change = diffusion_coefficient * temp_laplacian
         
         # Calculate power density from heat diffusion (W/m³)
         # Power = ρ × cp × ΔT / Δt
@@ -439,19 +479,12 @@ class GeologySimulation:
         self._apply_radiative_cooling(new_temp, non_space_mask)
         
         # Ensure space stays at cosmic background temperature
-        new_temp[~non_space_mask] = 2.7
+        new_temp[~non_space_mask] = self.space_temperature
         
-        # Safety checks: prevent temperatures below absolute zero or above realistic maximum
-        new_temp = np.maximum(new_temp, 0.1)
-        # Gradual temperature clamping to prevent sudden jumps
-        max_temp = self.max_temperature_clamp
-        temp_excess = new_temp - max_temp
-        # Smooth exponential clamping instead of hard cutoff
-        new_temp = np.where(temp_excess > 0, 
-                           max_temp + max_temp * 0.1 * np.tanh(temp_excess / max_temp),
-                           new_temp)
+        # Safety check: prevent temperatures below absolute zero (physically meaningful)
+        new_temp = np.maximum(new_temp, 0.1)  # Minimum temperature near absolute zero
         
-        return new_temp
+        return new_temp, stability_factor
     
     def _apply_radiative_cooling(self, new_temp: np.ndarray, non_space_mask: np.ndarray):
         """Apply Stefan-Boltzmann cooling through transparent atmosphere model"""
@@ -502,7 +535,7 @@ class GeologySimulation:
         
         # Apply Stefan-Boltzmann cooling
         T_radiating = self.temperature[radiative_mask]
-        T_space = 2.7
+        T_space = self.space_temperature
         
         # Stefan-Boltzmann law (vectorized calculation)
         valid_cooling = (T_radiating > T_space) & (self.density[radiative_mask] > 0) & (self.specific_heat[radiative_mask] > 0)
@@ -530,21 +563,18 @@ class GeologySimulation:
             total_water_vapor_mass = np.sum(self.density[water_vapor_mask]) if np.any(water_vapor_mask) else 0.0
             
             # Scale greenhouse effect by water vapor content (logarithmic to prevent runaway)
-            # Base greenhouse effect of 20% for dry atmosphere
-            base_greenhouse = 0.2
-            max_greenhouse = 0.7  # Maximum 70% greenhouse effect (like Venus)
-            
             # Logarithmic scaling to prevent runaway greenhouse
             if total_water_vapor_mass > 0:
-                vapor_factor = np.log1p(total_water_vapor_mass / 1000.0) / 10.0  # Dampened scaling
-                greenhouse_factor = base_greenhouse + (max_greenhouse - base_greenhouse) * np.tanh(vapor_factor)
+                vapor_factor = np.log1p(total_water_vapor_mass / self.greenhouse_vapor_scaling) / 10.0  # Dampened scaling
+                greenhouse_factor = self.base_greenhouse_effect + (self.max_greenhouse_effect - self.base_greenhouse_effect) * np.tanh(vapor_factor)
             else:
-                greenhouse_factor = base_greenhouse
+                greenhouse_factor = self.base_greenhouse_effect
             
             effective_stefan = stefan_boltzmann * (1.0 - greenhouse_factor)
             
-            # Radiative cooling should be efficient to balance solar + internal heating            
-            power_per_area = emissivity * effective_stefan * (T_valid**4 - T_space**4)
+            # Moderate radiative cooling with greenhouse effect providing the main balance
+            cooling_efficiency = self.radiative_cooling_efficiency
+            power_per_area = emissivity * effective_stefan * cooling_efficiency * (T_valid**4 - T_space**4)
             
             # Temperature change calculation (vectorized)
             dt_seconds = self.dt * self.seconds_per_year
@@ -555,7 +585,7 @@ class GeologySimulation:
             # Calculate power density from radiative cooling (W/m³)
             # Radiative cooling is a surface phenomenon, not volumetric
             # Track as effective power density over a thin surface layer
-            surface_layer_thickness = self.cell_size * 0.1  # Only top 10% of cell radiates
+            surface_layer_thickness = self.cell_size * self.surface_radiation_depth_fraction
             power_density_cooling = power_per_area / surface_layer_thickness
             
             # Add cooling power to power density tracking (negative = heat loss)
@@ -605,9 +635,8 @@ class GeologySimulation:
         solar_intensity_factor = np.broadcast_to(solar_intensity_factor, (self.height, self.width))
         
         # Solar constant and planet-specific factors  
-        solar_constant = 1361  # W/m² (Earth's solar constant)
-        planetary_distance_factor = 0.01  # VERY dim star or very far distance (reduced further!)
-        atmospheric_absorption = 0.9  # 90% absorbed by atmosphere (increased more!)
+        effective_solar_intensity = (self.solar_constant * self.planetary_distance_factor * 
+                                    (1.0 - self.atmospheric_absorption))
         
         # Calculate albedo from material properties - vectorized
         albedo = np.zeros((self.height, self.width))
@@ -645,15 +674,15 @@ class GeologySimulation:
             planet_albedo = 0.2  # Default
         
         # Reduced solar input due to albedo reflection
-        effective_solar_constant = solar_constant * (1.0 - planet_albedo)
+        effective_solar_constant = self.solar_constant * (1.0 - planet_albedo)
         
         # Solar flux reaching surface (after atmospheric absorption and albedo)
-        surface_solar_flux = (effective_solar_constant * planetary_distance_factor * 
-                             (1.0 - atmospheric_absorption))  # W/m²
+        surface_solar_flux = (effective_solar_constant * self.planetary_distance_factor * 
+                             (1.0 - self.atmospheric_absorption))  # W/m²
         
         # Solar flux absorbed by atmosphere  
-        atmospheric_solar_flux = (effective_solar_constant * planetary_distance_factor * 
-                                 atmospheric_absorption)  # W/m²
+        atmospheric_solar_flux = (effective_solar_constant * self.planetary_distance_factor * 
+                                 self.atmospheric_absorption)  # W/m²
         
         # 1. Heat the atmosphere with absorbed solar energy
         atmosphere_mask = (
@@ -733,8 +762,8 @@ class GeologySimulation:
             
             # Track solar power density (positive = heat input)
             # Solar heating is surface phenomenon - don't convert to volumetric for power tracking
-            # Instead, track as effective power density over a thin surface layer (10% of cell size)
-            surface_layer_thickness = self.cell_size * 0.1  # Only top 10% of cell absorbs solar
+            # Instead, track as effective power density over a thin surface layer
+            surface_layer_thickness = self.cell_size * self.surface_radiation_depth_fraction
             solar_power_density = surface_flux / surface_layer_thickness  # W/m³ (concentrated in thin layer)
             self.power_density[valid_y, valid_x] += solar_power_density[valid_heating]
 
@@ -796,9 +825,7 @@ class GeologySimulation:
         if np.any(gas_mask):
             surface_distance = self._get_planet_radius()
             height_above_surface = np.maximum(0, distances[gas_mask] - surface_distance) * self.cell_size
-            scale_height = 8400  # meters
-            surface_pressure = 0.1  # MPa
-            self.pressure[gas_mask] = surface_pressure * np.exp(-height_above_surface / scale_height)
+            self.pressure[gas_mask] = self.surface_pressure * np.exp(-height_above_surface / self.atmospheric_scale_height)
         
         # Fluid materials: hydrostatic pressure (vectorized)
         if np.any(fluid_mask):
@@ -806,12 +833,9 @@ class GeologySimulation:
             depth = np.maximum(0, surface_distance - distances[fluid_mask]) * self.cell_size
             
             # Use fluid density for hydrostatic pressure
-            avg_fluid_density = 2000  # kg/m³ (between water 1000 and magma 2800)
-            avg_g = 9.81  # m/s²
-            hydrostatic_pressure = avg_fluid_density * avg_g * depth / 1e6  # Convert to MPa
-            surface_pressure = 0.1  # MPa
+            hydrostatic_pressure = self.average_fluid_density * self.average_gravity * depth / 1e6  # Convert to MPa
             
-            self.pressure[fluid_mask] = np.maximum(surface_pressure, hydrostatic_pressure)
+            self.pressure[fluid_mask] = np.maximum(self.surface_pressure, hydrostatic_pressure)
         
         # Solid materials: lithostatic pressure (vectorized)
         if np.any(solid_mask):
@@ -819,12 +843,9 @@ class GeologySimulation:
             depth = np.maximum(0, surface_distance - distances[solid_mask]) * self.cell_size
             
             # Use vectorized calculation for depth-based pressure
-            avg_solid_density = 3000  # kg/m³
-            avg_g = 9.81  # m/s²
-            lithostatic_pressure = avg_solid_density * avg_g * depth / 1e6  # Convert to MPa
-            surface_pressure = 0.1  # MPa
+            lithostatic_pressure = self.average_solid_density * self.average_gravity * depth / 1e6  # Convert to MPa
             
-            self.pressure[solid_mask] = np.maximum(surface_pressure, lithostatic_pressure)
+            self.pressure[solid_mask] = np.maximum(self.surface_pressure, lithostatic_pressure)
         
         # Add user-applied pressure offsets
         self.pressure += self.pressure_offset
@@ -950,12 +971,6 @@ class GeologySimulation:
         """Calculate exponential temperature factors for mobility"""
         temp_excess = np.maximum(0, self.temperature - threshold)
         return np.minimum(max_factor, np.exp(temp_excess / scale))
-    
-
-    
-
-    
-
     
     def _apply_convective_phase_transitions(self):
         """Handle evaporation and condensation during convective processes"""
@@ -1101,9 +1116,9 @@ class GeologySimulation:
         # Physics-based radioactive heating (W/m³)
         # Crustal rocks: ~1-3 µW/m³ from K, U, Th decay
         # Core: much higher due to pressure concentration and primordial heat
-        # Reduced to prevent contributing to runaway greenhouse effect
-        crustal_heating_rate = 1e-6 * relative_depth**2  # W/m³ - quadratic falloff from center
-        core_heating_rate = 10e-6 * np.exp(4.0 * relative_depth)  # W/m³ - concentrated in deep core
+        # Drastically reduced to prevent runaway heating
+        crustal_heating_rate = 0.1e-6 * relative_depth**2  # W/m³ - reduced by 100x
+        core_heating_rate = 2e-6 * np.exp(self.core_heating_depth_scale * relative_depth)  # W/m³ - reduced by 100x and very gentle exponential
 
         # Convert power density to temperature change: ΔT = (Power × dt) / (ρ × cp × volume)
         # Only apply to solid materials (they have meaningful density and specific_heat)
@@ -1174,13 +1189,11 @@ class GeologySimulation:
         water_vapor_mask = (self.material_types == MaterialType.WATER_VAPOR)
         total_water_vapor_mass = np.sum(self.density[water_vapor_mask]) if np.any(water_vapor_mask) else 0.0
         
-        base_greenhouse = 0.2
-        max_greenhouse = 0.7
         if total_water_vapor_mass > 0:
-            vapor_factor = np.log1p(total_water_vapor_mass / 1000.0) / 10.0
-            greenhouse_factor = base_greenhouse + (max_greenhouse - base_greenhouse) * np.tanh(vapor_factor)
+            vapor_factor = np.log1p(total_water_vapor_mass / self.greenhouse_vapor_scaling) / 10.0
+            greenhouse_factor = self.base_greenhouse_effect + (self.max_greenhouse_effect - self.base_greenhouse_effect) * np.tanh(vapor_factor)
         else:
-            greenhouse_factor = base_greenhouse
+            greenhouse_factor = self.base_greenhouse_effect
         
         # Calculate planet albedo (approximate from surface conditions)
         ice_fraction = np.sum((self.temperature < 273.15) & non_space_mask) / np.sum(non_space_mask) if np.any(non_space_mask) else 0.0
@@ -1210,7 +1223,11 @@ class GeologySimulation:
         self._save_state()
         
         # Core physics (every step)
-        self.temperature = self._heat_diffusion()
+        self.temperature, stability_factor = self._heat_diffusion()
+        
+        # Apply stability factor to the time step for this step
+        effective_dt = self.dt * stability_factor
+        self._last_stability_factor = stability_factor
         self._apply_internal_heat_generation()
         
         # Update center of mass and pressure (every step - needed for thermal calculations)
@@ -1223,10 +1240,10 @@ class GeologySimulation:
         # Run geological processes based on performance configuration
         step_count = int(self.time / self.dt)
         
-        # Unified density stratification (vectorized for maximum speed)
+        # Unified density stratification (physics-correct vectorized for speed + realism)
         density_stratification_changes = False
         if step_count % self.step_interval_differentiation == 0:
-            density_stratification_changes = self._apply_density_stratification_convolution()
+            density_stratification_changes = self._apply_density_stratification_local_vectorized()
         
         # Gravitational collapse (vectorized for maximum speed)
         collapse_changes = False
@@ -1247,16 +1264,16 @@ class GeologySimulation:
         if metamorphic_changes or density_stratification_changes or collapse_changes or fluid_changes or weathering_changes:
             self._update_material_properties()
         
-        # Update age
-        self.age += self.dt
-        self.time += self.dt
+        # Update age and time with the effective time step
+        self.age += effective_dt
+        self.time += effective_dt
         
         # Record time-series data for graphs
         self._record_time_series_data()
         
         # Final safety check: ensure SPACE cells stay as SPACE and at cosmic background temp
         space_mask = (self.material_types == MaterialType.SPACE)
-        self.temperature[space_mask] = 2.7  # Kelvin
+        self.temperature[space_mask] = self.space_temperature  # Kelvin
         self.pressure[space_mask] = 0.0
     
     def step_backward(self):
@@ -1348,6 +1365,8 @@ class GeologySimulation:
         stats = {
             'time': self.time,
             'dt': self.dt,
+            'effective_dt': getattr(self, '_last_stability_factor', 1.0) * self.dt,
+            'stability_factor': getattr(self, '_last_stability_factor', 1.0),
             'avg_temperature': np.mean(self.temperature) - 273.15,  # Convert to Celsius for display
             'max_temperature': np.max(self.temperature) - 273.15,   # Convert to Celsius for display
             'avg_pressure': np.mean(self.pressure),
@@ -1413,11 +1432,8 @@ class GeologySimulation:
             moves_made = 0
             max_moves_per_step = min(len(solid_coords[0]), 100)  # Limit for stability
             
-            # Pre-compute neighbor offsets
-            if self.neighbor_count == 4:
-                neighbor_offsets = [(0, 1), (0, -1), (1, 0), (-1, 0)]
-            else:
-                neighbor_offsets = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+            # Get neighbor offsets using the helper function
+            neighbor_offsets = self._get_neighbors(self.neighbor_count, shuffle=False)
             
             # Vectorized neighbor checking
             for dy, dx in neighbor_offsets:
@@ -1454,7 +1470,7 @@ class GeologySimulation:
                 
                 # Apply fall probability and limit moves
                 collapse_idx = np.where(can_collapse)[0]
-                fall_prob = 0.5 if fall_step == 0 else 0.3
+                fall_prob = self.gravitational_fall_probability if fall_step == 0 else self.gravitational_fall_probability_later
                 
                 # Randomly sample collapses
                 random_mask = np.random.random(len(collapse_idx)) < fall_prob
@@ -1529,7 +1545,7 @@ class GeologySimulation:
             air_distances = distances[air_coords]
             
             # Vectorized neighbor checking for air migration
-            neighbor_offsets = [(0, 1), (0, -1), (1, 0), (-1, 0)] if self.neighbor_count == 4 else [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+            neighbor_offsets = self._get_neighbors(self.neighbor_count, shuffle=False)
             
             # Find best migration targets for each air cell
             for dy, dx in neighbor_offsets:
@@ -1570,7 +1586,7 @@ class GeologySimulation:
                 
                 # Apply migration probability
                 migrate_idx = np.where(can_migrate)[0]
-                migration_prob = 0.3  # 30% chance
+                migration_prob = self.fluid_migration_probability
                 
                 random_mask = np.random.random(len(migrate_idx)) < migration_prob
                 final_migrate_idx = migrate_idx[random_mask]
@@ -1602,148 +1618,155 @@ class GeologySimulation:
         
         return changes_made
     
-    def _apply_density_stratification_convolution(self):
-        """Ultra-fast density stratification using convolution-based gradient detection"""
+    def _apply_density_stratification_local_vectorized(self):
+        """Physics-correct vectorized density stratification preserving local gravitational interactions"""
         changes_made = False
         
-        # Calculate effective density grid
+        # Calculate effective density grid with proper thermal expansion
         effective_density_grid = self._calculate_effective_density(self.temperature)
         distances = self._get_distances_from_center()
         
-        # Use convolution to detect density gradients (much faster than neighbor loops)
-        # Sobel operators for gradient detection
-        sobel_y = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]]) / 8.0
-        sobel_x = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]) / 8.0
-        
-        # Calculate density gradients in x and y directions
-        density_grad_y = ndimage.convolve(effective_density_grid, sobel_y, mode='constant', cval=0)
-        density_grad_x = ndimage.convolve(effective_density_grid, sobel_x, mode='constant', cval=0)
-        
-        # Calculate radial gradients (toward/away from center)
-        center_x, center_y = self.center_of_mass
-        y_coords, x_coords = np.ogrid[:self.height, :self.width]
-        
-        # Normalized radial direction vectors
-        radial_y = (y_coords - center_y) / (distances + 1e-6)
-        radial_x = (x_coords - center_x) / (distances + 1e-6)
-        
-        # Project density gradients onto radial direction
-        radial_density_gradient = density_grad_y * radial_y + density_grad_x * radial_x
-        
-        # Find unstable regions (less dense material below more dense material)
-        # Positive radial gradient means density increases outward (unstable)
-        instability_mask = (radial_density_gradient > 0) & (self.material_types != MaterialType.SPACE)
-        
-        if not np.any(instability_mask):
+        # Find all non-space materials that could potentially move
+        non_space_mask = (self.material_types != MaterialType.SPACE)
+        if not np.any(non_space_mask):
             return False
         
-        # Sample unstable cells based on performance settings
-        unstable_coords = np.where(instability_mask)
-        total_unstable = len(unstable_coords[0])
+        non_space_coords = np.where(non_space_mask)
+        total_cells = len(non_space_coords[0])
         
-        sample_size = max(self.density_min_sample_size, 
-                         int(total_unstable * self.density_sample_fraction))
-        sample_size = min(sample_size, total_unstable)
+        # Sample cells based on performance configuration (just like original)
+        sample_size = max(self.density_min_sample_size, int(total_cells * self.density_sample_fraction))
+        sample_size = min(sample_size, total_cells)
         
-        if sample_size < total_unstable:
-            indices = np.random.choice(total_unstable, size=sample_size, replace=False)
-            unstable_coords = (unstable_coords[0][indices], unstable_coords[1][indices])
+        if sample_size == 0:
+            return False
         
-        # Vectorized swapping for sampled unstable cells
-        unstable_y = unstable_coords[0]
-        unstable_x = unstable_coords[1]
-        unstable_densities = effective_density_grid[unstable_y, unstable_x]
-        unstable_distances = distances[unstable_y, unstable_x]
+        # Vectorized sampling of cells to check
+        cell_indices = np.random.choice(total_cells, size=sample_size, replace=False)
+        sample_y = non_space_coords[0][cell_indices]
+        sample_x = non_space_coords[1][cell_indices]
         
-        # For each unstable cell, find the best neighbor to swap with
-        neighbor_offsets = [(0, 1), (0, -1), (1, 0), (-1, 0)] if self.neighbor_count == 4 else [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+        # Filter to mobile materials only (preserve original mobility logic)
+        sample_materials = self.material_types[sample_y, sample_x]
+        sample_temps = self.temperature[sample_y, sample_x]
         
-        swap_count = 0
-        max_swaps = min(len(unstable_coords[0]), 200)  # Limit for performance
+        # Original mobility conditions: gases, liquids, and hot solids
+        is_gas = ((sample_materials == MaterialType.AIR) | 
+                  (sample_materials == MaterialType.WATER_VAPOR))
+        is_liquid = ((sample_materials == MaterialType.WATER) | 
+                     (sample_materials == MaterialType.MAGMA))
+        is_hot_solid = (sample_temps > 1200.0)  # Hot solids can flow
         
+        mobile_mask = is_gas | is_liquid | is_hot_solid
+        if not np.any(mobile_mask):
+            return False
+        
+        # Get mobile cells coordinates
+        mobile_indices = np.where(mobile_mask)[0]
+        mobile_y = sample_y[mobile_indices]
+        mobile_x = sample_x[mobile_indices]
+                        
+        # Original neighbor checking logic - randomized order for each cell
+        neighbor_offsets = self._get_neighbors(num_neighbors=self.neighbor_count, shuffle=True)
+        
+        # Process each neighbor direction (preserves original local physics)
         for dy, dx in neighbor_offsets:
-            if swap_count >= max_swaps:
-                break
+            # Calculate neighbor positions for all mobile cells
+            neighbor_y = mobile_y + dy
+            neighbor_x = mobile_x + dx
             
-            neighbor_y = unstable_y + dy
-            neighbor_x = unstable_x + dx
-            
-            # Bounds check
+            # Bounds check - vectorized
             in_bounds = ((neighbor_y >= 0) & (neighbor_y < self.height) & 
                         (neighbor_x >= 0) & (neighbor_x < self.width))
             
             if not np.any(in_bounds):
                 continue
             
-            # Valid neighbors only
-            valid_idx = np.where(in_bounds)[0]
-            valid_unstable_y = unstable_y[valid_idx]
-            valid_unstable_x = unstable_x[valid_idx]
-            valid_neighbor_y = neighbor_y[valid_idx]
-            valid_neighbor_x = neighbor_x[valid_idx]
+            # Filter to valid neighbors
+            valid_indices = np.where(in_bounds)[0]
+            valid_mobile_y = mobile_y[valid_indices]
+            valid_mobile_x = mobile_x[valid_indices]
+            valid_neighbor_y = neighbor_y[valid_indices]
+            valid_neighbor_x = neighbor_x[valid_indices]
             
-            # Get neighbor properties
+            # Check if neighbors are non-space materials - vectorized
             neighbor_materials = self.material_types[valid_neighbor_y, valid_neighbor_x]
-            neighbor_densities = effective_density_grid[valid_neighbor_y, valid_neighbor_x]
-            neighbor_distances = distances[valid_neighbor_y, valid_neighbor_x]
+            is_non_space = (neighbor_materials != MaterialType.SPACE)
             
-            unstable_densities_valid = unstable_densities[valid_idx]
-            unstable_distances_valid = unstable_distances[valid_idx]
+            if not np.any(is_non_space):
+                continue
             
-            # Check swap conditions
-            not_space = (neighbor_materials != MaterialType.SPACE)
+            # Filter to non-space neighbors
+            ns_indices = np.where(is_non_space)[0]
+            final_mobile_y = valid_mobile_y[ns_indices]
+            final_mobile_x = valid_mobile_x[ns_indices]
+            final_neighbor_y = valid_neighbor_y[ns_indices]
+            final_neighbor_x = valid_neighbor_x[ns_indices]
             
-            # Case 1: Unstable cell closer to center but less dense (should rise)
-            case1 = (unstable_distances_valid < neighbor_distances) & (unstable_densities_valid < neighbor_densities)
-            # Case 2: Unstable cell farther from center but more dense (should sink)
-            case2 = (unstable_distances_valid > neighbor_distances) & (unstable_densities_valid > neighbor_densities)
-            should_swap = (case1 | case2) & not_space
+            # Vectorized density and distance calculations (original physics)
+            mobile_densities = effective_density_grid[final_mobile_y, final_mobile_x]
+            neighbor_densities = effective_density_grid[final_neighbor_y, final_neighbor_x]
+            mobile_distances = distances[final_mobile_y, final_mobile_x]
+            neighbor_distances = distances[final_neighbor_y, final_neighbor_x]
             
-            # Require significant density difference (avoid divide by zero)
-            min_densities = np.minimum(unstable_densities_valid, neighbor_densities)
-            max_densities = np.maximum(unstable_densities_valid, neighbor_densities)
+            # Original buoyancy physics - vectorized
+            # Case 1: Mobile cell closer to center but less dense (should rise)
+            case1 = (mobile_distances < neighbor_distances) & (mobile_densities < neighbor_densities)
+            # Case 2: Mobile cell farther from center but more dense (should sink)  
+            case2 = (mobile_distances > neighbor_distances) & (mobile_densities > neighbor_densities)
+            should_swap = case1 | case2
+            
+            # Original density difference threshold - vectorized
+            min_densities = np.minimum(mobile_densities, neighbor_densities)
+            max_densities = np.maximum(mobile_densities, neighbor_densities)
             density_ratios = np.divide(max_densities, min_densities, out=np.ones_like(max_densities), where=(min_densities > 0))
             significant_diff = density_ratios >= self.density_ratio_threshold
             
+            # Final swap condition (original logic)
             final_swap = should_swap & significant_diff
             
             if not np.any(final_swap):
                 continue
             
-            # Get cells to swap
-            swap_idx = np.where(final_swap)[0]
+            # Apply random probability (preserves stochastic nature)
+            swap_indices = np.where(final_swap)[0]
+            random_mask = np.random.random(len(swap_indices)) < self.density_swap_probability
+            final_swap_indices = swap_indices[random_mask]
             
-            # Limit swaps for this neighbor direction
-            max_swaps_this_dir = min(len(swap_idx), max_swaps - swap_count)
-            if max_swaps_this_dir > 0:
-                swap_idx = swap_idx[:max_swaps_this_dir]
-                swap_unstable_y = valid_unstable_y[swap_idx]
-                swap_unstable_x = valid_unstable_x[swap_idx]
-                swap_neighbor_y = valid_neighbor_y[swap_idx]
-                swap_neighbor_x = valid_neighbor_x[swap_idx]
-                
-                # Vectorized swapping
-                unstable_materials = self.material_types[swap_unstable_y, swap_unstable_x].copy()
+            if len(final_swap_indices) == 0:
+                continue
+            
+            # Get cells to swap
+            swap_mobile_y = final_mobile_y[final_swap_indices]
+            swap_mobile_x = final_mobile_x[final_swap_indices]
+            swap_neighbor_y = final_neighbor_y[final_swap_indices]
+            swap_neighbor_x = final_neighbor_x[final_swap_indices]
+            
+            # Vectorized swapping (preserves original swap mechanics)
+            if len(final_swap_indices) > 0:
+                # Swap materials
+                mobile_materials = self.material_types[swap_mobile_y, swap_mobile_x].copy()
                 neighbor_materials_swap = self.material_types[swap_neighbor_y, swap_neighbor_x].copy()
-                
-                self.material_types[swap_unstable_y, swap_unstable_x] = neighbor_materials_swap
-                self.material_types[swap_neighbor_y, swap_neighbor_x] = unstable_materials
+                self.material_types[swap_mobile_y, swap_mobile_x] = neighbor_materials_swap
+                self.material_types[swap_neighbor_y, swap_neighbor_x] = mobile_materials
                 
                 # Swap temperatures (convective heat transfer)
-                unstable_temps = self.temperature[swap_unstable_y, swap_unstable_x].copy()
+                mobile_temps = self.temperature[swap_mobile_y, swap_mobile_x].copy()
                 neighbor_temps = self.temperature[swap_neighbor_y, swap_neighbor_x].copy()
+                self.temperature[swap_mobile_y, swap_mobile_x] = neighbor_temps
+                self.temperature[swap_neighbor_y, swap_neighbor_x] = mobile_temps
                 
-                self.temperature[swap_unstable_y, swap_unstable_x] = neighbor_temps
-                self.temperature[swap_neighbor_y, swap_neighbor_x] = unstable_temps
-                
-                swap_count += len(swap_idx)
                 changes_made = True
+                break  # Only one swap per cell per iteration (original behavior)
+        
+        # Handle phase transitions for water/vapor (original logic)
+        if changes_made:
+            self._apply_convective_phase_transitions()
         
         return changes_made
     
     def _calculate_effective_density(self, temperature: np.ndarray) -> np.ndarray:
         """Calculate temperature-dependent effective densities using thermal expansion"""
-        temp_ref = 273.15  # Reference temperature in Kelvin
         
         # Get material properties for thermal expansion (uses material database)
         effective_density = np.zeros_like(self.density)
@@ -1761,7 +1784,7 @@ class GeologySimulation:
         # Vectorized thermal expansion calculation using material properties
         # ρ_eff = ρ₀ / (1 + β(T - T₀)) where β is volumetric expansion coefficient
         expansion_coeffs = np.array([self.material_db.get_properties(mat).thermal_expansion for mat in materials.flat])
-        volumetric_expansion = 1.0 + expansion_coeffs * (temperatures - temp_ref)
+        volumetric_expansion = 1.0 + expansion_coeffs * (temperatures - self.reference_temperature)
         volumetric_expansion = np.maximum(0.1, volumetric_expansion)  # Prevent division by zero/negative
         effective_densities = base_densities / volumetric_expansion
         effective_densities = np.maximum(0.01, effective_densities)  # Prevent negative density
