@@ -861,6 +861,8 @@ class GeologyVisualizer:
             f"Time Step: {stats['dt']:.0f} years",
             f"Effective dt: {stats['effective_dt']:.1f} years",
             f"Stability Factor: {stats['stability_factor']:.3f}",
+            f"Max Thermal Diff: {stats['max_thermal_diffusivity']:.2e} m²/s",
+            f"Max Diff Coeff: {stats['max_diffusion_coeff']:.3f}",
             "",
             f"Simulation Time: {stats['time']:.0f} years",
             f"History Length: {stats['history_length']} steps",
@@ -1101,7 +1103,7 @@ class GeologyVisualizer:
             elif event.key == pygame.K_r:
                 # R: Reset simulation
                 self.simulation._setup_planetary_conditions()
-                self.simulation.age = 0.0
+                self.simulation.age = np.zeros((self.simulation.height, self.simulation.width), dtype=np.float64)
                 self.simulation.time = 0.0
                 self.simulation.history.clear()
                 self.simulation._update_material_properties()

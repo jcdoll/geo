@@ -444,7 +444,9 @@ class GeologySimulation:
         diffusion_coefficient = thermal_diffusivity * dt_seconds / dx_squared
         
         # Check CFL stability condition
-        max_stable_coeff = 0.25
+        # For 2D explicit diffusion: α×dt/dx² ≤ 0.25 is conservative
+        # Can go up to 0.5 but 0.25 is safer for stability
+        max_stable_coeff = 0.5  # Try less conservative limit
         max_required_coeff = np.max(diffusion_coefficient[non_space_mask])
         
         stability_factor = 1.0
@@ -453,6 +455,10 @@ class GeologySimulation:
             stability_factor = max_stable_coeff / max_required_coeff
             effective_dt_seconds = dt_seconds * stability_factor
             diffusion_coefficient = thermal_diffusivity * effective_dt_seconds / dx_squared
+        
+        # Store debugging info for stats
+        self._max_thermal_diffusivity = np.max(thermal_diffusivity[non_space_mask])
+        self._max_diffusion_coeff = max_required_coeff
         
         # Calculate temperature change: ΔT = α * dt/dx² * ∇²T
         temp_change = diffusion_coefficient * temp_laplacian
@@ -1367,6 +1373,8 @@ class GeologySimulation:
             'dt': self.dt,
             'effective_dt': getattr(self, '_last_stability_factor', 1.0) * self.dt,
             'stability_factor': getattr(self, '_last_stability_factor', 1.0),
+            'max_thermal_diffusivity': getattr(self, '_max_thermal_diffusivity', 0.0),
+            'max_diffusion_coeff': getattr(self, '_max_diffusion_coeff', 0.0),
             'avg_temperature': np.mean(self.temperature) - 273.15,  # Convert to Celsius for display
             'max_temperature': np.max(self.temperature) - 273.15,   # Convert to Celsius for display
             'avg_pressure': np.mean(self.pressure),
