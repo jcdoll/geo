@@ -9,6 +9,11 @@ import sys
 from typing import Tuple, Optional
 from simulation_engine import GeologySimulation
 from materials import MaterialType, MaterialDatabase
+import matplotlib
+matplotlib.use('Agg')  # Force non-interactive backend before importing pyplot
+import matplotlib.pyplot as plt
+import matplotlib.backends.backend_agg as agg
+import io
 
 class GeologyVisualizer:
     """Interactive visualizer for geological simulation"""
@@ -78,6 +83,7 @@ class GeologyVisualizer:
         self.mouse_tool = 'heat'  # 'heat', 'pressure'
         self.tool_radius = 3
         self.tool_intensity = 100
+        self.selected_tile = None  # (x, y) coordinates of selected tile for info display
         
         # UI state
         self.sidebar_tab = 'transitions'  # 'transitions', 'composition', 'controls'
@@ -158,11 +164,11 @@ class GeologyVisualizer:
         y += spacing * 2
         
         # Tab buttons
-        tabs = [('Transitions', 'transitions'), ('Composition', 'composition'), ('Controls', 'controls')]
-        tab_width = button_width // 3 - 2
+        tabs = [('Transitions', 'transitions'), ('Composition', 'composition'), ('Controls', 'controls'), ('Graphs', 'graphs')]
+        tab_width = button_width // 4 - 2
         for i, (text, tab) in enumerate(tabs):
             buttons.append({
-                'rect': pygame.Rect(x + i * (tab_width + 3), y, tab_width, button_height),
+                'rect': pygame.Rect(x + i * (tab_width + 2), y, tab_width, button_height),
                 'text': text,
                 'action': f'tab_{tab}',
                 'color': self.colors['button']
@@ -191,6 +197,40 @@ class GeologyVisualizer:
                 elif action.startswith('tab_'):
                     self.sidebar_tab = action.split('_')[1]
     
+    def _get_simulation_offsets(self) -> Tuple[int, int]:
+        """Calculate centering offsets for the simulation area
+        
+        Returns:
+            Tuple of (offset_x, offset_y) for centering the simulation in the main panel
+        """
+        total_sim_width = self.sim_width * self.cell_width
+        total_sim_height = self.sim_height * self.cell_height
+        offset_x = (self.main_panel_width - total_sim_width) // 2
+        offset_y = (self.sim_area_height - total_sim_height) // 2
+        return offset_x, offset_y
+    
+    def _handle_right_click(self, pos: Tuple[int, int]):
+        """Handle right-click for tile info"""
+        x, y = pos
+        
+        # Check if click is in simulation area
+        if x >= self.main_panel_width or y < self.status_bar_height:
+            self.selected_tile = None
+            return
+        
+        # Get centering offsets
+        offset_x, offset_y = self._get_simulation_offsets()
+        
+        # Convert screen coordinates to simulation coordinates (accounting for centering)
+        sim_x = (x - offset_x) // self.cell_width
+        sim_y = (y - self.status_bar_height - offset_y) // self.cell_height
+        
+        # Validate coordinates
+        if 0 <= sim_x < self.sim_width and 0 <= sim_y < self.sim_height:
+            self.selected_tile = (sim_x, sim_y)
+        else:
+            self.selected_tile = None
+    
     def _handle_mouse_drag(self, pos: Tuple[int, int], buttons: Tuple[bool, bool, bool]):
         """Handle mouse dragging on simulation area"""
         x, y = pos
@@ -199,11 +239,8 @@ class GeologyVisualizer:
         if x >= self.main_panel_width or y >= self.window_height or y < self.status_bar_height:
             return
         
-        # Calculate centering offsets (same as in _draw_simulation)
-        total_sim_width = self.sim_width * self.cell_width
-        total_sim_height = self.sim_height * self.cell_height
-        offset_x = (self.main_panel_width - total_sim_width) // 2
-        offset_y = (self.sim_area_height - total_sim_height) // 2
+        # Get centering offsets
+        offset_x, offset_y = self._get_simulation_offsets()
         
         # Convert screen coordinates to simulation coordinates (accounting for centering)
         sim_x = (x - offset_x) // self.cell_width
@@ -275,13 +312,8 @@ class GeologyVisualizer:
         """Draw the simulation grid"""
         colors = self._get_display_colors()
         
-        # Calculate centering offsets for the simulation area
-        total_sim_width = self.sim_width * self.cell_width
-        total_sim_height = self.sim_height * self.cell_height
-        
-        # Center the simulation within the main panel
-        offset_x = (self.main_panel_width - total_sim_width) // 2
-        offset_y = (self.sim_area_height - total_sim_height) // 2
+        # Get centering offsets for the simulation area
+        offset_x, offset_y = self._get_simulation_offsets()
         
         # Create surface for faster blitting
         sim_surface = pygame.Surface((self.main_panel_width, self.sim_area_height))
@@ -299,6 +331,21 @@ class GeologyVisualizer:
                 pygame.draw.rect(sim_surface, color, rect)
         
         self.screen.blit(sim_surface, (0, self.status_bar_height))
+        
+        # Draw white box around selected tile
+        if self.selected_tile:
+            sim_x, sim_y = self.selected_tile
+            tile_screen_x = offset_x + sim_x * self.cell_width
+            tile_screen_y = offset_y + sim_y * self.cell_height
+            
+            # Draw white border around the selected tile
+            border_rect = pygame.Rect(
+                tile_screen_x, 
+                self.status_bar_height + tile_screen_y,
+                self.cell_width, 
+                self.cell_height
+            )
+            pygame.draw.rect(self.screen, (255, 255, 255), border_rect, 2)  # White border, 2 pixels thick
         
         # Draw color bar for temperature and pressure modes
         if self.display_mode in ['temperature', 'pressure', 'power']:
@@ -437,6 +484,145 @@ class GeologyVisualizer:
         title_x = bar_x + (bar_width - title_surface.get_width()) // 2
         self.screen.blit(title_surface, (title_x, bar_y - 25))
     
+    def _draw_graphs(self):
+        """Draw time-series graphs"""
+        time_series = self.simulation.time_series
+        
+        if not time_series['time'] or len(time_series['time']) < 2:
+            # Not enough data yet
+            text = "No data to display yet. Run simulation to collect data."
+            text_surface = self.font.render(text, True, self.colors['text'])
+            text_x = self.main_panel_width // 2 - text_surface.get_width() // 2
+            text_y = self.window_height // 2
+            self.screen.blit(text_surface, (text_x, text_y))
+            return
+        
+        # Create matplotlib figure with multiple subplots
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(12, 8))
+        fig.patch.set_facecolor('black')
+        
+        times = time_series['time']
+        
+        # Plot 1: Temperature vs Time
+        ax1.plot(times, time_series['avg_temperature'], 'r-', label='Average', linewidth=2)
+        ax1.plot(times, time_series['max_temperature'], 'orange', label='Maximum', linewidth=1)
+        ax1.set_title('Temperature vs Time', color='white', fontsize=12)
+        ax1.set_xlabel('Time (years)', color='white')
+        ax1.set_ylabel('Temperature (°C)', color='white')
+        ax1.legend(facecolor='black', edgecolor='white', labelcolor='white')
+        ax1.grid(True, alpha=0.3)
+        ax1.set_facecolor('black')
+        ax1.tick_params(colors='white')
+        
+        # Plot 2: Total Energy vs Time
+        ax2.plot(times, time_series['total_energy'], 'b-', linewidth=2)
+        ax2.set_title('Total Energy vs Time', color='white', fontsize=12)
+        ax2.set_xlabel('Time (years)', color='white')
+        ax2.set_ylabel('Energy (J)', color='white')
+        ax2.grid(True, alpha=0.3)
+        ax2.set_facecolor('black')
+        ax2.tick_params(colors='white')
+        
+        # Plot 3: Net Power vs Time
+        ax3.plot(times, time_series['net_power'], 'g-', linewidth=2)
+        ax3.axhline(y=0, color='white', linestyle='--', alpha=0.5)
+        ax3.set_title('Net Power vs Time', color='white', fontsize=12)
+        ax3.set_xlabel('Time (years)', color='white')
+        ax3.set_ylabel('Power (W)', color='white')
+        ax3.grid(True, alpha=0.3)
+        ax3.set_facecolor('black')
+        ax3.tick_params(colors='white')
+        
+        # Plot 4: Climate Factors vs Time
+        ax4.plot(times, time_series['greenhouse_factor'], 'purple', label='Greenhouse Factor', linewidth=2)
+        ax4.plot(times, time_series['planet_albedo'], 'cyan', label='Planet Albedo', linewidth=2)
+        ax4.set_title('Climate Factors vs Time', color='white', fontsize=12)
+        ax4.set_xlabel('Time (years)', color='white')
+        ax4.set_ylabel('Factor (0-1)', color='white')
+        ax4.legend(facecolor='black', edgecolor='white', labelcolor='white')
+        ax4.grid(True, alpha=0.3)
+        ax4.set_facecolor('black')
+        ax4.tick_params(colors='white')
+        
+        # Adjust layout
+        plt.tight_layout()
+        
+        # Convert matplotlib figure to pygame surface (ensure no display interference)
+        plt.ioff()  # Turn off interactive mode
+        canvas = agg.FigureCanvasAgg(fig)
+        canvas.draw()
+        
+        # Handle multiple matplotlib API versions robustly
+        try:
+            # Method 1: Try newest API first (matplotlib 3.8+)
+            renderer = canvas.get_renderer()
+            raw_data = renderer.tobytes()
+        except AttributeError:
+            try:
+                # Method 2: Try older API (matplotlib 3.0-3.7)
+                renderer = canvas.get_renderer()
+                raw_data = renderer.tostring_rgb()
+            except AttributeError:
+                try:
+                    # Method 3: Try even older API (matplotlib 2.x)
+                    renderer = canvas.get_renderer()
+                    raw_data = renderer.buffer_rgba()
+                except AttributeError:
+                    try:
+                        # Method 4: Canvas buffer (matplotlib 1.x/2.x)
+                        raw_data = canvas.tostring_rgb()
+                    except AttributeError:
+                        # Method 5: Last resort - save and reload
+                        import io
+                        buf = io.BytesIO()
+                        canvas.print_rgb(buf)
+                        buf.seek(0)
+                        raw_data = buf.read()
+        
+        # Ensure raw_data is bytes, not memoryview
+        if isinstance(raw_data, memoryview):
+            raw_data = raw_data.tobytes()
+        
+        size = canvas.get_width_height()
+        
+        # Handle different color formats from matplotlib
+        expected_rgb_size = size[0] * size[1] * 3  # RGB = 3 bytes per pixel
+        expected_rgba_size = size[0] * size[1] * 4  # RGBA = 4 bytes per pixel
+        
+        if len(raw_data) == expected_rgba_size:
+            # Convert RGBA to RGB by removing alpha channel
+            import numpy as np
+            rgba_array = np.frombuffer(raw_data, dtype=np.uint8).reshape(size[1], size[0], 4)
+            rgb_array = rgba_array[:, :, :3]  # Take only RGB channels
+            raw_data = rgb_array.tobytes()
+            format_str = 'RGB'
+        elif len(raw_data) == expected_rgb_size:
+            format_str = 'RGB'
+        else:
+            # Try to auto-detect format based on size
+            channels = len(raw_data) // (size[0] * size[1])
+            if channels == 3:
+                format_str = 'RGB'
+            elif channels == 4:
+                format_str = 'RGBA'
+            else:
+                raise ValueError(f"Unexpected data format: {len(raw_data)} bytes for {size[0]}x{size[1]} image")
+        
+        # Create pygame surface from matplotlib data
+        graph_surface = pygame.image.fromstring(raw_data, size, format_str)
+        
+        # Scale to fit main panel
+        graph_width = self.main_panel_width - 20
+        graph_height = self.sim_area_height - 20
+        scaled_surface = pygame.transform.scale(graph_surface, (graph_width, graph_height))
+        
+        # Blit to screen
+        self.screen.blit(scaled_surface, (10, self.status_bar_height + 10))
+        
+        # Close matplotlib figure to free memory and ensure display state is preserved
+        plt.close(fig)
+        plt.ion()  # Re-enable interactive mode for potential future use
+    
     def _draw_status_bar(self):
         """Draw status information at the top"""
         stats = self.simulation.get_stats()
@@ -463,7 +649,7 @@ class GeologyVisualizer:
     def _draw_transition_diagram(self):
         """Draw rock type transition diagram"""
         x_offset = self.main_panel_width + 10
-        y_offset = 400
+        y_offset = 440  # Start below the tab buttons with more spacing
         
         # Title
         title = self.small_font.render("Rock Transitions:", True, self.colors['text'])
@@ -532,7 +718,7 @@ class GeologyVisualizer:
     def _draw_tabbed_content(self):
         """Draw content based on selected tab"""
         x_offset = self.main_panel_width + 10
-        y_offset = 400  # Start below the tab buttons
+        y_offset = 440  # Start below the tab buttons with more spacing
         
         if self.sidebar_tab == 'transitions':
             self._draw_transition_diagram()
@@ -542,6 +728,9 @@ class GeologyVisualizer:
         
         elif self.sidebar_tab == 'controls':
             self._draw_controls_tab(x_offset, y_offset)
+        
+        elif self.sidebar_tab == 'graphs':
+            self._draw_graphs_tab(x_offset, y_offset)
     
     def _draw_composition_tab(self, x_offset: int, y_offset: int):
         """Draw rock composition information"""
@@ -615,6 +804,7 @@ class GeologyVisualizer:
         instructions = [
             "Controls:",
             "  Left click + drag: Apply tool",
+            "  Right click: Show tile info",
             "  Mouse wheel: Adjust radius", 
             "  Shift + wheel: Adjust intensity",
             "  Space: Play/Pause",
@@ -623,7 +813,7 @@ class GeologyVisualizer:
             "  T: Step backward",
             "  1/2/3/4: Switch display modes",
             "  Tab: Cycle sidebar tabs",
-            "  Q/W/E: Direct tab selection"
+            "  Q/W/E/G: Direct tab selection"
         ]
         
         for i, instruction in enumerate(instructions):
@@ -631,6 +821,162 @@ class GeologyVisualizer:
             surface = self.small_font.render(instruction, True, color)
             self.screen.blit(surface, (x_offset, y_offset))
             y_offset += 14
+        
+        # Tile info display
+        if self.selected_tile:
+            y_offset += 15
+            tile_header = self.small_font.render("Selected Tile Info:", True, self.colors['green'])
+            self.screen.blit(tile_header, (x_offset, y_offset))
+            y_offset += 16
+            
+            sim_x, sim_y = self.selected_tile
+            material = self.simulation.material_types[sim_y, sim_x]
+            temperature = self.simulation.temperature[sim_y, sim_x] - 273.15  # Convert to Celsius
+            pressure = self.simulation.pressure[sim_y, sim_x]  # Already in MPa
+            
+            tile_info = [
+                f"Coords: ({sim_x}, {sim_y})",
+                f"Material: {material.value}",
+                f"Temp: {temperature:.1f}°C",
+                f"Pressure: {pressure:.2f} MPa"
+            ]
+            
+            for info_line in tile_info:
+                surface = self.small_font.render(info_line, True, self.colors['text'])
+                self.screen.blit(surface, (x_offset, y_offset))
+                y_offset += 14
+    
+    def _draw_graphs_tab(self, x_offset: int, y_offset: int):
+        """Draw compact graphs in the sidebar"""
+        time_series = self.simulation.time_series
+        
+        if not time_series['time'] or len(time_series['time']) < 2:
+            # Not enough data yet
+            header = self.small_font.render("Time Series Graphs:", True, self.colors['green'])
+            self.screen.blit(header, (x_offset, y_offset))
+            y_offset += 20
+            
+            text = "No data yet. Run simulation"
+            text_surface = self.small_font.render(text, True, self.colors['text'])
+            self.screen.blit(text_surface, (x_offset, y_offset))
+            y_offset += 14
+            
+            text2 = "to collect data."
+            text_surface2 = self.small_font.render(text2, True, self.colors['text'])
+            self.screen.blit(text_surface2, (x_offset, y_offset))
+            return
+        
+        # Create compact matplotlib figure
+        import matplotlib.pyplot as plt
+        import matplotlib.backends.backend_agg as agg
+        
+        # Create 2x1 subplot layout focusing on key metrics for better readability
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(5, 6))
+        fig.patch.set_facecolor('black')
+        
+        times = time_series['time']
+        
+        # Plot 1: Average Temperature vs Time (highly readable)
+        ax1.plot(times, time_series['avg_temperature'], 'r-', linewidth=3)
+        ax1.set_title('Average Temperature', color='white', fontsize=20, fontweight='bold')
+        ax1.set_ylabel('Temperature (°C)', color='white', fontsize=16)
+        ax1.tick_params(colors='white', labelsize=14)
+        ax1.grid(False)  # Remove grid for cleaner look
+        ax1.set_facecolor('black')
+        
+
+        
+        # Plot 2: Net Power vs Time (highly readable with prominent zero line)
+        ax2.plot(times, time_series['net_power'], 'lime', linewidth=3)
+        # Make zero crossing very prominent
+        ax2.axhline(y=0, color='yellow', linestyle='-', alpha=1.0, linewidth=3)
+        ax2.set_title('Net Power Balance', color='white', fontsize=20, fontweight='bold')
+        ax2.set_xlabel('Time (Years)', color='white', fontsize=16)
+        ax2.set_ylabel('Net Power (W)', color='white', fontsize=16)
+        ax2.tick_params(colors='white', labelsize=14)
+        ax2.grid(False)  # Remove grid for cleaner look
+        ax2.set_facecolor('black')
+        
+
+        
+        # Tight layout with better spacing
+        plt.tight_layout(pad=0.8)
+        
+        # Convert to pygame surface (ensure no display interference)
+        plt.ioff()  # Turn off interactive mode
+        canvas = agg.FigureCanvasAgg(fig)
+        canvas.draw()
+        
+        # Handle multiple matplotlib API versions robustly
+        try:
+            # Method 1: Try newest API first (matplotlib 3.8+)
+            renderer = canvas.get_renderer()
+            raw_data = renderer.tobytes()
+        except AttributeError:
+            try:
+                # Method 2: Try older API (matplotlib 3.0-3.7)
+                renderer = canvas.get_renderer()
+                raw_data = renderer.tostring_rgb()
+            except AttributeError:
+                try:
+                    # Method 3: Try even older API (matplotlib 2.x)
+                    renderer = canvas.get_renderer()
+                    raw_data = renderer.buffer_rgba()
+                except AttributeError:
+                    try:
+                        # Method 4: Canvas buffer (matplotlib 1.x/2.x)
+                        raw_data = canvas.tostring_rgb()
+                    except AttributeError:
+                        # Method 5: Last resort - save and reload
+                        import io
+                        buf = io.BytesIO()
+                        canvas.print_rgb(buf)
+                        buf.seek(0)
+                        raw_data = buf.read()
+        
+        # Ensure raw_data is bytes, not memoryview
+        if isinstance(raw_data, memoryview):
+            raw_data = raw_data.tobytes()
+        
+        size = canvas.get_width_height()
+        
+        # Handle different color formats from matplotlib
+        expected_rgb_size = size[0] * size[1] * 3  # RGB = 3 bytes per pixel
+        expected_rgba_size = size[0] * size[1] * 4  # RGBA = 4 bytes per pixel
+        
+        if len(raw_data) == expected_rgba_size:
+            # Convert RGBA to RGB by removing alpha channel
+            import numpy as np
+            rgba_array = np.frombuffer(raw_data, dtype=np.uint8).reshape(size[1], size[0], 4)
+            rgb_array = rgba_array[:, :, :3]  # Take only RGB channels
+            raw_data = rgb_array.tobytes()
+            format_str = 'RGB'
+        elif len(raw_data) == expected_rgb_size:
+            format_str = 'RGB'
+        else:
+            # Try to auto-detect format based on size
+            channels = len(raw_data) // (size[0] * size[1])
+            if channels == 3:
+                format_str = 'RGB'
+            elif channels == 4:
+                format_str = 'RGBA'
+            else:
+                raise ValueError(f"Unexpected data format: {len(raw_data)} bytes for {size[0]}x{size[1]} image")
+        
+        graph_surface = pygame.image.fromstring(raw_data, size, format_str)
+        
+        # Scale to fit sidebar width
+        sidebar_width = self.sidebar_width - 20
+        aspect_ratio = size[1] / size[0]  # height / width
+        scaled_height = int(sidebar_width * aspect_ratio)
+        scaled_surface = pygame.transform.scale(graph_surface, (sidebar_width, scaled_height))
+        
+        # Blit to sidebar
+        self.screen.blit(scaled_surface, (x_offset, y_offset))
+        
+        # Close matplotlib figure and ensure display state is preserved
+        plt.close(fig)
+        plt.ion()  # Re-enable interactive mode for potential future use
     
     def _handle_keyboard(self, event):
         """Handle keyboard input"""
@@ -651,7 +997,7 @@ class GeologyVisualizer:
                 self.display_mode = 'power'
             elif event.key == pygame.K_TAB:
                 # Cycle through tabs
-                tabs = ['transitions', 'composition', 'controls']
+                tabs = ['transitions', 'composition', 'controls', 'graphs']
                 current_idx = tabs.index(self.sidebar_tab)
                 self.sidebar_tab = tabs[(current_idx + 1) % len(tabs)]
             elif event.key == pygame.K_q:
@@ -660,6 +1006,8 @@ class GeologyVisualizer:
                 self.sidebar_tab = 'composition'
             elif event.key == pygame.K_e:
                 self.sidebar_tab = 'controls'
+            elif event.key == pygame.K_g:
+                self.sidebar_tab = 'graphs'
             elif event.key == pygame.K_MINUS or event.key == pygame.K_KP_MINUS:
                 # Decrease speed
                 speeds = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
@@ -692,7 +1040,10 @@ class GeologyVisualizer:
                 if event.type == pygame.QUIT:
                     self.running = False
                 elif event.type == pygame.MOUSEBUTTONDOWN:
-                    self._handle_button_click(event.pos)
+                    if event.button == 3:  # Right click
+                        self._handle_right_click(event.pos)
+                    else:  # Left click and others
+                        self._handle_button_click(event.pos)
                 elif event.type == pygame.KEYDOWN or event.type == pygame.KEYUP:
                     self._handle_keyboard(event)
                 elif event.type == pygame.MOUSEWHEEL:
@@ -753,9 +1104,9 @@ def main():
     print("  Space: Play/Pause simulation")
     print("  R: Step forward")
     print("  T: Step backward")
-    print("  1/2/3: Switch display modes")
+    print("  1/2/3/4: Switch display modes")
     print("  Tab: Cycle sidebar tabs")
-    print("  Q/W/E: Direct tab selection")
+    print("  Q/W/E/G: Direct tab selection")
     
     visualizer = GeologyVisualizer()
     visualizer.run()
