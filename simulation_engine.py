@@ -258,6 +258,28 @@ class GeologySimulation:
         
         # Pre-compute coordinate grids for vectorized operations
         self.y_coords, self.x_coords = np.ogrid[:self.height, :self.width]
+        
+        # Create circular morphological kernels to reduce grid artifacts
+        self._circular_kernel_3x3 = self._create_circular_kernel(3)
+        self._circular_kernel_5x5 = self._create_circular_kernel(5)
+        
+        # Collapse kernels for geological processes
+        self._collapse_kernel_4 = np.array([[0, 1, 0], [1, 0, 1], [0, 1, 0]], dtype=bool)  # 4-neighbor
+        self._collapse_kernel_8 = self._circular_kernel_3x3  # Use circular kernel for 8-neighbor
+    
+    def _create_circular_kernel(self, size: int) -> np.ndarray:
+        """Create a circular kernel for morphological operations to reduce grid artifacts"""
+        kernel = np.zeros((size, size), dtype=bool)
+        center = size // 2
+        radius = center + 0.5  # Slightly larger than perfect circle for connectivity
+        
+        for i in range(size):
+            for j in range(size):
+                distance = np.sqrt((i - center)**2 + (j - center)**2)
+                if distance <= radius:
+                    kernel[i, j] = True
+        
+        return kernel
     
     def _setup_planetary_conditions(self):
         """Set up initial planetary conditions with emergent circular shape"""
@@ -381,12 +403,19 @@ class GeologySimulation:
         # Reset power density for this timestep
         self.power_density.fill(0.0)
         
-        # Pre-compute diffusion kernel (cached)
+        # Pre-compute diffusion kernel (cached) - more isotropic for circular approximation
         if not hasattr(self, '_diffusion_kernel'):
+            # Improved circular approximation with normalized weights
+            # Diagonal neighbors weighted by 1/√2 ≈ 0.707 for distance correction
+            diagonal_weight = 0.707
+            cardinal_weight = 1.0
+            total_neighbor_weight = 4 * cardinal_weight + 4 * diagonal_weight
+            center_weight = -total_neighbor_weight
+            
             self._diffusion_kernel = np.array([
-                [0.707, 1.0, 0.707],
-                [1.0, -6.828, 1.0], 
-                [0.707, 1.0, 0.707]
+                [diagonal_weight, cardinal_weight, diagonal_weight],
+                [cardinal_weight, center_weight, cardinal_weight], 
+                [diagonal_weight, cardinal_weight, diagonal_weight]
             ]) / 8.0
         
         # Apply diffusion using fast convolution
@@ -468,14 +497,14 @@ class GeologySimulation:
         # Find all atmosphere connected to space using connected components
         # This algorithm handles arbitrary atmosphere thickness in O(n) time
         
-        # Label all connected atmosphere regions
-        labeled_atmo, num_features = ndimage.label(atmosphere_mask, structure=np.ones((3,3)))
+        # Label all connected atmosphere regions (using circular kernel to reduce artifacts)
+        labeled_atmo, num_features = ndimage.label(atmosphere_mask, structure=self._circular_kernel_3x3)
         
         if num_features == 0:
             outer_atmo_mask = np.zeros_like(atmosphere_mask, dtype=bool)
         else:
-            # Find atmosphere regions adjacent to space
-            space_neighbors = ndimage.binary_dilation(space_mask, structure=np.ones((3,3)))
+            # Find atmosphere regions adjacent to space (using circular kernel)
+            space_neighbors = ndimage.binary_dilation(space_mask, structure=self._circular_kernel_3x3)
             space_adjacent_atmo = space_neighbors & atmosphere_mask
             
             if np.any(space_adjacent_atmo):
@@ -492,8 +521,8 @@ class GeologySimulation:
         # This is solid material adjacent to outer atmosphere or space
         solid_mask = ~(space_mask | atmosphere_mask)  # All non-space, non-atmosphere
         
-        # Surface solids are adjacent to outer atmosphere or space
-        surface_candidates = ndimage.binary_dilation(outer_atmo_mask | space_mask, structure=np.ones((3,3)))
+        # Surface solids are adjacent to outer atmosphere or space (using circular kernel)
+        surface_candidates = ndimage.binary_dilation(outer_atmo_mask | space_mask, structure=self._circular_kernel_3x3)
         surface_solid_mask = surface_candidates & solid_mask
         
         # Combine outer atmosphere and surface solids for radiation
@@ -574,8 +603,8 @@ class GeologySimulation:
         # Find surface cells that can receive solar radiation
         space_mask = ~non_space_mask
         
-        # Surface cells are those adjacent to space or outer atmosphere
-        surface_candidates = ndimage.binary_dilation(space_mask, structure=np.ones((3,3))) & non_space_mask
+        # Surface cells are those adjacent to space or outer atmosphere (using circular kernel)
+        surface_candidates = ndimage.binary_dilation(space_mask, structure=self._circular_kernel_3x3) & non_space_mask
         
         if not np.any(surface_candidates):
             return
@@ -663,7 +692,18 @@ class GeologySimulation:
         if len(atmo_coords[0]) > 0:
             atmo_y, atmo_x = atmo_coords
             atmo_solar_intensity = solar_intensity_factor[atmo_y, atmo_x]
-            atmo_solar_heating = atmospheric_solar_flux * atmo_solar_intensity  # W/m²
+            
+            # BUGFIX: Distribute atmospheric solar energy among ALL atmospheric cells
+            # instead of applying full flux to each cell
+            total_atmo_cells = len(atmo_coords[0])
+            total_weighted_intensity = np.sum(atmo_solar_intensity)
+            
+            if total_weighted_intensity > 0:
+                # Each cell gets a fraction of the total atmospheric energy based on its solar intensity
+                atmo_energy_fraction = atmo_solar_intensity / total_weighted_intensity
+                atmo_solar_heating = atmospheric_solar_flux * atmo_energy_fraction  # W/m² distributed
+            else:
+                atmo_solar_heating = np.zeros_like(atmo_solar_intensity)
             
             # Convert to temperature change for atmosphere
             dt_seconds = self.dt * self.seconds_per_year
@@ -1026,7 +1066,7 @@ class GeologySimulation:
             
             # Water presence enhances chemical weathering
             water_factor = 1.0
-            neighbors = self._get_neighbors(8, shuffle=False)
+            neighbors = self._get_neighbors(8, shuffle=True)  # Shuffled to avoid directional bias
             for dy, dx in neighbors:
                 ny, nx = y + dy, x + dx
                 if (0 <= ny < self.height and 0 <= nx < self.width and
@@ -1402,8 +1442,8 @@ class GeologySimulation:
             moves_made = 0
             max_moves_per_step = min(len(solid_coords[0]), 100)  # Limit for stability
             
-            # Get neighbor offsets using the helper function
-            neighbor_offsets = self._get_neighbors(self.neighbor_count, shuffle=False)
+            # Get neighbor offsets using the helper function (shuffled to avoid grid artifacts)
+            neighbor_offsets = self._get_neighbors(self.neighbor_count, shuffle=True)
             
             # Vectorized neighbor checking
             for dy, dx in neighbor_offsets:
@@ -1497,9 +1537,9 @@ class GeologySimulation:
         air_mask = (self.material_types == MaterialType.AIR)
         distances = self._get_distances_from_center()
         
-        # Find air cells adjacent to non-space materials (fast morphological operation)
+        # Find air cells adjacent to non-space materials (using circular kernel to reduce artifacts)
         non_space_mask = (self.material_types != MaterialType.SPACE)
-        kernel = np.ones((3, 3), dtype=bool) if self.neighbor_count == 8 else np.array([[0, 1, 0], [1, 0, 1], [0, 1, 0]], dtype=bool)
+        kernel = self._circular_kernel_3x3 if self.neighbor_count == 8 else self._collapse_kernel_4
         air_near_materials = air_mask & ndimage.binary_dilation(non_space_mask, structure=kernel)
         
         if np.any(air_near_materials):
@@ -1514,8 +1554,8 @@ class GeologySimulation:
             
             air_distances = distances[air_coords]
             
-            # Vectorized neighbor checking for air migration
-            neighbor_offsets = self._get_neighbors(self.neighbor_count, shuffle=False)
+            # Vectorized neighbor checking for air migration (shuffled to avoid grid artifacts)
+            neighbor_offsets = self._get_neighbors(self.neighbor_count, shuffle=True)
             
             # Find best migration targets for each air cell
             for dy, dx in neighbor_offsets:
