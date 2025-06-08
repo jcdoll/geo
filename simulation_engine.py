@@ -11,6 +11,8 @@ try:
 except ImportError:
     from materials import MaterialType, MaterialDatabase
 from scipy import ndimage
+from scipy.sparse import diags, csc_matrix
+from scipy.sparse.linalg import spsolve
 
 # JIT-compiled performance-critical functions
 @jit(nopython=True)
@@ -102,7 +104,7 @@ class GeologySimulation:
         
         # Simulation parameters
         self.time = 0.0
-        self.dt = 10.0
+        self.dt = 2.0  # Reduced from 10 years to 2 years for better stability
         
         # Unit conversion constants
         self.seconds_per_year = 365.25 * 24 * 3600
@@ -352,143 +354,104 @@ class GeologySimulation:
         self._properties_dirty = False
     
     def _heat_diffusion(self) -> tuple[np.ndarray, float]:
-        """Heat diffusion using scipy convolution for efficient computation"""
-        # Start with current temperature
-        new_temp = self.temperature.copy()
-        
-        # Reset power density tracking
-        self.power_density.fill(0.0)
-        
-        # Skip cells that are space
+        """Fast explicit heat diffusion with intelligent stability handling"""
+        # Only process non-space cells
         non_space_mask = (self.material_types != MaterialType.SPACE)
         
-        # Create thermal diffusivity array with enhanced conductivity for non-solid interfaces
+        # Get thermal diffusivity for all cells (α = k / (ρ * cp))
         valid_thermal = (self.density > 0) & (self.specific_heat > 0) & (self.thermal_conductivity > 0)
-        thermal_diffusivity = np.zeros_like(self.temperature)
-        
-        # Base thermal diffusivity
+        thermal_diffusivity = np.zeros_like(self.thermal_conductivity)
         thermal_diffusivity[valid_thermal] = (
             self.thermal_conductivity[valid_thermal] / 
             (self.density[valid_thermal] * self.specific_heat[valid_thermal])
         )
         
-        # Enhance thermal diffusivity between non-solid materials with temperature differences
-        # This provides natural rapid heat transfer (magma+water, hot_gas+cold_liquid, etc.)
-        # Optimized version using vectorized operations
-        
-        # Use cached non-solid mask (updated when materials change)
-        if not hasattr(self, '_non_solid_mask') or self._properties_dirty:
-            self._non_solid_mask = np.zeros_like(self.material_types, dtype=bool)
-            # Vectorized lookup - check each material type once
-            for material_type in MaterialType:
-                is_non_solid = not self.material_db.get_properties(material_type).is_solid
-                if is_non_solid:
-                    self._non_solid_mask |= (self.material_types == material_type)
-        
-        # Enhanced convective heat transfer for atmospheric gases (limited enhancement)
-        atmosphere_mask = (
-            (self.material_types == MaterialType.AIR) |
-            (self.material_types == MaterialType.WATER_VAPOR)
-        )
-        if np.any(atmosphere_mask):
-            thermal_diffusivity[atmosphere_mask] *= self.atmospheric_diffusivity_enhancement
-        
-        # Fast interface detection using morphological operations
-        if np.any(self._non_solid_mask):
-            # Find edges of non-solid regions (much faster than nested loops)
-            non_solid_edges = ndimage.binary_dilation(self._non_solid_mask, structure=np.ones((3,3))) & self._non_solid_mask
-            
-            # Check temperature differences only at edges (much smaller set)
-            if np.any(non_solid_edges):
-                # Use boundary-aware neighbor checking to maintain circular geometry
-                temp_diffs = np.zeros_like(self.temperature)
+        # Enhanced diffusion at material interfaces (simplified)
+        if hasattr(self, 'interface_diffusivity_enhancement'):
+            neighbors = self._get_neighbors(4, shuffle=False)
+            for dy, dx in neighbors:
+                shifted_materials = np.roll(np.roll(self.material_types, dy, axis=0), dx, axis=1)
+                interface_mask = (self.material_types != shifted_materials) & non_space_mask
                 
-                # Check 4-neighbor temperature differences (no wraparound artifacts)
-                for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                    y_indices = np.arange(max(0, -dy), min(self.height, self.height - dy))
-                    x_indices = np.arange(max(0, -dx), min(self.width, self.width - dx))
-                    y_grid, x_grid = np.meshgrid(y_indices, x_indices, indexing='ij')
-                    
-                    current_temps = self.temperature[y_grid, x_grid]
-                    neighbor_temps = self.temperature[y_grid + dy, x_grid + dx]
-                    
-                    current_diffs = np.abs(current_temps - neighbor_temps)
-                    temp_diffs[y_grid, x_grid] = np.maximum(temp_diffs[y_grid, x_grid], current_diffs)
-                
-                # Enhance diffusivity where non-solid materials have large temp differences (limited)
-                enhancement_mask = non_solid_edges & (temp_diffs > 100)
-                if np.any(enhancement_mask):
-                    thermal_diffusivity[enhancement_mask] *= self.interface_diffusivity_enhancement
+                if np.any(interface_mask):
+                    enhancement_mask = interface_mask & valid_thermal
+                    if np.any(enhancement_mask):
+                        thermal_diffusivity[enhancement_mask] *= self.interface_diffusivity_enhancement
         
-        # Pre-compute optimized diffusion kernel (cached for performance)
+        # Reset power density for this timestep
+        self.power_density.fill(0.0)
+        
+        # Pre-compute diffusion kernel (cached)
         if not hasattr(self, '_diffusion_kernel'):
-            # Convolution kernel for 8-neighbor heat diffusion with distance weighting
-            # Weight matrix: diagonals get 1/√2, cardinals get 1.0, center gets negative sum
             self._diffusion_kernel = np.array([
                 [0.707, 1.0, 0.707],
-                [1.0,  -6.828, 1.0],   # -6.828 to three decimal places for zero sum kernel
+                [1.0, -6.828, 1.0], 
                 [0.707, 1.0, 0.707]
-            ]) / 8.0  # Normalize
+            ]) / 8.0
         
-        kernel = self._diffusion_kernel
+        # Apply diffusion using fast convolution
+        temp_laplacian = ndimage.convolve(self.temperature, self._diffusion_kernel, mode='constant', cval=0)
         
-        # Apply diffusion using convolution (much faster than nested loops)
-        temp_laplacian = ndimage.convolve(self.temperature, kernel, mode='constant', cval=0)
-        
-        # Calculate temperature changes using proper thermal diffusion physics
-        # Heat equation: ∂T/∂t = α ∇²T where α = k/(ρ*cp) is thermal diffusivity
+        # Time step and stability calculation
         dt_seconds = self.dt * self.seconds_per_year
         dx_squared = self.cell_size ** 2
         
-        # Calculate proper thermal diffusion coefficient: α * dt / dx²
+        # Calculate diffusion coefficient and check stability
         diffusion_coefficient = thermal_diffusivity * dt_seconds / dx_squared
+        max_coeff = np.max(diffusion_coefficient[non_space_mask]) if np.any(non_space_mask) else 0.0
         
-        # Check CFL stability condition
-        # For 2D explicit diffusion: α×dt/dx² ≤ 0.25 is conservative
-        # Can go up to 0.5 but 0.25 is safer for stability
-        max_stable_coeff = 0.5  # Try less conservative limit
-        max_required_coeff = np.max(diffusion_coefficient[non_space_mask])
-        
+        # Use more conservative stability limit to reduce oscillations
+        max_stable_coeff = 0.1  # Reduced from 0.25 for better stability
         stability_factor = 1.0
-        if max_required_coeff > max_stable_coeff:
-            # Calculate how much we need to reduce the time step
-            stability_factor = max_stable_coeff / max_required_coeff
-            effective_dt_seconds = dt_seconds * stability_factor
-            diffusion_coefficient = thermal_diffusivity * effective_dt_seconds / dx_squared
         
-        # Store debugging info for stats
-        self._max_thermal_diffusivity = np.max(thermal_diffusivity[non_space_mask])
-        self._max_diffusion_coeff = max_required_coeff
+        if max_coeff > max_stable_coeff:
+            # Multiple sub-steps for stability (more efficient than matrix solve)
+            stability_factor = max_stable_coeff / max_coeff
+            n_substeps = max(1, int(np.ceil(1.0 / stability_factor)))
+            sub_dt = dt_seconds / n_substeps
+            
+            new_temp = self.temperature.copy()
+            for substep in range(n_substeps):
+                # Sub-step diffusion
+                sub_diffusion_coeff = thermal_diffusivity * sub_dt / dx_squared
+                temp_change = sub_diffusion_coeff * temp_laplacian
+                new_temp[non_space_mask] += temp_change[non_space_mask]
+                
+                # Update laplacian for next substep if needed
+                if substep < n_substeps - 1:
+                    temp_laplacian = ndimage.convolve(new_temp, self._diffusion_kernel, mode='constant', cval=0)
+            
+            # Use average effective time step for reporting
+            stability_factor = 1.0 / n_substeps
+        else:
+            # Single step - fast path
+            new_temp = self.temperature.copy()
+            temp_change = diffusion_coefficient * temp_laplacian
+            new_temp[non_space_mask] += temp_change[non_space_mask]
         
-        # Calculate temperature change: ΔT = α * dt/dx² * ∇²T
-        temp_change = diffusion_coefficient * temp_laplacian
+        # Store debugging info
+        self._max_thermal_diffusivity = np.max(thermal_diffusivity[non_space_mask]) if np.any(non_space_mask) else 0.0
         
-        # Calculate power density from heat diffusion (W/m³)
-        # Power = ρ × cp × ΔT / Δt
-        cell_volume = self.cell_size ** 3
+        # Calculate power density from final temperature change
+        final_temp_change = new_temp - self.temperature
         mass_valid = valid_thermal & non_space_mask
         if np.any(mass_valid):
             power_from_diffusion = np.zeros_like(self.power_density)
             power_from_diffusion[mass_valid] = (
                 self.density[mass_valid] * self.specific_heat[mass_valid] * 
-                temp_change[mass_valid] / dt_seconds
+                final_temp_change[mass_valid] / dt_seconds
             )
             self.power_density += power_from_diffusion
         
-        # Apply changes only to non-space cells
-        new_temp[non_space_mask] += temp_change[non_space_mask]
-        
-        # Solar heating (energy input)
+        # Apply other heat sources/sinks
         self._apply_solar_heating(new_temp, non_space_mask)
-        
-        # Stefan-Boltzmann cooling to space (vectorized for boundary cells)
         self._apply_radiative_cooling(new_temp, non_space_mask)
         
         # Ensure space stays at cosmic background temperature
         new_temp[~non_space_mask] = self.space_temperature
         
-        # Safety check: prevent temperatures below absolute zero (physically meaningful)
-        new_temp = np.maximum(new_temp, 0.1)  # Minimum temperature near absolute zero
+        # Safety check: prevent temperatures below absolute zero
+        new_temp = np.maximum(new_temp, 0.1)
         
         return new_temp, stability_factor
     
@@ -1374,7 +1337,6 @@ class GeologySimulation:
             'effective_dt': getattr(self, '_last_stability_factor', 1.0) * self.dt,
             'stability_factor': getattr(self, '_last_stability_factor', 1.0),
             'max_thermal_diffusivity': getattr(self, '_max_thermal_diffusivity', 0.0),
-            'max_diffusion_coeff': getattr(self, '_max_diffusion_coeff', 0.0),
             'avg_temperature': np.mean(self.temperature) - 273.15,  # Convert to Celsius for display
             'max_temperature': np.max(self.temperature) - 273.15,   # Convert to Celsius for display
             'avg_pressure': np.mean(self.pressure),

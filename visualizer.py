@@ -702,12 +702,7 @@ class GeologyVisualizer:
             avg_step_time = sum(self.step_times) / len(self.step_times)
             perf_info = f" | Step: {avg_step_time:.1f}ms"
         
-        # Add stability factor info if time step was reduced
-        stability_info = ""
-        if stats.get('stability_factor', 1.0) < 1.0:
-            stability_info = f" | Stability: {stats['stability_factor']:.3f} (dt reduced for CFL)"
-        
-        status_text = f"{play_status} | Time: {stats['time']:.0f}y | Temp: {stats['avg_temperature']:.0f}°C (max {stats['max_temperature']:.0f}°C) | Pressure: {stats['avg_pressure']:.1f} MPa | Tool: {self.mouse_tool.title()} (R:{self.tool_radius}, I:{self.tool_intensity}){perf_info}{stability_info}"
+        status_text = f"{play_status} | Time: {stats['time']:.0f}y | Temp: {stats['avg_temperature']:.0f}°C (max {stats['max_temperature']:.0f}°C) | Pressure: {stats['avg_pressure']:.1f} MPa | Tool: {self.mouse_tool.title()} (R:{self.tool_radius}, I:{self.tool_intensity}){perf_info}"
         
         text_surface = self.small_font.render(status_text, True, self.colors['text'])
         self.screen.blit(text_surface, (5, 5))
@@ -862,7 +857,6 @@ class GeologyVisualizer:
             f"Effective dt: {stats['effective_dt']:.1f} years",
             f"Stability Factor: {stats['stability_factor']:.3f}",
             f"Max Thermal Diff: {stats['max_thermal_diffusivity']:.2e} m²/s",
-            f"Max Diff Coeff: {stats['max_diffusion_coeff']:.3f}",
             "",
             f"Simulation Time: {stats['time']:.0f} years",
             f"History Length: {stats['history_length']} steps",
