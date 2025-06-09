@@ -286,7 +286,7 @@ class MaterialDatabase:
             MaterialType.WATER_VAPOR: MaterialProperties(
                 density=0.6, thermal_conductivity=0.025, specific_heat=2010,
                 strength=0, porosity=1,
-                emissivity=0.10, albedo=0.70,  # Low emissivity (gas), high albedo (cloud-like)
+                emissivity=0.7, albedo=0.70,  # Atmospheric water vapor (humid air/cloud-like emissivity)
                 thermal_expansion=3.7e-3,  # High volumetric expansion coefficient for gas (ideal gas law)
                 color_rgb=(192, 224, 255),  # Light blue-white - humid air/steam
                 transitions=[
@@ -297,14 +297,14 @@ class MaterialDatabase:
             MaterialType.AIR: MaterialProperties(
                 density=1.2, thermal_conductivity=0.024, specific_heat=1005,
                 strength=0, porosity=1,
-                emissivity=0.05, albedo=0.20,  # Very low emissivity (transparent gas), low albedo
+                emissivity=0.3, albedo=0.20,  # Increased emissivity for better simulation cooling
                 thermal_expansion=3.7e-3,  # High volumetric expansion coefficient for gas (ideal gas law)
                 color_rgb=(245, 245, 255),  # Very light blue/white - dry air
                 transitions=[],  # Dry air doesn't transition (no water content to condense)
                 is_solid=False  # Gas - rocks can fall through it
             ),
             MaterialType.SPACE: MaterialProperties(
-                density=0.0, thermal_conductivity=0.0, specific_heat=0.0,
+                density=1e-10, thermal_conductivity=1e-10, specific_heat=1e-10,  # Tiny but non-zero to prevent NaN
                 strength=0, porosity=1,
                 emissivity=0.0, albedo=0.0,  # No emissivity or albedo (perfect vacuum)
                 thermal_expansion=0.0,  # No thermal expansion in vacuum

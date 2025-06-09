@@ -24,6 +24,25 @@ import io
 class GeologyVisualizer:
     """Interactive visualizer for geological simulation"""
     
+    def _format_power_smart(self, power_watts: float) -> str:
+        """Smart formatting of power values with appropriate units and .1f precision"""
+        abs_power = abs(power_watts)
+        
+        if abs_power == 0:
+            return "0 W"
+        elif abs_power < 1:
+            return f"{power_watts * 1e3:.1f} mW"
+        elif abs_power < 1e3:
+            return f"{power_watts:.1f} W"
+        elif abs_power < 1e6:
+            return f"{power_watts / 1e3:.1f} kW"
+        elif abs_power < 1e9:
+            return f"{power_watts / 1e6:.1f} MW"
+        elif abs_power < 1e12:
+            return f"{power_watts / 1e9:.1f} GW"
+        else:
+            return f"{power_watts / 1e12:.1f} TW"
+    
     def __init__(self, sim_width: int = 120, sim_height: int = 120, window_width: int = 1200, window_height: int = 800):
         """
         Initialize the visualizer
@@ -75,7 +94,7 @@ class GeologyVisualizer:
         }
         
         # Simulation state
-        self.simulation = GeologySimulation(sim_width, sim_height)
+        self.simulation = GeologySimulation(sim_width, sim_height, log_level="DEBUG")  # Enable DEBUG logging
         self.running = True
         self.paused = True  # Start paused
         self.display_mode = 'materials'  # 'materials', 'temperature', 'pressure'
@@ -93,6 +112,16 @@ class GeologyVisualizer:
         
         # UI state
         self.sidebar_tab = 'controls'  # 'controls', 'stats', 'composition', 'graphs', 'info'
+        
+        # Key repeat state for arrow keys
+        self.key_repeat_state = {
+            'left_held': False,
+            'right_held': False,
+            'last_repeat_time': 0,
+            'repeat_delay': 500,  # ms before first repeat
+            'repeat_rate': 100,   # ms between repeats
+            'initial_press_handled': False
+        }
         
         # UI elements
         self.buttons = self._create_buttons()
@@ -277,8 +306,13 @@ class GeologyVisualizer:
         elif self.display_mode == 'temperature':
             # Convert from Kelvin to Celsius for visualization
             temp_celsius = self.simulation.temperature - 273.15
-            # Normalize temperature to color range
-            temp_norm = np.clip((temp_celsius - np.min(temp_celsius)) / (np.max(temp_celsius) - np.min(temp_celsius) + 1e-10), 0, 1)
+            # FIXED: Use reasonable geological temperature limits instead of min/max
+            # This makes normal temperature variations visible even with extreme outliers
+            temp_min = -100.0  # Cold surface/ice temperatures
+            temp_max = 1500.0  # Hot mantle/magma temperatures
+            
+            # Normalize temperature to geological range (clamped)
+            temp_norm = np.clip((temp_celsius - temp_min) / (temp_max - temp_min), 0, 1)
             colors = np.zeros((self.sim_height, self.sim_width, 3), dtype=np.uint8)
             colors[:, :, 0] = (temp_norm * 255).astype(np.uint8)  # Red channel
             colors[:, :, 2] = ((1 - temp_norm) * 255).astype(np.uint8)  # Blue channel
@@ -292,11 +326,13 @@ class GeologyVisualizer:
             colors[:, :, 2] = ((1 - pressure_norm) * 128).astype(np.uint8)  # Blue channel
             return colors
         elif self.display_mode == 'power':
-            power_density = self.simulation.power_density
+            # Convert from power density (W/m³) to power per cell (W)
+            cell_volume = self.simulation.cell_size ** 3  # m³ per cell
+            power_per_cell = self.simulation.power_density * cell_volume  # W per cell
             
             # Separate positive (heating) and negative (cooling) values for different scaling
-            heating = np.maximum(0, power_density)
-            cooling = np.maximum(0, -power_density)
+            heating = np.maximum(0, power_per_cell)
+            cooling = np.maximum(0, -power_per_cell)
             
             # Scale heating and cooling separately to make both visible
             max_heating = np.max(heating) if np.any(heating > 0) else 1e-10
@@ -421,9 +457,9 @@ class GeologyVisualizer:
         
         # Get min/max values and create color gradient
         if self.display_mode == 'temperature':
-            temp_celsius = self.simulation.temperature - 273.15
-            min_val = np.min(temp_celsius)
-            max_val = np.max(temp_celsius)
+            # FIXED: Use same geological temperature limits as the color mapping
+            min_val = -100.0  # Cold surface/ice temperatures
+            max_val = 1500.0  # Hot mantle/magma temperatures
             unit = "°C"
             
             # Draw gradient bar (blue to red for temperature)
@@ -457,9 +493,12 @@ class GeologyVisualizer:
                                (bar_x + bar_width, bar_y + bar_height - i - 1))
         
         elif self.display_mode == 'power':
-            power_density = self.simulation.power_density
-            heating = np.maximum(0, power_density)
-            cooling = np.maximum(0, -power_density)
+            # Convert from power density (W/m³) to power per cell (W)
+            cell_volume = self.simulation.cell_size ** 3  # m³ per cell
+            power_per_cell = self.simulation.power_density * cell_volume  # W per cell
+            
+            heating = np.maximum(0, power_per_cell)
+            cooling = np.maximum(0, -power_per_cell)
             
             max_heating = np.max(heating) if np.any(heating > 0) else 1e-10
             max_cooling = np.max(cooling) if np.any(cooling > 0) else 1e-10
@@ -467,7 +506,7 @@ class GeologyVisualizer:
             # Use larger range for main scale reference
             max_val = max_cooling  # Usually much larger (radiative cooling)
             min_val = -max_cooling
-            unit = "W/m³"
+            unit = ""  # Unit will be handled by smart formatting
             
             # Draw gradient bar (blue to black to red for power: loss to neutral to generation)
             for i in range(bar_height):
@@ -493,32 +532,29 @@ class GeologyVisualizer:
         label_x = bar_x + bar_width + 5
         
         if self.display_mode == 'power':
-            # Show separate scales for heating and cooling
-            power_density = self.simulation.power_density
-            heating = np.maximum(0, power_density)
-            cooling = np.maximum(0, -power_density)
+            # Show separate scales for heating and cooling using power per cell
+            cell_volume = self.simulation.cell_size ** 3  # m³ per cell
+            power_per_cell = self.simulation.power_density * cell_volume  # W per cell
+            
+            heating = np.maximum(0, power_per_cell)
+            cooling = np.maximum(0, -power_per_cell)
             max_heating = np.max(heating) if np.any(heating > 0) else 1e-10
             max_cooling = np.max(cooling) if np.any(cooling > 0) else 1e-10
             
-            # Top: heating scale
-            heat_text = f"+{max_heating:.1e}{unit}"
+            # Top: heating scale with smart formatting
+            heat_text = f"+{self._format_power_smart(max_heating)}"
             heat_surface = self.small_font.render(heat_text, True, (255, 100, 100))  # Light red
             self.screen.blit(heat_surface, (label_x, bar_y - 5))
             
             # Middle: zero
-            mid_text = f"0{unit}"
+            mid_text = "0 W"
             mid_surface = self.small_font.render(mid_text, True, self.colors['text'])
             self.screen.blit(mid_surface, (label_x, bar_y + bar_height // 2 - 10))
             
-            # Bottom: cooling scale  
-            cool_text = f"-{max_cooling:.1e}{unit}"
+            # Bottom: cooling scale with smart formatting
+            cool_text = f"-{self._format_power_smart(max_cooling)}"
             cool_surface = self.small_font.render(cool_text, True, (100, 100, 255))  # Light blue
             self.screen.blit(cool_surface, (label_x, bar_y + bar_height - 15))
-            
-            # Add note about separate scaling
-            note_text = "(Separate scales)"
-            note_surface = self.small_font.render(note_text, True, (200, 200, 200))
-            self.screen.blit(note_surface, (label_x, bar_y + bar_height + 5))
         else:
             # Regular scaling for temperature/pressure
             max_text = f"{max_val:.0f}{unit}"
@@ -536,7 +572,7 @@ class GeologyVisualizer:
         
         # Draw title above the bar
         if self.display_mode == 'power':
-            title = "Power Density"
+            title = "Power"
         elif self.display_mode == 'temperature':
             title = "Temperature"
         else:
@@ -1065,11 +1101,19 @@ class GeologyVisualizer:
                 # SPACE: Play/Pause simulation
                 self.paused = not self.paused
             elif event.key == pygame.K_LEFT:
-                # Left arrow: Step backward
-                self.simulation.step_backward()
+                # Left arrow: Step backward (handle initial press)
+                if not self.key_repeat_state['left_held']:
+                    self.simulation.step_backward()
+                    self.key_repeat_state['left_held'] = True
+                    self.key_repeat_state['last_repeat_time'] = pygame.time.get_ticks()
+                    self.key_repeat_state['initial_press_handled'] = True
             elif event.key == pygame.K_RIGHT:
-                # Right arrow: Step forward
-                self.simulation.step_forward()
+                # Right arrow: Step forward (handle initial press)
+                if not self.key_repeat_state['right_held']:
+                    self.simulation.step_forward()
+                    self.key_repeat_state['right_held'] = True
+                    self.key_repeat_state['last_repeat_time'] = pygame.time.get_ticks()
+                    self.key_repeat_state['initial_press_handled'] = True
             elif event.key == pygame.K_UP:
                 # Up arrow: Increase simulation speed
                 speeds = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
@@ -1112,7 +1156,42 @@ class GeologyVisualizer:
                 tabs = ['controls', 'stats', 'composition', 'graphs', 'info']
                 current_idx = tabs.index(self.sidebar_tab)
                 self.sidebar_tab = tabs[(current_idx + 1) % len(tabs)]
+        
+        elif event.type == pygame.KEYUP:
+            # Handle key releases for repeat functionality
+            if event.key == pygame.K_LEFT:
+                self.key_repeat_state['left_held'] = False
+            elif event.key == pygame.K_RIGHT:
+                self.key_repeat_state['right_held'] = False
     
+    def _handle_key_repeat(self):
+        """Handle key repeat for arrow keys"""
+        current_time = pygame.time.get_ticks()
+        
+        # Check if left arrow should repeat
+        if self.key_repeat_state['left_held']:
+            time_since_last = current_time - self.key_repeat_state['last_repeat_time']
+            
+            # Use delay for first repeat, then rate for subsequent repeats
+            threshold = self.key_repeat_state['repeat_delay'] if self.key_repeat_state['initial_press_handled'] else self.key_repeat_state['repeat_rate']
+            
+            if time_since_last >= threshold:
+                self.simulation.step_backward()
+                self.key_repeat_state['last_repeat_time'] = current_time
+                self.key_repeat_state['initial_press_handled'] = False  # Switch to repeat rate
+        
+        # Check if right arrow should repeat
+        if self.key_repeat_state['right_held']:
+            time_since_last = current_time - self.key_repeat_state['last_repeat_time']
+            
+            # Use delay for first repeat, then rate for subsequent repeats
+            threshold = self.key_repeat_state['repeat_delay'] if self.key_repeat_state['initial_press_handled'] else self.key_repeat_state['repeat_rate']
+            
+            if time_since_last >= threshold:
+                self.simulation.step_forward()
+                self.key_repeat_state['last_repeat_time'] = current_time
+                self.key_repeat_state['initial_press_handled'] = False  # Switch to repeat rate
+
     def _handle_mouse_wheel(self, event):
         """Handle mouse wheel for tool adjustment"""
         keys = pygame.key.get_pressed()
@@ -1146,6 +1225,9 @@ class GeologyVisualizer:
             if any(mouse_buttons):
                 mouse_pos = pygame.mouse.get_pos()
                 self._handle_mouse_drag(mouse_pos, mouse_buttons)
+            
+            # Handle key repeat for arrow keys
+            self._handle_key_repeat()
             
             # Auto-stepping when playing
             if not self.paused:

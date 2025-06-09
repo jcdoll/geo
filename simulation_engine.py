@@ -4,73 +4,18 @@ Handles heat transfer, pressure calculation, and rock state evolution.
 """
 
 import numpy as np
-from numba import jit
+import logging
 from typing import Tuple, Optional
 try:
     from .materials import MaterialType, MaterialDatabase
 except ImportError:
     from materials import MaterialType, MaterialDatabase
 from scipy import ndimage
-from scipy.sparse import diags, csc_matrix
-from scipy.sparse.linalg import spsolve
-
-# JIT-compiled performance-critical functions
-@jit(nopython=True)
-def _jit_apply_convolution_diffusion(temperature, thermal_diffusivity, kernel, dt_factor):
-    """JIT-compiled convolution for heat diffusion"""
-    height, width = temperature.shape
-    new_temp = temperature.copy()
-    
-    for y in range(1, height-1):
-        for x in range(1, width-1):
-            if thermal_diffusivity[y, x] > 0:
-                # Apply 3x3 convolution manually for speed
-                laplacian = 0.0
-                for ky in range(-1, 2):
-                    for kx in range(-1, 2):
-                        laplacian += temperature[y+ky, x+kx] * kernel[ky+1, kx+1]
-                
-                temp_change = thermal_diffusivity[y, x] * laplacian * dt_factor
-                new_temp[y, x] += temp_change
-    
-    return new_temp
-
-@jit(nopython=True)
-def _jit_calculate_pressure(distances, rock_type_ids, planet_radius, cell_size, total_mass, gravity_constant):
-    """JIT-compiled pressure calculation"""
-    height, width = distances.shape
-    pressure = np.zeros_like(distances)
-    
-    for y in range(height):
-        for x in range(width):
-            rock_id = rock_type_ids[y, x]
-            if rock_id == 0:  # Space (assuming SPACE has ID 0)
-                pressure[y, x] = 0.0
-                continue
-            
-            distance = distances[y, x]
-            distance_m = distance * cell_size
-            
-            if distance_m < cell_size:
-                distance_m = cell_size
-            
-            # Simplified lithostatic pressure
-            surface_distance = planet_radius
-            depth = max(0.0, surface_distance - distance) * cell_size
-            
-            if depth > 0:
-                avg_density = 3000.0  # kg/m³
-                avg_g = 9.81  # m/s²
-                pressure[y, x] = avg_density * avg_g * depth / 1e6  # MPa
-            else:
-                pressure[y, x] = 0.1  # Surface pressure
-    
-    return pressure
 
 class GeologySimulation:
     """Main simulation engine for 2D geological processes"""
     
-    def __init__(self, width: int, height: int, cell_size: float = 50.0, quality: int = 1):
+    def __init__(self, width: int, height: int, cell_size: float = 50.0, quality: int = 1, log_level: str = "INFO"):
         """
         Initialize simulation grid
         
@@ -79,10 +24,30 @@ class GeologySimulation:
             height: Grid height in cells  
             cell_size: Size of each cell in meters
             quality: Quality setting (1=high quality, 2=balanced, 3=fast)
+            log_level: Logging level ("INFO" or "DEBUG")
         """
         self.width = width
         self.height = height
         self.cell_size = cell_size  # meters per cell
+        
+        # Setup logging
+        self.logger = logging.getLogger(f"GeologySimulation_{id(self)}")
+        self.logger.setLevel(getattr(logging, log_level.upper()))
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            # Clean formatter without timestamp and logger name
+            formatter = logging.Formatter('%(message)s')
+            handler.setFormatter(formatter)
+            self.logger.addHandler(handler)
+        
+        # Thermal flux tracking for debugging
+        self.thermal_fluxes = {
+            'solar_input': 0.0,      # W
+            'radiative_output': 0.0,  # W  
+            'internal_heating': 0.0,  # W
+            'atmospheric_heating': 0.0, # W
+            'net_flux': 0.0          # W
+        }
         
         # Performance configuration
         self._setup_performance_config(quality)
@@ -104,36 +69,35 @@ class GeologySimulation:
         
         # Simulation parameters
         self.time = 0.0
-        self.dt = 2.0  # Reduced from 10 years to 2 years for better stability
+        self.dt = 1.0  # Further reduced to 1 year for DuFort-Frankel stability
         
         # Unit conversion constants
         self.seconds_per_year = 365.25 * 24 * 3600
         self.stefan_boltzmann_geological = 5.67e-8 * self.seconds_per_year  # W/(m²⋅K⁴) → J/(year⋅m²⋅K⁴)
-        self.gravity_constant = 6.67430e-11  # G in m³/(kg⋅s²)
         
         # Planetary parameters
         self.planet_radius_fraction = 0.8  # Fraction of grid width for initial planet
         self.planet_center = (width // 2, height // 2)
-        self.total_mass = 0.0  # Will be calculated
         self.center_of_mass = (width / 2, height / 2)  # Will be calculated dynamically
         
         # Material database
         self.material_db = MaterialDatabase()
         
         # General physics settings (not performance-dependent)
-        self.atmospheric_diffusivity_enhancement = 1.2  # Enhanced heat transfer in atmosphere
+        self.atmospheric_diffusivity_enhancement = 5.0  # Now safe to enhance with DuFort-Frankel!
+        self.atmospheric_convection_mixing = 0.3        # Fraction of temperature difference to mix per step (fast convection)
         self.interface_diffusivity_enhancement = 1.5    # Enhanced heat transfer at material interfaces
         self.surface_radiation_depth_fraction = 0.1     # Fraction of cell depth that participates in surface radiation
-        self.radiative_cooling_efficiency = 0.2         # Cooling efficiency factor for Stefan-Boltzmann radiation
+        self.radiative_cooling_efficiency = 0.8         # Cooling efficiency factor for Stefan-Boltzmann radiation (increased for better balance)
         
         # Temperature constants
         self.space_temperature = 2.7                    # Cosmic background temperature (K)
         self.reference_temperature = 273.15             # Reference temperature for thermal expansion (K)
-        self.core_temperature = 400.0 + 273.15         # Initial planetary core temperature (K) - closer to equilibrium
-        self.surface_temperature = 15.0 + 273.15       # Initial planetary surface temperature (K) - closer to equilibrium
-        self.temperature_decay_constant = 2.0          # Temperature gradient decay factor - steeper gradient
-        self.melting_temperature = 1200 + 273.15       # General melting temperature threshold (K)
-        self.core_heating_depth_scale = 1.0            # Exponential scale factor for core heating vs depth
+        self.core_temperature = 1200.0 + 273.15         # Initial planetary core temperature (K) - warmer for stability
+        self.surface_temperature = 50.0 + 273.15        # Initial planetary surface temperature (K) - warmer for stability
+        self.temperature_decay_constant = 2.0           # Temperature gradient decay factor - steeper gradient
+        self.melting_temperature = 1200 + 273.15        # General melting temperature threshold (K)
+        self.core_heating_depth_scale = 0.5             # Exponential scale factor for core heating vs depth
         
         # Pressure constants  
         self.surface_pressure = 0.1                     # Surface pressure (MPa)
@@ -144,10 +108,10 @@ class GeologySimulation:
         
         # Solar and greenhouse constants (balanced for stable temperatures)
         self.solar_constant = 1361                      # Solar constant (W/m²)
-        self.planetary_distance_factor = 0.01          # Distance factor for solar intensity - increased to balance cooling
-        self.atmospheric_absorption = 0.25             # Atmospheric absorption fraction - realistic 25%
-        self.base_greenhouse_effect = 0.5              # Base greenhouse effect fraction - increased to retain heat
-        self.max_greenhouse_effect = 0.8               # Maximum greenhouse effect fraction
+        self.planetary_distance_factor = 0.00001       # Distance factor for solar intensity - further reduced to prevent hot spots (was 0.0001)
+        self.atmospheric_absorption_per_cell = 0.0005  # Atmospheric absorption fraction per cell (0.05% per layer) - reduced to prevent hot spots
+        self.base_greenhouse_effect = 0.6              # Base greenhouse effect fraction - increased to retain more heat
+        self.max_greenhouse_effect = 0.85              # Maximum greenhouse effect fraction - increased
         self.greenhouse_vapor_scaling = 1000.0         # Water vapor mass scaling for greenhouse effect
         
         # Material mobility probabilities
@@ -178,13 +142,14 @@ class GeologySimulation:
             'greenhouse_factor': [],
             'planet_albedo': []
         }
-        self.max_time_series = 200  # Keep last 200 data points
+        self.max_time_series = 500  # Keep last 500 data points
         
         # Performance optimization caches
         self._material_props_cache = {}  # Cache for material property lookups
-        self._neighbor_cache = {}        # Cache for neighbor offset calculations
-        self._distance_cache = None      # Cache for distance calculations
         self._properties_dirty = True    # Flag to track when material properties need updating
+        
+        # Thermal diffusion state
+        self._adaptive_time_steps = []   # Track adaptive time stepping history
         
         # Pre-compute neighbor arrays for vectorized operations
         self._setup_neighbors()
@@ -376,405 +341,325 @@ class GeologySimulation:
         self._properties_dirty = False
     
     def _heat_diffusion(self) -> tuple[np.ndarray, float]:
-        """Fast explicit heat diffusion with intelligent stability handling"""
+        """Operator splitting approach: solve diffusion, radiation, and sources separately for maximum stability"""
         # Only process non-space cells
         non_space_mask = (self.material_types != MaterialType.SPACE)
         
+        if not np.any(non_space_mask):
+            return self.temperature, 1.0
+        
+        # Start with current temperature
+        working_temp = self.temperature.copy()
+        
+        # Step 1: Solve pure diffusion (no sources)
+        working_temp, diffusion_stability = self._solve_pure_diffusion(working_temp, non_space_mask)
+        
+        # Step 2: Solve radiative cooling analytically (unconditionally stable)
+        working_temp = self._solve_radiative_cooling_analytical(working_temp, non_space_mask)
+        
+        # Step 3: Solve other heat sources explicitly (internal, solar, atmospheric)
+        working_temp = self._solve_non_radiative_sources(working_temp, non_space_mask)
+        
+        # Overall stability factor is dominated by diffusion (radiation and sources are stable)
+        overall_stability = diffusion_stability
+        
+        # Store debugging info
+        self._actual_substeps = getattr(self, '_diffusion_substeps', 1)
+        self._actual_effective_dt = self.dt * overall_stability
+        
+        # Debug info
+        avg_temp_before = np.mean(self.temperature[non_space_mask]) - 273.15 if np.any(non_space_mask) else 0.0
+        avg_temp_after = np.mean(working_temp[non_space_mask]) - 273.15 if np.any(non_space_mask) else 0.0
+        print(f"DEBUG OPERATOR SPLIT: dt={self.dt:.3f}y, diff_factor={diffusion_stability:.3f}")
+        print(f"DEBUG TEMP: {avg_temp_before:.1f}°C → {avg_temp_after:.1f}°C (Δ={avg_temp_after-avg_temp_before:.1f}°C)")
+        
+        return working_temp, overall_stability
+    
+    def _solve_pure_diffusion(self, temperature: np.ndarray, non_space_mask: np.ndarray) -> tuple[np.ndarray, float]:
+        """Solve pure diffusion (no sources) for maximum stability"""
         # Get thermal diffusivity for all cells (α = k / (ρ * cp))
         valid_thermal = (self.density > 0) & (self.specific_heat > 0) & (self.thermal_conductivity > 0)
         thermal_diffusivity = np.zeros_like(self.thermal_conductivity)
         thermal_diffusivity[valid_thermal] = (
             self.thermal_conductivity[valid_thermal] / 
             (self.density[valid_thermal] * self.specific_heat[valid_thermal])
-        )
+        )  # m²/s
         
-        # Enhanced diffusion at material interfaces (simplified)
+        # Enhanced atmospheric convection (much faster heat transfer in gases)
+        atmosphere_mask = (
+            (self.material_types == MaterialType.AIR) |
+            (self.material_types == MaterialType.WATER_VAPOR)
+        )
+        atmospheric_cells = atmosphere_mask & valid_thermal
+        if np.any(atmospheric_cells):
+            thermal_diffusivity[atmospheric_cells] *= self.atmospheric_diffusivity_enhancement
+        
+        # Enhanced diffusion at material interfaces
         if hasattr(self, 'interface_diffusivity_enhancement'):
             neighbors = self._get_neighbors(4, shuffle=False)
             for dy, dx in neighbors:
                 shifted_materials = np.roll(np.roll(self.material_types, dy, axis=0), dx, axis=1)
                 interface_mask = (self.material_types != shifted_materials) & non_space_mask
-                
                 if np.any(interface_mask):
                     enhancement_mask = interface_mask & valid_thermal
                     if np.any(enhancement_mask):
                         thermal_diffusivity[enhancement_mask] *= self.interface_diffusivity_enhancement
         
-        # Reset power density for this timestep
-        self.power_density.fill(0.0)
-        
-        # Pre-compute diffusion kernel (cached) - more isotropic for circular approximation
-        if not hasattr(self, '_diffusion_kernel'):
-            # Improved circular approximation with normalized weights
-            # Diagonal neighbors weighted by 1/√2 ≈ 0.707 for distance correction
-            diagonal_weight = 0.707
-            cardinal_weight = 1.0
-            total_neighbor_weight = 4 * cardinal_weight + 4 * diagonal_weight
-            center_weight = -total_neighbor_weight
-            
-            self._diffusion_kernel = np.array([
-                [diagonal_weight, cardinal_weight, diagonal_weight],
-                [cardinal_weight, center_weight, cardinal_weight], 
-                [diagonal_weight, cardinal_weight, diagonal_weight]
-            ]) / 8.0
-        
-        # Apply diffusion using fast convolution
-        temp_laplacian = ndimage.convolve(self.temperature, self._diffusion_kernel, mode='constant', cval=0)
-        
-        # Time step and stability calculation
-        dt_seconds = self.dt * self.seconds_per_year
+        # Stability analysis for PURE DIFFUSION only (no sources)
         dx_squared = self.cell_size ** 2
+        max_alpha = np.max(thermal_diffusivity[non_space_mask]) if np.any(non_space_mask) else 0.0
         
-        # Calculate diffusion coefficient and check stability
-        diffusion_coefficient = thermal_diffusivity * dt_seconds / dx_squared
-        max_coeff = np.max(diffusion_coefficient[non_space_mask]) if np.any(non_space_mask) else 0.0
+        # Pure diffusion stability limit
+        diffusion_dt_limit = dx_squared / (4.0 * max_alpha) if max_alpha > 0 else float('inf')
         
-        # Use more conservative stability limit to reduce oscillations
-        max_stable_coeff = 0.1  # Reduced from 0.25 for better stability
-        stability_factor = 1.0
+        # Adaptive time step for diffusion
+        target_dt_seconds = min(diffusion_dt_limit, self.dt * self.seconds_per_year)
+        target_dt_seconds = max(target_dt_seconds, self.dt * self.seconds_per_year / 50.0)  # Max 50 substeps
         
-        if max_coeff > max_stable_coeff:
-            # Multiple sub-steps for stability (more efficient than matrix solve)
-            stability_factor = max_stable_coeff / max_coeff
-            n_substeps = max(1, int(np.ceil(1.0 / stability_factor)))
-            sub_dt = dt_seconds / n_substeps
-            
-            new_temp = self.temperature.copy()
-            for substep in range(n_substeps):
-                # Sub-step diffusion
-                sub_diffusion_coeff = thermal_diffusivity * sub_dt / dx_squared
-                temp_change = sub_diffusion_coeff * temp_laplacian
-                new_temp[non_space_mask] += temp_change[non_space_mask]
-                
-                # Update laplacian for next substep if needed
-                if substep < n_substeps - 1:
-                    temp_laplacian = ndimage.convolve(new_temp, self._diffusion_kernel, mode='constant', cval=0)
-            
-            # Use average effective time step for reporting
-            stability_factor = 1.0 / n_substeps
-        else:
-            # Single step - fast path
-            new_temp = self.temperature.copy()
-            temp_change = diffusion_coefficient * temp_laplacian
-            new_temp[non_space_mask] += temp_change[non_space_mask]
+        # Convert back to years
+        adaptive_dt = target_dt_seconds / self.seconds_per_year
+        stability_factor = adaptive_dt / self.dt
+        
+        # Use sub-steps for stability
+        num_substeps = max(1, min(50, int(np.ceil(self.dt / adaptive_dt))))
+        actual_effective_dt = self.dt / num_substeps
+        actual_stability_factor = actual_effective_dt / self.dt
         
         # Store debugging info
-        self._max_thermal_diffusivity = np.max(thermal_diffusivity[non_space_mask]) if np.any(non_space_mask) else 0.0
+        self._max_thermal_diffusivity = max_alpha
+        self._diffusion_substeps = num_substeps
         
-        # Calculate power density from final temperature change
-        final_temp_change = new_temp - self.temperature
-        mass_valid = valid_thermal & non_space_mask
-        if np.any(mass_valid):
-            power_from_diffusion = np.zeros_like(self.power_density)
-            power_from_diffusion[mass_valid] = (
-                self.density[mass_valid] * self.specific_heat[mass_valid] * 
-                final_temp_change[mass_valid] / dt_seconds
-            )
-            self.power_density += power_from_diffusion
+        # Pure diffusion sub-stepping (much simpler without sources)
+        new_temp = temperature.copy()
         
-        # Apply other heat sources/sinks
-        self._apply_solar_heating(new_temp, non_space_mask)
-        self._apply_radiative_cooling(new_temp, non_space_mask)
+        for step in range(num_substeps):
+            # Pure diffusion step only
+            new_temp = self._pure_diffusion_step(new_temp, thermal_diffusivity, actual_effective_dt, non_space_mask)
         
-        # Ensure space stays at cosmic background temperature
-        new_temp[~non_space_mask] = self.space_temperature
+        return new_temp, actual_stability_factor
+    
+    def _pure_diffusion_step(self, temperature: np.ndarray, thermal_diffusivity: np.ndarray, 
+                            dt: float, non_space_mask: np.ndarray) -> np.ndarray:
+        """Pure diffusion step only"""
+        # Convert dt to seconds for proper units
+        dt_seconds = dt * self.seconds_per_year
+        dx_squared = self.cell_size ** 2
         
-        # Safety check: prevent temperatures below absolute zero
-        new_temp = np.maximum(new_temp, 0.1)
+        # Calculate Laplacian using simple 4-neighbor stencil (most efficient)
+        temp_left = np.roll(temperature, 1, axis=1)
+        temp_right = np.roll(temperature, -1, axis=1)
+        temp_up = np.roll(temperature, 1, axis=0)
+        temp_down = np.roll(temperature, -1, axis=0)
+        
+        # Standard 4-neighbor Laplacian
+        temp_laplacian = temp_left + temp_right + temp_up + temp_down - 4 * temperature
+        
+        # Zero out Laplacian for space cells (no diffusion)
+        temp_laplacian[~non_space_mask] = 0.0
+        
+        # Combined diffusion update (vectorized)
+        # dT/dt = α∇²T
+        diffusion_change = thermal_diffusivity * dt_seconds * temp_laplacian / dx_squared
+        
+        # Apply updates only to non-space cells
+        new_temp = temperature.copy()
+        if np.any(non_space_mask):
+            new_temp[non_space_mask] += diffusion_change[non_space_mask]
+        
+        return new_temp
+    
+    def _dufort_frankel_step(self, thermal_diffusivity: np.ndarray, non_space_mask: np.ndarray) -> np.ndarray:
+        """DuFort-Frankel diffusion step (unconditionally stable for pure diffusion)"""
+        # Initialize temperature arrays for DuFort-Frankel scheme
+        if not hasattr(self, '_temp_previous'):
+            self._temp_previous = self.temperature.copy()
+            self._step_count = 0
+        
+        # DuFort-Frankel scheme: explicit but unconditionally stable
+        dt = self.dt  # years
+        dx_squared = self.cell_size ** 2  # m²
+        
+        # Calculate Laplacian using 4-neighbor stencil (more stable than 8-neighbor)
+        temp_left = np.roll(self.temperature, 1, axis=1)
+        temp_right = np.roll(self.temperature, -1, axis=1)
+        temp_up = np.roll(self.temperature, 1, axis=0)
+        temp_down = np.roll(self.temperature, -1, axis=0)
+        
+        # Standard 4-neighbor Laplacian
+        temp_laplacian = temp_left + temp_right + temp_up + temp_down - 4 * self.temperature
+        
+        # Zero out Laplacian for space cells (no diffusion)
+        temp_laplacian[~non_space_mask] = 0.0
+        
+        # DuFort-Frankel update: T^(n+1) = T^(n-1) + 2*dt*α*∇²T^n / dx²
+        diffusion_term = 2.0 * dt * thermal_diffusivity * temp_laplacian / dx_squared
+        
+        if self._step_count == 0:
+            # First step: use forward Euler (T^(-1) = T^(0))
+            new_temp = self.temperature + diffusion_term
+            else:
+            # DuFort-Frankel: use previous temperature
+            new_temp = self._temp_previous + diffusion_term
+        
+        # Update previous temperature for next step
+        self._temp_previous = self.temperature.copy()
+        self._step_count += 1
+        
+        return new_temp
+    
+    def _adaptive_source_integration(self, temperature: np.ndarray, heat_source: np.ndarray, 
+                                   non_space_mask: np.ndarray) -> tuple[np.ndarray, float]:
+        """Adaptive integration of heat source terms with error control"""
+        if not np.any(non_space_mask):
+            return temperature, 1.0
+        
+        # Calculate maximum allowable temperature change per step for stability
+        max_source_magnitude = np.max(np.abs(heat_source[non_space_mask])) if np.any(non_space_mask) else 0.0
+        
+        if max_source_magnitude == 0:
+            return temperature, 1.0  # No sources, no integration needed
+        
+        # Error-based adaptive stepping instead of fixed temperature limits
+        max_error_per_step = 10.0  # Maximum 10K error per full timestep (adjustable)
+        
+        # Handle case where there are no significant heat sources
+        if max_source_magnitude < 1e-10:  # Essentially zero sources
+            return temperature, 1.0  # No adaptation needed
+        
+        safe_dt = max_error_per_step / max_source_magnitude
+        safe_dt = max(safe_dt, self.dt / 100.0)  # Don't go smaller than 1/100 of timestep
+        
+        # Number of sub-steps needed (with safety checks)
+        if safe_dt <= 0 or not np.isfinite(safe_dt):
+            num_substeps = 1  # Fallback to single step
+        else:
+            num_substeps = max(1, int(np.ceil(self.dt / safe_dt)))
+            
+        effective_dt = self.dt / num_substeps
+        stability_factor = effective_dt / self.dt
+        
+        # Limit excessive subdivision for performance
+        if num_substeps > 50:
+            num_substeps = 50
+            effective_dt = self.dt / num_substeps
+            stability_factor = effective_dt / self.dt
+        
+        # Apply source terms with sub-stepping
+        new_temp = temperature.copy()
+        for step in range(num_substeps):
+            source_change = heat_source * effective_dt
+            
+            # Apply source terms with safety checks
+            valid_sources = non_space_mask & np.isfinite(source_change)
+            if np.any(valid_sources):
+                new_temp[valid_sources] += source_change[valid_sources]
+            
+            # Optional: Richardson extrapolation for higher accuracy (if needed)
+            # This could be added later for better error control
         
         return new_temp, stability_factor
     
-    def _apply_radiative_cooling(self, new_temp: np.ndarray, non_space_mask: np.ndarray):
-        """Apply Stefan-Boltzmann cooling through transparent atmosphere model"""
-        space_mask = ~non_space_mask
+    def _implicit_diffusion_step(self, temperature: np.ndarray, thermal_diffusivity: np.ndarray, 
+                               dt: float, non_space_mask: np.ndarray) -> np.ndarray:
+        """Unconditionally stable implicit diffusion using backward Euler"""
+        # Create working copy
+        new_temp = temperature.copy()
         
-        # Find outer atmosphere - atmospheric materials connected to space (not interior air pockets)
+        # Pre-compute diffusion kernel (cached)
+        if not hasattr(self, '_diffusion_kernel'):
+            # Laplacian kernel for implicit diffusion
+            self._diffusion_kernel = np.array([
+                [0, 1, 0],
+                [1, -4, 1], 
+                [0, 1, 0]
+            ], dtype=np.float64)
+        
+        # Create "padded" temperature field where space cells take the temperature of nearest non-space neighbor
+        temp_for_diffusion = temperature.copy()
+        
+        # For space cells, set temperature to nearby non-space cells to create insulating boundary
+        space_mask = ~non_space_mask
+        if np.any(space_mask):
+            # Find space cells that are adjacent to non-space cells
+            space_near_matter = space_mask & ndimage.binary_dilation(non_space_mask, structure=self._circular_kernel_3x3)
+            
+            if np.any(space_near_matter):
+                # Use distance transform to find nearest non-space cell
+                nearest_matter_indices = ndimage.distance_transform_edt(space_mask, return_indices=True)[1]
+                
+                # Set space cell temperatures to their nearest non-space neighbor temperature
+                for space_y, space_x in zip(*np.where(space_near_matter)):
+                    nearest_y = nearest_matter_indices[0, space_y, space_x]
+                    nearest_x = nearest_matter_indices[1, space_y, space_x]
+                    temp_for_diffusion[space_y, space_x] = temperature[nearest_y, nearest_x]
+        
+        # Simple explicit diffusion with small time step (stable when dt is small enough)
+        # This is much simpler than full implicit solving but still stable with our adaptive time stepping
+        temp_laplacian = ndimage.convolve(temp_for_diffusion, self._diffusion_kernel, mode='constant', cval=0.0)
+        
+        # Zero out Laplacian for space cells
+        temp_laplacian[space_mask] = 0.0
+        
+        # Explicit diffusion update: T^(n+1) = T^n + dt*α*∇²T^n
+        dx_squared = self.cell_size ** 2
+        dt_seconds = dt * self.seconds_per_year
+        
+        # Apply diffusion only to non-space cells
+        if np.any(non_space_mask):
+            diffusion_change = thermal_diffusivity[non_space_mask] * dt_seconds * temp_laplacian[non_space_mask] / dx_squared
+            new_temp[non_space_mask] += diffusion_change
+        
+        return new_temp
+
+    def _apply_atmospheric_convection(self, temperature: np.ndarray) -> np.ndarray:
+        """Apply fast atmospheric convection mixing using vectorized convolution (unconditionally stable)"""
+        # Find atmospheric materials
         atmosphere_mask = (
             (self.material_types == MaterialType.AIR) |
             (self.material_types == MaterialType.WATER_VAPOR)
         )
         
-        # Find all atmosphere connected to space using connected components
-        # This algorithm handles arbitrary atmosphere thickness in O(n) time
+        if not np.any(atmosphere_mask):
+            return temperature
         
-        # Label all connected atmosphere regions (using circular kernel to reduce artifacts)
-        labeled_atmo, num_features = ndimage.label(atmosphere_mask, structure=self._circular_kernel_3x3)
+        # FIXED: Proper atmospheric-only temperature averaging
+        # Only include atmospheric cell temperatures in the averaging, completely exclude non-atmospheric cells        
+        # Create temperature grid where ONLY atmospheric cells have their actual temperature
+        # Non-atmospheric cells are marked as NaN to exclude them from averaging
+        atmo_temp_for_sum = np.where(atmosphere_mask, temperature, 0.0)
+        atmo_mask_for_count = atmosphere_mask.astype(np.float64)
         
-        if num_features == 0:
-            outer_atmo_mask = np.zeros_like(atmosphere_mask, dtype=bool)
-        else:
-            # Find atmosphere regions adjacent to space (using circular kernel)
-            space_neighbors = ndimage.binary_dilation(space_mask, structure=self._circular_kernel_3x3)
-            space_adjacent_atmo = space_neighbors & atmosphere_mask
-            
-            if np.any(space_adjacent_atmo):
-                # Get the labels of atmosphere regions connected to space
-                space_connected_labels = np.unique(labeled_atmo[space_adjacent_atmo])
-                space_connected_labels = space_connected_labels[space_connected_labels > 0]  # Remove 0 (background)
-                
-                # Outer atmosphere consists of all regions connected to space
-                outer_atmo_mask = np.isin(labeled_atmo, space_connected_labels)
-            else:
-                outer_atmo_mask = np.zeros_like(atmosphere_mask, dtype=bool)
+        # Use simple 3x3 averaging kernel for neighbor mixing  
+        mixing_kernel = np.array([
+            [1, 1, 1],
+            [1, 0, 1],  # Center cell excluded (we want neighbors only)
+            [1, 1, 1]
+        ], dtype=np.float64)
         
-        # Find the solid surface beneath the outer atmosphere
-        # This is solid material adjacent to outer atmosphere or space
-        solid_mask = ~(space_mask | atmosphere_mask)  # All non-space, non-atmosphere
+        # Apply convolution to get sum of atmospheric neighbor temperatures and atmospheric neighbor counts
+        neighbor_atmo_temp_sum = ndimage.convolve(atmo_temp_for_sum, mixing_kernel, mode='constant', cval=0.0)
+        neighbor_atmo_count = ndimage.convolve(atmo_mask_for_count, mixing_kernel, mode='constant', cval=0.0)
         
-        # Surface solids are adjacent to outer atmosphere or space (using circular kernel)
-        surface_candidates = ndimage.binary_dilation(outer_atmo_mask | space_mask, structure=self._circular_kernel_3x3)
-        surface_solid_mask = surface_candidates & solid_mask
+        # Calculate average temperature of atmospheric neighbors only (completely excluding non-atmospheric cells)
+        valid_atmo_neighbors = neighbor_atmo_count > 0
+        avg_atmo_neighbor_temp = np.zeros_like(temperature)
+        avg_atmo_neighbor_temp[valid_atmo_neighbors] = (
+            neighbor_atmo_temp_sum[valid_atmo_neighbors] / neighbor_atmo_count[valid_atmo_neighbors]
+        )
         
-        # Combine outer atmosphere and surface solids for radiation
-        radiative_mask = outer_atmo_mask | surface_solid_mask
+        # Apply mixing only to atmospheric cells that have atmospheric neighbors
+        mixing_mask = atmosphere_mask & valid_atmo_neighbors
         
-        if not np.any(radiative_mask):
-            return
+        if np.any(mixing_mask):
+            # Vectorized mixing: T_new = T_old + mixing_fraction * (T_avg_atmo_neighbors - T_old)
+            temp_diff = avg_atmo_neighbor_temp[mixing_mask] - temperature[mixing_mask]
+            temperature[mixing_mask] += self.atmospheric_convection_mixing * temp_diff
         
-        # Apply Stefan-Boltzmann cooling
-        T_radiating = self.temperature[radiative_mask]
-        T_space = self.space_temperature
-        
-        # Stefan-Boltzmann law (vectorized calculation)
-        valid_cooling = (T_radiating > T_space) & (self.density[radiative_mask] > 0) & (self.specific_heat[radiative_mask] > 0)
-        
-        if np.any(valid_cooling):
-            # Get indices of valid cooling cells
-            cooling_indices = np.where(radiative_mask)
-            valid_subset = valid_cooling
-            
-            T_valid = T_radiating[valid_subset]
-            density_valid = self.density[cooling_indices][valid_subset]
-            specific_heat_valid = self.specific_heat[cooling_indices][valid_subset]
-            
-            # Get emissivity from material properties
-            material_types_valid = self.material_types[cooling_indices][valid_subset]
-            emissivity = np.array([self.material_db.get_properties(mat_type).emissivity 
-                                 for mat_type in material_types_valid])
-            
-            # Stefan-Boltzmann calculation with atmospheric greenhouse effect (vectorized)
-            stefan_boltzmann = 5.67e-8
-            
-            # Calculate dynamic greenhouse effect based on water vapor content
-            # Find all atmospheric water vapor
-            water_vapor_mask = (self.material_types == MaterialType.WATER_VAPOR)
-            total_water_vapor_mass = np.sum(self.density[water_vapor_mask]) if np.any(water_vapor_mask) else 0.0
-            
-            # Scale greenhouse effect by water vapor content (logarithmic to prevent runaway)
-            # Logarithmic scaling to prevent runaway greenhouse
-            if total_water_vapor_mass > 0:
-                vapor_factor = np.log1p(total_water_vapor_mass / self.greenhouse_vapor_scaling) / 10.0  # Dampened scaling
-                greenhouse_factor = self.base_greenhouse_effect + (self.max_greenhouse_effect - self.base_greenhouse_effect) * np.tanh(vapor_factor)
-            else:
-                greenhouse_factor = self.base_greenhouse_effect
-            
-            effective_stefan = stefan_boltzmann * (1.0 - greenhouse_factor)
-            
-            # Moderate radiative cooling with greenhouse effect providing the main balance
-            cooling_efficiency = self.radiative_cooling_efficiency
-            power_per_area = emissivity * effective_stefan * cooling_efficiency * (T_valid**4 - T_space**4)
-            
-            # Temperature change calculation (vectorized)
-            dt_seconds = self.dt * self.seconds_per_year
-            energy_loss = power_per_area * dt_seconds * (self.cell_size ** 2)
-            mass = density_valid * (self.cell_size ** 3)
-            temp_change = -energy_loss / (mass * specific_heat_valid)
-            
-            # Calculate power density from radiative cooling (W/m³)
-            # Radiative cooling is a surface phenomenon, not volumetric
-            # Track as effective power density over a thin surface layer
-            surface_layer_thickness = self.cell_size * self.surface_radiation_depth_fraction
-            power_density_cooling = power_per_area / surface_layer_thickness
-            
-            # Add cooling power to power density tracking (negative = heat loss)
-            cooling_y, cooling_x = cooling_indices
-            valid_y, valid_x = cooling_y[valid_subset], cooling_x[valid_subset]
-            self.power_density[valid_y, valid_x] -= power_density_cooling
-            
-            # Prevent cooling below space temperature
-            max_cooling = T_valid - T_space
-            temp_change = np.maximum(temp_change, -max_cooling)
-            
-            # Apply cooling to the new temperature array
-            new_temp[valid_y, valid_x] += temp_change
+        return temperature
+
+
     
-    def _apply_solar_heating(self, new_temp: np.ndarray, non_space_mask: np.ndarray):
-        """Apply solar heating with equatorial maximum and polar minimum"""
-        # Find surface cells that can receive solar radiation
-        space_mask = ~non_space_mask
-        
-        # Surface cells are those adjacent to space or outer atmosphere (using circular kernel)
-        surface_candidates = ndimage.binary_dilation(space_mask, structure=self._circular_kernel_3x3) & non_space_mask
-        
-        if not np.any(surface_candidates):
-            return
-        
-        # Calculate solar heating based on latitude (distance from equator)
-        center_x, center_y = self.center_of_mass
-        
-        # For a circular planet, equator is the horizontal line through center
-        # Distance from equator = |y - center_y|
-        y_coords = np.arange(self.height).reshape(-1, 1)  # Shape: (height, 1)
-        x_coords = np.arange(self.width).reshape(1, -1)   # Shape: (1, width) 
-        distance_from_equator = np.abs(y_coords - center_y)
-        planet_radius_cells = self._get_planet_radius()
-        
-        # Normalize distance from equator (0 at equator, 1 at poles)
-        normalized_latitude = distance_from_equator / max(planet_radius_cells, 1.0)  # Avoid division by zero
-        normalized_latitude = np.clip(normalized_latitude, 0.0, 1.0)
-        
-        # Solar intensity follows cosine law: I = I₀ * cos(latitude)
-        # At equator (lat=0): cos(0) = 1.0 (maximum)
-        # At poles (lat=π/2): cos(π/2) = 0.0 (minimum)
-        latitude_radians = normalized_latitude * (np.pi / 2)  # 0 to π/2
-        solar_intensity_factor = np.cos(latitude_radians)
-        
-        # Broadcast to full grid size
-        solar_intensity_factor = np.broadcast_to(solar_intensity_factor, (self.height, self.width))
-        
-        # Solar constant and planet-specific factors  
-        effective_solar_intensity = (self.solar_constant * self.planetary_distance_factor * 
-                                    (1.0 - self.atmospheric_absorption))
-        
-        # Calculate albedo from material properties - vectorized
-        albedo = np.zeros((self.height, self.width))
-        
-        # Create albedo lookup table for all material types
-        if not hasattr(self, '_albedo_lookup'):
-            self._albedo_lookup = {}
-            for material_type in MaterialType:
-                self._albedo_lookup[material_type] = self.material_db.get_properties(material_type).albedo
-        
-        # Apply albedo for all non-space cells vectorized
-        non_space_coords = np.where(non_space_mask)
-        if len(non_space_coords[0]) > 0:
-            # Get material types for all non-space cells
-            materials = self.material_types[non_space_coords]
-            
-            # Vectorized albedo lookup
-            albedo_values = np.array([self._albedo_lookup[mat] for mat in materials.flat])
-            
-            # Handle frozen water special case - vectorized
-            water_mask = (materials == MaterialType.WATER)
-            frozen_mask = water_mask & (self.temperature[non_space_coords] < 273.15)
-            if np.any(frozen_mask):
-                ice_albedo = self._albedo_lookup[MaterialType.ICE]
-                albedo_values[frozen_mask] = ice_albedo
-            
-            # Apply albedo values to grid
-            albedo[non_space_coords] = albedo_values
-        
-        # Calculate weighted average albedo for the planet
-        surface_weights = surface_candidates.astype(float) * solar_intensity_factor
-        if np.sum(surface_weights) > 0:
-            planet_albedo = np.average(albedo[surface_candidates], weights=surface_weights[surface_candidates])
-        else:
-            planet_albedo = 0.2  # Default
-        
-        # Reduced solar input due to albedo reflection
-        effective_solar_constant = self.solar_constant * (1.0 - planet_albedo)
-        
-        # Solar flux reaching surface (after atmospheric absorption and albedo)
-        surface_solar_flux = (effective_solar_constant * self.planetary_distance_factor * 
-                             (1.0 - self.atmospheric_absorption))  # W/m²
-        
-        # Solar flux absorbed by atmosphere  
-        atmospheric_solar_flux = (effective_solar_constant * self.planetary_distance_factor * 
-                                 self.atmospheric_absorption)  # W/m²
-        
-        # 1. Heat the atmosphere with absorbed solar energy
-        atmosphere_mask = (
-            (self.material_types == MaterialType.AIR) |
-            (self.material_types == MaterialType.WATER_VAPOR)
-        )
-        atmo_coords = np.where(atmosphere_mask)
-        
-        if len(atmo_coords[0]) > 0:
-            atmo_y, atmo_x = atmo_coords
-            atmo_solar_intensity = solar_intensity_factor[atmo_y, atmo_x]
-            
-            # BUGFIX: Distribute atmospheric solar energy among ALL atmospheric cells
-            # instead of applying full flux to each cell
-            total_atmo_cells = len(atmo_coords[0])
-            total_weighted_intensity = np.sum(atmo_solar_intensity)
-            
-            if total_weighted_intensity > 0:
-                # Each cell gets a fraction of the total atmospheric energy based on its solar intensity
-                atmo_energy_fraction = atmo_solar_intensity / total_weighted_intensity
-                atmo_solar_heating = atmospheric_solar_flux * atmo_energy_fraction  # W/m² distributed
-            else:
-                atmo_solar_heating = np.zeros_like(atmo_solar_intensity)
-            
-            # Convert to temperature change for atmosphere
-            dt_seconds = self.dt * self.seconds_per_year
-            cell_area = self.cell_size ** 2
-            atmo_energy_input = atmo_solar_heating * dt_seconds * cell_area  # J
-            
-            atmo_density = self.density[atmo_coords]
-            atmo_specific_heat = self.specific_heat[atmo_coords]
-            cell_volume = self.cell_size ** 3
-            atmo_mass = atmo_density * cell_volume
-            
-            valid_atmo_heating = (atmo_density > 0) & (atmo_specific_heat > 0)
-            if np.any(valid_atmo_heating):
-                atmo_temp_increase = np.zeros_like(atmo_solar_heating)
-                atmo_temp_increase[valid_atmo_heating] = (
-                    atmo_energy_input[valid_atmo_heating] / 
-                    (atmo_mass[valid_atmo_heating] * atmo_specific_heat[valid_atmo_heating])
-                )
-                
-                # Apply atmospheric heating
-                valid_atmo_y = atmo_y[valid_atmo_heating]
-                valid_atmo_x = atmo_x[valid_atmo_heating]
-                new_temp[valid_atmo_y, valid_atmo_x] += atmo_temp_increase[valid_atmo_heating]
-                
-                # Track atmospheric solar power density (positive = heat input)
-                # Atmosphere absorbs solar radiation throughout its volume
-                atmo_power_density = atmo_solar_heating[valid_atmo_heating] / self.cell_size  # W/m³
-                self.power_density[valid_atmo_y, valid_atmo_x] += atmo_power_density
-        
-        # 2. Heat the surface with transmitted solar energy
-        surface_coords = np.where(surface_candidates)
-        if len(surface_coords[0]) == 0:
-            return
-        
-        # Get solar intensity for surface cells
-        surface_y, surface_x = surface_coords
-        surface_solar_intensity = solar_intensity_factor[surface_y, surface_x]
-        surface_flux = surface_solar_flux * surface_solar_intensity  # W/m²
-        
-        # Convert to temperature change
-        dt_seconds = self.dt * self.seconds_per_year
-        cell_area = self.cell_size ** 2  # m²
-        energy_input = surface_flux * dt_seconds * cell_area  # J
-        
-        # Calculate mass and specific heat for surface cells
-        surface_density = self.density[surface_coords]
-        surface_specific_heat = self.specific_heat[surface_coords]
-        cell_volume = self.cell_size ** 3  # m³
-        cell_mass = surface_density * cell_volume  # kg
-        
-        # Temperature change: ΔT = Energy / (mass × specific_heat)
-        valid_heating = (surface_density > 0) & (surface_specific_heat > 0)
-        
-        if np.any(valid_heating):
-            temp_increase = np.zeros_like(surface_flux)
-            temp_increase[valid_heating] = (
-                energy_input[valid_heating] / 
-                (cell_mass[valid_heating] * surface_specific_heat[valid_heating])
-            )
-            
-            # Apply solar heating to surface cells
-            heating_y, heating_x = surface_coords
-            valid_y, valid_x = heating_y[valid_heating], heating_x[valid_heating]
-            new_temp[valid_y, valid_x] += temp_increase[valid_heating]
-            
-            # Track solar power density (positive = heat input)
-            # Solar heating is surface phenomenon - don't convert to volumetric for power tracking
-            # Instead, track as effective power density over a thin surface layer
-            surface_layer_thickness = self.cell_size * self.surface_radiation_depth_fraction
-            solar_power_density = surface_flux / surface_layer_thickness  # W/m³ (concentrated in thin layer)
-            self.power_density[valid_y, valid_x] += solar_power_density[valid_heating]
+
 
     def _calculate_center_of_mass(self):
         """Calculate center of mass for the planet using vectorized operations"""
@@ -797,7 +682,6 @@ class GeologySimulation:
             center_x = np.sum(cell_masses * matter_x) / total_mass
             center_y = np.sum(cell_masses * matter_y) / total_mass
             self.center_of_mass = (center_x, center_y)
-            self.total_mass = total_mass
 
     def _calculate_planetary_pressure(self):
         """Calculate pressure using vectorized gravitational model"""
@@ -1107,51 +991,415 @@ class GeologySimulation:
         
         return changes_made
     
-    def _apply_internal_heat_generation(self):
-        """Apply internal heat generation from radioactive decay and other sources"""
+    def _calculate_all_heat_sources(self, non_space_mask: np.ndarray) -> np.ndarray:
+        """Calculate all heat source terms Q_total/(ρcp) in K/year"""
+        # Calculate individual heat sources
+        internal_source = self._calculate_internal_heating_source(non_space_mask)
+        solar_source = self._calculate_solar_heating_source(non_space_mask)
+        radiative_source = self._calculate_radiative_cooling_source(non_space_mask)
+        atmospheric_source = self._calculate_atmospheric_heating_source(non_space_mask)
+        
+        # Combine all sources
+        total_source = internal_source + solar_source + radiative_source + atmospheric_source
+        
+        return total_source
+    
+    def _calculate_internal_heating_source(self, non_space_mask: np.ndarray) -> np.ndarray:
+        """Calculate internal heat generation source term Q/(ρcp) in K/year"""
+        # Initialize source term
+        source_term = np.zeros_like(self.temperature)
+        
+        # Only apply to non-space solid materials with valid properties
+        valid_heating = (
+            non_space_mask & 
+            (self.density > 0) & 
+            (self.specific_heat > 0) &
+            (self.material_types != MaterialType.SPACE)
+        )
+        
+        if not np.any(valid_heating):
+            return source_term
+        
         # Get reusable arrays
         distances = self._get_distances_from_center()
-        solid_mask = self._get_solid_mask()
         
         # Heat generation rate based on depth (more heat from radioactive decay in deep materials)
         planet_radius = self._get_planet_radius()
         relative_depth = np.clip(1.0 - distances / planet_radius, 0.0, 1.0)
         
-        # Heat balance analysis:
-        # Target: ~25% magma core radius at 1B years (reasonable for early Earth)
-        # Stefan-Boltzmann cooling ∝ T⁴, so need balanced internal heating
-        # Earth's heat flow ~0.06 W/m² average, ~0.1 W/m² from radioactivity
-        
         # Physics-based radioactive heating (W/m³)
         # Crustal rocks: ~1-3 µW/m³ from K, U, Th decay
         # Core: much higher due to pressure concentration and primordial heat
-        # Drastically reduced to prevent runaway heating
-        crustal_heating_rate = 0.1e-6 * relative_depth**2  # W/m³ - reduced by 100x
-        core_heating_rate = 2e-6 * np.exp(self.core_heating_depth_scale * relative_depth)  # W/m³ - reduced by 100x and very gentle exponential
-
-        # Convert power density to temperature change: ΔT = (Power × dt) / (ρ × cp × volume)
-        # Only apply to solid materials (they have meaningful density and specific_heat)
-        cell_volume = self.cell_size ** 3  # m³ per cell
-        dt_seconds = self.dt * self.seconds_per_year
-
-        # Calculate temperature increase from radioactive heating
-        temp_increase = np.zeros_like(self.temperature)
-        valid_heating = solid_mask & (self.density > 0) & (self.specific_heat > 0)
+        # Increased to make internal heating visible in power visualization
+        
+        # More dramatic core heating profile for visibility
+        crustal_heating_rate = 1e-6 * relative_depth**2  # W/m³ - crustal heating increases with depth
+        
+        # Much stronger core heating that's clearly visible
+        # Use quadratic profile for stronger contrast: deeper = much more heating
+        core_heating_rate = 1e-3 * relative_depth**3  # W/m³ - cubic profile for dramatic core heating (up to 1 mW/m³)
+        
+        # Calculate total power density grid
+        total_power_density_grid = crustal_heating_rate + core_heating_rate  # W/m³
+        
+        # Apply only to valid heating cells
+        # Q/(ρcp) where Q is W/m³, ρ is kg/m³, cp is J/(kg⋅K)
+        # Result is K/s, convert to K/year
+        source_term[valid_heating] = (
+            total_power_density_grid[valid_heating] / 
+            (self.density[valid_heating] * self.specific_heat[valid_heating])
+        ) * self.seconds_per_year  # Convert K/s → K/year
+        
+        # Add to power density tracking for visualization
+        self.power_density[valid_heating] += total_power_density_grid[valid_heating]
+        
+        # Track total internal heating for debugging
+        total_power = np.sum(total_power_density_grid[valid_heating] * (self.cell_size ** 3))  # W
+        self.thermal_fluxes['internal_heating'] = total_power
+        
+        return source_term
+    
+    def _calculate_solar_heating_source(self, non_space_mask: np.ndarray) -> np.ndarray:
+        """Calculate solar heating source term Q/(ρcp) in K/year"""
+        source_term = np.zeros_like(self.temperature)
+        
+        # Find surface cells that can receive solar radiation
+        space_mask = ~non_space_mask
+        
+        # Surface cells are those adjacent to space or outer atmosphere (using circular kernel)
+        surface_candidates = ndimage.binary_dilation(space_mask, structure=self._circular_kernel_3x3) & non_space_mask
+        
+        if not np.any(surface_candidates):
+            return source_term
+        
+        # Calculate solar heating based on latitude (distance from equator)
+        center_x, center_y = self.center_of_mass
+        
+        # For a circular planet, equator is the horizontal line through center
+        # Distance from equator = |y - center_y|
+        y_coords = np.arange(self.height).reshape(-1, 1)  # Shape: (height, 1)
+        x_coords = np.arange(self.width).reshape(1, -1)   # Shape: (1, width) 
+        distance_from_equator = np.abs(y_coords - center_y)
+        planet_radius_cells = self._get_planet_radius()
+        
+        # Normalize distance from equator (0 at equator, 1 at poles)
+        normalized_latitude = distance_from_equator / max(planet_radius_cells, 1.0)  # Avoid division by zero
+        normalized_latitude = np.clip(normalized_latitude, 0.0, 1.0)
+        
+        # Solar intensity follows cosine law: I = I₀ * cos(latitude)
+        latitude_radians = normalized_latitude * (np.pi / 2)  # 0 to π/2
+        solar_intensity_factor = np.cos(latitude_radians)
+        
+        # Broadcast to full grid size
+        solar_intensity_factor = np.broadcast_to(solar_intensity_factor, (self.height, self.width))
+        
+        # Calculate albedo from material properties - vectorized
+        albedo = np.zeros((self.height, self.width))
+        
+        # Create albedo lookup table for all material types
+        if not hasattr(self, '_albedo_lookup'):
+            self._albedo_lookup = {}
+            for material_type in MaterialType:
+                self._albedo_lookup[material_type] = self.material_db.get_properties(material_type).albedo
+        
+        # Apply albedo for all non-space cells vectorized
+        non_space_coords = np.where(non_space_mask)
+        if len(non_space_coords[0]) > 0:
+            # Get material types for all non-space cells
+            materials = self.material_types[non_space_coords]
+            
+            # Vectorized albedo lookup
+            albedo_values = np.array([self._albedo_lookup[mat] for mat in materials.flat])
+            
+            # Handle frozen water special case - vectorized
+            water_mask = (materials == MaterialType.WATER)
+            frozen_mask = water_mask & (self.temperature[non_space_coords] < 273.15)
+            if np.any(frozen_mask):
+                ice_albedo = self._albedo_lookup[MaterialType.ICE]
+                albedo_values[frozen_mask] = ice_albedo
+            
+            # Apply albedo values to grid
+            albedo[non_space_coords] = albedo_values
+        
+        # Calculate weighted average albedo for the planet
+        surface_weights = surface_candidates.astype(float) * solar_intensity_factor
+        if np.sum(surface_weights) > 0:
+            planet_albedo = np.average(albedo[surface_candidates], weights=surface_weights[surface_candidates])
+        else:
+            planet_albedo = 0.2  # Default
+        
+        # Reduced solar input due to albedo reflection
+        effective_solar_constant = self.solar_constant * (1.0 - planet_albedo)
+        
+        # Apply layer-by-layer atmospheric absorption (physically accurate)
+        remaining_solar_flux = self._apply_layered_atmospheric_heating_source(non_space_mask, solar_intensity_factor, effective_solar_constant, source_term)
+        
+        # Apply solar heating to surface cells
+        surface_coords = np.where(surface_candidates)
+        if len(surface_coords[0]) == 0:
+            return source_term
+        
+        # Get solar flux for surface cells
+        surface_y, surface_x = surface_coords
+        surface_flux = remaining_solar_flux[surface_y, surface_x]  # W/m² (already includes latitude effects)
+        
+        # Convert to source term Q/(ρcp) in K/year
+        valid_heating = (self.density[surface_coords] > 0) & (self.specific_heat[surface_coords] > 0)
 
         if np.any(valid_heating):
-            total_power_density = (crustal_heating_rate + core_heating_rate)[valid_heating]  # W/m³
-            mass_per_cell = (self.density * cell_volume)[valid_heating]  # kg
-            specific_heat_values = self.specific_heat[valid_heating]  # J/(kg·K)
+            # Convert surface flux (W/m²) to volumetric power density (W/m³)
+            # Solar heating is a surface phenomenon, spread over surface layer
+            surface_layer_thickness = self.cell_size * self.surface_radiation_depth_fraction
+            volumetric_power_density = surface_flux[valid_heating] / surface_layer_thickness  # W/m³
             
-            # ΔT = (Power × time) / (mass × specific_heat)
-            energy_per_cell = total_power_density * cell_volume * dt_seconds  # J
-            temp_increase[valid_heating] = energy_per_cell / (mass_per_cell * specific_heat_values)  # K
+            # Convert to temperature source term: Q/(ρcp) in K/s, then to K/year
+            heating_y, heating_x = surface_y[valid_heating], surface_x[valid_heating]
+            heating_source = (
+                volumetric_power_density / 
+                (self.density[heating_y, heating_x] * self.specific_heat[heating_y, heating_x])
+            ) * self.seconds_per_year  # Convert K/s → K/year
+            
+            source_term[heating_y, heating_x] += heating_source
+            
+            # Track solar power density for visualization
+            self.power_density[heating_y, heating_x] += volumetric_power_density
+            
+            # Track total solar input for debugging  
+            total_solar_power = np.sum(volumetric_power_density * (self.cell_size ** 3))  # W
+            self.thermal_fluxes['solar_input'] = total_solar_power
+        
+        return source_term
+    
+    def _apply_layered_atmospheric_heating_source(self, non_space_mask: np.ndarray, solar_intensity_factor: np.ndarray, 
+                                               effective_solar_constant: float, source_term: np.ndarray) -> np.ndarray:
+        """Apply physically accurate layer-by-layer atmospheric absorption as source terms, return remaining flux"""
+        
+        # Initialize remaining solar flux grid (starts with full intensity, modified by latitude)
+        initial_solar_flux = effective_solar_constant * self.planetary_distance_factor * solar_intensity_factor
+        remaining_flux = initial_solar_flux.copy()
+        
+        # Find atmospheric materials
+        atmosphere_mask = (
+            (self.material_types == MaterialType.AIR) |
+            (self.material_types == MaterialType.WATER_VAPOR)
+        )
+        
+        if not np.any(atmosphere_mask):
+            return remaining_flux  # No atmosphere, all solar radiation reaches surface
+        
+        space_mask = ~non_space_mask
+        cell_area = self.cell_size ** 2
+        cell_volume = self.cell_size ** 3
+        
+        # Start from outermost atmospheric layer (adjacent to space) and grow inward
+        processed_atmosphere = np.zeros_like(atmosphere_mask, dtype=bool)  # Track processed cells
+        
+        # Find initial layer: atmosphere adjacent to space
+        space_neighbors = ndimage.binary_dilation(space_mask, structure=self._circular_kernel_3x3)
+        current_layer = atmosphere_mask & space_neighbors & ~processed_atmosphere
+        
+        layer_count = 0
+        max_layers = 50  # Safety limit to prevent infinite loops
+        
+        # Process layers from outside to inside
+        while np.any(current_layer) and layer_count < max_layers:
+            layer_count += 1
+            
+            # Get coordinates of current atmospheric layer
+            layer_coords = np.where(current_layer)
+            layer_y, layer_x = layer_coords
+            
+            # Get incoming solar flux for this layer
+            incoming_flux = remaining_flux[layer_y, layer_x]  # W/m²
+            
+            # Each atmospheric cell absorbs a fraction of the incoming flux
+            absorbed_flux = incoming_flux * self.atmospheric_absorption_per_cell  # W/m²
+            transmitted_flux = incoming_flux * (1.0 - self.atmospheric_absorption_per_cell)  # W/m²
+            
+            # Update remaining flux grid for next layer
+            remaining_flux[layer_y, layer_x] = transmitted_flux
+            
+            # Convert absorbed flux to source term Q/(ρcp) in K/year
+            layer_density = self.density[layer_coords]
+            layer_specific_heat = self.specific_heat[layer_coords]
+            
+            # Apply heating to valid atmospheric cells in this layer
+            valid_heating = (layer_density > 0) & (layer_specific_heat > 0) & (absorbed_flux > 0)
+            if np.any(valid_heating):
+                valid_idx = np.where(valid_heating)[0]
+                valid_y = layer_y[valid_idx]
+                valid_x = layer_x[valid_idx]
+                
+                # Convert surface flux (W/m²) to volumetric power density (W/m³)
+                volumetric_power_density = absorbed_flux[valid_idx] / self.cell_size  # W/m³
+                
+                # Convert to temperature source term: Q/(ρcp) in K/s, then to K/year
+                heating_source = (
+                    volumetric_power_density / 
+                    (layer_density[valid_idx] * layer_specific_heat[valid_idx])
+                ) * self.seconds_per_year  # Convert K/s → K/year
+                
+                # Add to source term
+                source_term[valid_y, valid_x] += heating_source
+                
+                # Track atmospheric solar power density for visualization
+                self.power_density[valid_y, valid_x] += volumetric_power_density
+                
+                # Track total atmospheric heating for debugging
+                total_atmo_power = np.sum(volumetric_power_density * cell_volume)  # W
+                self.thermal_fluxes['atmospheric_heating'] += total_atmo_power
+            
+            # Mark this layer as processed
+            processed_atmosphere |= current_layer
+            
+            # Find next inner layer: atmosphere adjacent to processed atmosphere (but not processed yet)
+            processed_neighbors = ndimage.binary_dilation(processed_atmosphere, structure=self._circular_kernel_3x3)
+            current_layer = atmosphere_mask & processed_neighbors & ~processed_atmosphere
+            
+            # If no more layers found, stop
+            if not np.any(current_layer):
+                break
+        
+        return remaining_flux
+    
+    def _calculate_radiative_cooling_source(self, non_space_mask: np.ndarray) -> np.ndarray:
+        """Calculate radiative cooling source term Q/(ρcp) in K/year"""
+        source_term = np.zeros_like(self.temperature)
+        space_mask = ~non_space_mask
+        
+        # Find outer atmosphere - atmospheric materials connected to space (not interior air pockets)
+        atmosphere_mask = (
+            (self.material_types == MaterialType.AIR) |
+            (self.material_types == MaterialType.WATER_VAPOR)
+        )
+        
+        # Find all atmosphere connected to space using connected components
+        labeled_atmo, num_features = ndimage.label(atmosphere_mask, structure=self._circular_kernel_3x3)
+        
+        if num_features == 0:
+            outer_atmo_mask = np.zeros_like(atmosphere_mask, dtype=bool)
+        else:
+            # Find atmosphere regions adjacent to space (using circular kernel)
+            space_neighbors = ndimage.binary_dilation(space_mask, structure=self._circular_kernel_3x3)
+            space_adjacent_atmo = space_neighbors & atmosphere_mask
+            
+            if np.any(space_adjacent_atmo):
+                # Get the labels of atmosphere regions connected to space
+                space_connected_labels = np.unique(labeled_atmo[space_adjacent_atmo])
+                space_connected_labels = space_connected_labels[space_connected_labels > 0]  # Remove 0 (background)
+                
+                # Outer atmosphere consists of all regions connected to space
+                outer_atmo_mask = np.isin(labeled_atmo, space_connected_labels)
+            else:
+                outer_atmo_mask = np.zeros_like(atmosphere_mask, dtype=bool)
+        
+        # Find the solid surface beneath the outer atmosphere
+        # This is solid material adjacent to outer atmosphere or space
+        solid_mask = ~(space_mask | atmosphere_mask)  # All non-space, non-atmosphere
+        
+        # Surface solids are adjacent to outer atmosphere or space (using circular kernel)
+        surface_candidates = ndimage.binary_dilation(outer_atmo_mask | space_mask, structure=self._circular_kernel_3x3)
+        surface_solid_mask = surface_candidates & solid_mask
+        
+        # Combine outer atmosphere and surface solids for radiation
+        radiative_mask = outer_atmo_mask | surface_solid_mask
+        
+        if not np.any(radiative_mask):
+            return source_term
+        
+        # Get coordinates and properties of radiating cells
+        radiative_coords = np.where(radiative_mask)
+        T_radiating = self.temperature[radiative_coords]
+        T_space = self.space_temperature
+        
+        # Stefan-Boltzmann cooling with greenhouse effect
+        valid_cooling = (T_radiating > T_space) & (self.density[radiative_coords] > 0) & (self.specific_heat[radiative_coords] > 0)
+        
+        if np.any(valid_cooling):
+            valid_idx = np.where(valid_cooling)[0]
+            T_valid = T_radiating[valid_idx]
+            density_valid = self.density[radiative_coords][valid_idx]
+            specific_heat_valid = self.specific_heat[radiative_coords][valid_idx]
+            
+            # Get emissivity from material properties
+            material_types_valid = self.material_types[radiative_coords][valid_idx]
+            emissivity = np.array([self.material_db.get_properties(mat_type).emissivity 
+                                 for mat_type in material_types_valid])
+            
+            # Calculate dynamic greenhouse effect based on water vapor content
+            water_vapor_mask = (self.material_types == MaterialType.WATER_VAPOR)
+            total_water_vapor_mass = np.sum(self.density[water_vapor_mask]) if np.any(water_vapor_mask) else 0.0
+            
+            # Scale greenhouse effect by water vapor content (logarithmic to prevent runaway)
+            if total_water_vapor_mass > 0:
+                vapor_factor = np.log1p(total_water_vapor_mass / self.greenhouse_vapor_scaling) / 10.0  # Dampened scaling
+                greenhouse_factor = self.base_greenhouse_effect + (self.max_greenhouse_effect - self.base_greenhouse_effect) * np.tanh(vapor_factor)
+            else:
+                greenhouse_factor = self.base_greenhouse_effect
+            
+            # Stefan-Boltzmann calculation with atmospheric greenhouse effect (year-based units)
+            stefan_boltzmann = self.stefan_boltzmann_geological  # Already in year-based units
+            effective_stefan = stefan_boltzmann * (1.0 - greenhouse_factor)
+            
+            # Radiative cooling with greenhouse effect providing the main balance
+            cooling_efficiency = self.radiative_cooling_efficiency
+            
+            # Newton Cooling Law approximation (much more stable than T^4)
+            # Instead of σT^4, use h(T - T_ambient) where h is effective heat transfer coefficient
+            cooling_mask = T_valid > T_space
+            power_per_area = np.zeros_like(T_valid)
+            
+            if np.any(cooling_mask):
+                T_cooling = T_valid[cooling_mask]
+                emissivity_cooling = emissivity[cooling_mask]
+                
+                # Newton cooling law: Q = h(T - T_ambient)
+                # Effective heat transfer coefficient based on emissivity and Stefan-Boltzmann constant
+                # h ≈ 4σεT₀³ where T₀ is reference temperature (around 300K)
+                T_reference = 300.0  # Reference temperature for linearization (K)
+                stefan_boltzmann = self.stefan_boltzmann_geological
+                effective_stefan = stefan_boltzmann * (1.0 - greenhouse_factor)
+                
+                # Linearized heat transfer coefficient (much more stable)
+                h_effective = 4.0 * effective_stefan * emissivity_cooling * (T_reference ** 3)
+                
+                # Scale for geological timescales 
+                h_geological = h_effective / 1000.0  # Conservative scaling
+                
+                # Newton cooling: P = h(T - T_space)
+                temp_difference = T_cooling - T_space
+                power_per_area[cooling_mask] = h_geological * cooling_efficiency * temp_difference
+            
+            # Convert surface power (J/(year⋅m²)) to volumetric power density (W/m³)
+            # Radiative cooling is a surface phenomenon, spread over surface layer
+            surface_layer_thickness = self.cell_size * self.surface_radiation_depth_fraction
+            volumetric_power_density = power_per_area / (surface_layer_thickness * self.seconds_per_year)  # W/m³
+            
+            # Convert to temperature source term: Q/(ρcp) in K/s, then to K/year
+            cooling_source = -(
+                volumetric_power_density / 
+                (density_valid * specific_heat_valid)
+            ) * self.seconds_per_year  # Convert K/s → K/year (negative for cooling)
+            
+            # Apply cooling source term
+            cooling_y, cooling_x = radiative_coords[0][valid_idx], radiative_coords[1][valid_idx]
+            source_term[cooling_y, cooling_x] += cooling_source
+            
+            # Track cooling power density for visualization (negative = heat loss)
+            self.power_density[cooling_y, cooling_x] -= volumetric_power_density
+            
+            # Track total radiative output for debugging
+            total_radiative_power = np.sum(volumetric_power_density * (self.cell_size ** 3))  # W
+            self.thermal_fluxes['radiative_output'] = total_radiative_power
+        
+        return source_term
+    
+    def _calculate_atmospheric_heating_source(self, non_space_mask: np.ndarray) -> np.ndarray:
+        """Calculate atmospheric heating source term Q/(ρcp) in K/year"""
+        # Atmospheric heating is now handled directly in solar heating source calculation
+        # This method remains as a placeholder for future atmospheric-specific heating
+        return np.zeros_like(self.temperature)
 
-        # Apply heating
-        self.temperature += temp_increase
-
-        # Add radioactive heating to power density tracking (positive = heat generation)
-        self.power_density[valid_heating] += total_power_density
     
     def _save_state(self):
         """Save current state for time reversal"""
@@ -1228,8 +1476,18 @@ class GeologySimulation:
         if dt is not None:
             self.dt = dt
         
-        # Save state for potential reversal
+        # Save state for potential reversal BEFORE modifying anything
         self._save_state()
+        
+        # Reset thermal flux tracking and power density for this timestep
+        self.thermal_fluxes = {
+            'solar_input': 0.0,
+            'radiative_output': 0.0,
+            'internal_heating': 0.0,
+            'atmospheric_heating': 0.0,
+            'net_flux': 0.0
+        }
+        self.power_density.fill(0.0)  # Reset for current timestep - all sources will add to this
         
         # Core physics (every step)
         self.temperature, stability_factor = self._heat_diffusion()
@@ -1237,7 +1495,6 @@ class GeologySimulation:
         # Apply stability factor to the time step for this step
         effective_dt = self.dt * stability_factor
         self._last_stability_factor = stability_factor
-        self._apply_internal_heat_generation()
         
         # Update center of mass and pressure (every step - needed for thermal calculations)
         self._calculate_center_of_mass()
@@ -1284,6 +1541,112 @@ class GeologySimulation:
         space_mask = (self.material_types == MaterialType.SPACE)
         self.temperature[space_mask] = self.space_temperature  # Kelvin
         self.pressure[space_mask] = 0.0
+        
+        # Store adaptive time step info for analysis
+        if hasattr(self, '_last_stability_factor'):
+            self._adaptive_time_steps.append(self._last_stability_factor)
+            # Keep only recent history
+            if len(self._adaptive_time_steps) > 100:
+                self._adaptive_time_steps = self._adaptive_time_steps[-100:]
+        
+        # Calculate net thermal flux and log debugging information
+        self.thermal_fluxes['net_flux'] = (
+            self.thermal_fluxes['solar_input'] + 
+            self.thermal_fluxes['atmospheric_heating'] + 
+            self.thermal_fluxes['internal_heating'] - 
+            self.thermal_fluxes['radiative_output']
+        )
+        
+        # Debug logging for thermal balance
+        if self.logger.isEnabledFor(logging.DEBUG):
+            # Calculate step number (approximate from time and dt)
+            step_number = int(self.time / self.dt) if self.dt > 0 else 0
+            
+            non_space_mask = (self.material_types != MaterialType.SPACE)
+            temp_celsius = self.temperature - 273.15
+            avg_planet_temp = np.mean(temp_celsius[non_space_mask]) if np.any(non_space_mask) else 0.0
+            min_temp = np.min(temp_celsius[non_space_mask]) if np.any(non_space_mask) else 0.0
+            max_temp = np.max(temp_celsius[non_space_mask]) if np.any(non_space_mask) else 0.0
+            
+            # Clean, formatted header with step number and key info
+            self.logger.debug("=" * 65)
+            self.logger.debug(f"STEP {step_number:4d} | Time: {self.time:6.1f}y | Planet Avg: {avg_planet_temp:6.1f}°C")
+            self.logger.debug("=" * 65)
+            
+            # Temperature statistics
+            self.logger.debug(f"Temperature Range:  Min: {min_temp:7.1f}°C  |  Max: {max_temp:7.1f}°C")
+            
+            # Thermal flux balance (clean formatting)
+            total_input = (self.thermal_fluxes['solar_input'] + 
+                          self.thermal_fluxes['atmospheric_heating'] + 
+                          self.thermal_fluxes['internal_heating'])
+            
+            self.logger.debug("THERMAL FLUX BALANCE:")
+            self.logger.debug(f"  Solar Input:      {self.thermal_fluxes['solar_input']:10.3e} W")
+            self.logger.debug(f"  Atmospheric Heat: {self.thermal_fluxes['atmospheric_heating']:10.3e} W")
+            self.logger.debug(f"  Internal Heat:    {self.thermal_fluxes['internal_heating']:10.3e} W")
+            self.logger.debug(f"  Total Input:      {total_input:10.3e} W")
+            self.logger.debug(f"  Radiative Output: {self.thermal_fluxes['radiative_output']:10.3e} W")
+            self.logger.debug(f"  NET FLUX:         {self.thermal_fluxes['net_flux']:10.3e} W")
+            
+            # Detailed material breakdowns
+            air_mask = (self.material_types == MaterialType.AIR)
+            water_vapor_mask = (self.material_types == MaterialType.WATER_VAPOR)
+            water_mask = (self.material_types == MaterialType.WATER)
+            ice_mask = (self.material_types == MaterialType.ICE)
+            atmosphere_mask = air_mask | water_vapor_mask
+            water_total_mask = water_mask | water_vapor_mask | ice_mask
+            rock_mask = non_space_mask & ~atmosphere_mask & ~water_total_mask
+            
+            self.logger.debug("MATERIAL BREAKDOWN:")
+            
+            # Atmosphere breakdown (air + water vapor)
+            if np.any(atmosphere_mask):
+                atmo_temp_avg = np.mean(temp_celsius[atmosphere_mask])
+                atmo_temp_max = np.max(temp_celsius[atmosphere_mask])
+                atmo_count = np.sum(atmosphere_mask)
+                self.logger.debug(f"  Atmosphere ({atmo_count:4d} cells): Avg: {atmo_temp_avg:7.1f}°C  Max: {atmo_temp_max:7.1f}°C")
+                
+                if np.any(air_mask):
+                    air_temp_avg = np.mean(temp_celsius[air_mask])
+                    air_count = np.sum(air_mask)
+                    self.logger.debug(f"    - Air      ({air_count:4d} cells): Avg: {air_temp_avg:7.1f}°C")
+                    
+                if np.any(water_vapor_mask):
+                    vapor_temp_avg = np.mean(temp_celsius[water_vapor_mask])
+                    vapor_count = np.sum(water_vapor_mask)
+                    self.logger.debug(f"    - W.Vapor  ({vapor_count:4d} cells): Avg: {vapor_temp_avg:7.1f}°C")
+            
+            # Water distribution
+            total_water_cells = np.sum(water_total_mask)
+            if total_water_cells > 0:
+                water_temp_avg = np.mean(temp_celsius[water_total_mask])
+                water_temp_max = np.max(temp_celsius[water_total_mask])
+                self.logger.debug(f"  Water Total ({total_water_cells:4d} cells): Avg: {water_temp_avg:7.1f}°C  Max: {water_temp_max:7.1f}°C")
+                
+                if np.any(water_mask):
+                    liquid_count = np.sum(water_mask)
+                    liquid_temp_avg = np.mean(temp_celsius[water_mask])
+                    self.logger.debug(f"    - Liquid   ({liquid_count:4d} cells): Avg: {liquid_temp_avg:7.1f}°C")
+                    
+                if np.any(ice_mask):
+                    ice_count = np.sum(ice_mask)
+                    ice_temp_avg = np.mean(temp_celsius[ice_mask])
+                    self.logger.debug(f"    - Ice      ({ice_count:4d} cells): Avg: {ice_temp_avg:7.1f}°C")
+            
+            # Rock breakdown (everything else)
+            if np.any(rock_mask):
+                rock_temp_avg = np.mean(temp_celsius[rock_mask])
+                rock_temp_max = np.max(temp_celsius[rock_mask])
+                rock_temp_min = np.min(temp_celsius[rock_mask])
+                rock_count = np.sum(rock_mask)
+                self.logger.debug(f"  Rock       ({rock_count:4d} cells): Avg: {rock_temp_avg:7.1f}°C  Min: {rock_temp_min:7.1f}°C  Max: {rock_temp_max:7.1f}°C")
+            
+            # Thermal diffusivity diagnostics
+            if hasattr(self, '_max_thermal_diffusivity'):
+                self.logger.debug(f"Max Thermal Diff:   {self._max_thermal_diffusivity:10.3e} m²/s")
+            
+            self.logger.debug("=" * 65)
     
     def step_backward(self):
         """Reverse simulation by one time step"""
@@ -1296,6 +1659,9 @@ class GeologySimulation:
             self.age = state['age']
             self.time = state['time']
             self.power_density = state['power_density']
+            
+            # Clear adaptive time step history when stepping backward
+            self._adaptive_time_steps = []
             
             # Mark properties as dirty and update
             self._properties_dirty = True
@@ -1374,8 +1740,9 @@ class GeologySimulation:
         stats = {
             'time': self.time,
             'dt': self.dt,
-            'effective_dt': getattr(self, '_last_stability_factor', 1.0) * self.dt,
-            'stability_factor': getattr(self, '_last_stability_factor', 1.0),
+            'effective_dt': getattr(self, '_actual_effective_dt', self.dt),  # Actual dt used per substep
+            'stability_factor': getattr(self, '_last_stability_factor', 1.0),  # Actual factor used
+            'substeps': getattr(self, '_actual_substeps', 1),  # Number of substeps actually used
             'max_thermal_diffusivity': getattr(self, '_max_thermal_diffusivity', 0.0),
             'avg_temperature': np.mean(self.temperature) - 273.15,  # Convert to Celsius for display
             'max_temperature': np.max(self.temperature) - 273.15,   # Convert to Celsius for display
@@ -1803,3 +2170,99 @@ class GeologySimulation:
         effective_density[non_space_coords] = effective_densities
         
         return effective_density
+    
+    def _solve_radiative_cooling_analytical(self, temperature: np.ndarray, non_space_mask: np.ndarray) -> np.ndarray:
+        """Solve radiative cooling using analytical solution - unconditionally stable!"""
+        working_temp = temperature.copy()
+        
+        # Find surface cells that radiate to space
+        space_mask = ~non_space_mask
+        atmosphere_mask = (
+            (self.material_types == MaterialType.AIR) |
+            (self.material_types == MaterialType.WATER_VAPOR)
+        )
+        
+        # Surface cells are those adjacent to space or outer atmosphere
+        surface_candidates = ndimage.binary_dilation(space_mask, structure=self._circular_kernel_3x3) & non_space_mask
+        
+        if not np.any(surface_candidates):
+            return working_temp
+        
+        # Get radiating cells
+        radiative_coords = np.where(surface_candidates)
+        T_radiating = working_temp[radiative_coords]
+        T_space = self.space_temperature
+        
+        # Only process cells that are actually cooling (T > T_space)
+        cooling_mask = T_radiating > T_space
+        if not np.any(cooling_mask):
+            return working_temp
+        
+        cooling_idx = np.where(cooling_mask)[0]
+        T_cooling = T_radiating[cooling_idx]
+        
+        # Get material properties
+        material_types_cooling = self.material_types[radiative_coords][cooling_idx]
+        emissivity = np.array([self.material_db.get_properties(mat_type).emissivity for mat_type in material_types_cooling])
+        density_cooling = self.density[radiative_coords][cooling_idx]
+        specific_heat_cooling = self.specific_heat[radiative_coords][cooling_idx]
+        
+        # Stefan-Boltzmann constant in geological units
+        stefan_geological = self.stefan_boltzmann_geological / 1000.0  # Conservative scaling
+        
+        # Analytical solution for dT/dt = -α(T^4 - T_space^4) where α = σε/(ρcp·thickness)
+        surface_thickness = self.cell_size * self.surface_radiation_depth_fraction
+        alpha = (stefan_geological * emissivity * self.radiative_cooling_efficiency) / (density_cooling * specific_heat_cooling * surface_thickness)
+        
+        # For the equation dT/dt = -α(T^4 - T0^4), the analytical solution is complex
+        # Use simpler Newton-Raphson approach: T_new = T_old - dt*α*(T_old^4 - T0^4)/(4*α*T_old^3)
+        # This is equivalent to implicit Euler for radiation and is unconditionally stable
+        
+        dt_seconds = self.dt * self.seconds_per_year
+        
+        # Newton-Raphson iteration for implicit radiation (typically converges in 1-2 iterations)
+        T_new = T_cooling.copy()
+        for iteration in range(3):  # Usually converges quickly
+            f = T_new - T_cooling + dt_seconds * alpha * (T_new**4 - T_space**4)
+            df_dt = 1.0 + dt_seconds * alpha * 4.0 * T_new**3
+            
+            # Newton-Raphson update with safety bounds
+            delta_T = -f / df_dt
+            T_new += delta_T
+            
+            # Keep temperatures physical
+            T_new = np.maximum(T_new, T_space)
+            
+            # Check convergence
+            if np.max(np.abs(delta_T)) < 0.1:  # 0.1K tolerance
+                break
+        
+        # Apply the updated temperatures
+        final_coords_y = radiative_coords[0][cooling_idx]
+        final_coords_x = radiative_coords[1][cooling_idx]
+        working_temp[final_coords_y, final_coords_x] = T_new
+        
+        return working_temp
+    
+    def _solve_non_radiative_sources(self, temperature: np.ndarray, non_space_mask: np.ndarray) -> np.ndarray:
+        """Solve non-radiative heat sources (internal, solar, atmospheric) explicitly"""
+        working_temp = temperature.copy()
+        
+        # Calculate all non-radiative heat sources
+        internal_source = self._calculate_internal_heating_source(non_space_mask)
+        solar_source = self._calculate_solar_heating_source(non_space_mask)
+        atmospheric_source = self._calculate_atmospheric_heating_source(non_space_mask)
+        
+        # Combine all sources
+        total_source = internal_source + solar_source + atmospheric_source
+        
+        # Apply sources explicitly (these are typically well-behaved)
+        dt_years = self.dt
+        source_change = total_source * dt_years
+        
+        # Apply to non-space cells only
+        valid_sources = non_space_mask & np.isfinite(source_change)
+        if np.any(valid_sources):
+            working_temp[valid_sources] += source_change[valid_sources]
+        
+        return working_temp
