@@ -413,6 +413,12 @@ class GeologyVisualizer:
         pressure = self.simulation.pressure[y, x]
         age = self.simulation.age[y, x]
         
+        # Calculate power for this tile (convert from power density W/m³ to power W)
+        power_density = self.simulation.power_density[y, x]  # W/m³
+        cell_volume = self.simulation.cell_size ** 3  # m³ per cell
+        power_watts = power_density * cell_volume  # W per cell
+        power_formatted = self._format_power_smart(power_watts)
+        
         # Position in top-left of simulation area
         info_x = 10  # 10px from left edge
         info_y = self.status_bar_height + 10  # 10px below status bar
@@ -424,6 +430,7 @@ class GeologyVisualizer:
             f"Material: {material.name}",
             f"Temperature: {temp:.1f}°C", 
             f"Pressure: {pressure:.2f} MPa",
+            f"Power: {power_formatted}",
             f"Age: {age:.0f} years"
         ]
         

@@ -245,17 +245,35 @@ Where `f = 0.3` (mixing fraction)
 
 **Neighbor calculation**: Only atmospheric cells participate in averaging
 
-### Layered Atmospheric Absorption
+### Directional-Sweep Atmospheric Absorption (default)
 
-**Beer-Lambert Law implementation**:
+The simulator now uses a **single-pass Amanatides & Woo DDA sweep** that marches
+solar rays directly through the grid, giving realistic, angle-dependent
+attenuation with O(N) complexity.
 
-Starting from space, each atmospheric layer absorbs:
-```
-I_absorbed = I_incoming × α_absorption
-I_transmitted = I_incoming × (1 - α_absorption)
-```
+Algorithm overview:
+1. Compute the unit solar direction `(ux, uy)` from `solar_angle`.
+2. Select the boundary opposite the incoming rays and spawn one ray per
+   boundary cell.
+3. Advance each ray cell-by-cell using integer DDA (`t_max_x`, `t_max_y`).
+4. Upon entering a non-space cell the ray deposits energy
 
-Where `α_absorption = 0.0005` (0.05% per layer)
+   ```
+   absorbed = I * k
+   I      -= absorbed
+   ```
+
+   • `k` is a per-material absorption coefficient from `materials.py`:
+     AIR 0.001, WATER_VAPOR 0.005, WATER 0.02, ICE 0.01, others 1.0.
+5. The absorbed energy is converted to volumetric power density and split into
+   `solar_input` (surface/solid/liquid cells) or `atmospheric_heating`
+   (gas cells) for diagnostics.
+6. The ray terminates if `k ≥ 1` (opaque) or when the remaining flux is zero.
+
+Advantages:
+• Accurate day/night shadowing for any solar angle.
+• Eliminates the 10³–10⁵× flux spikes of the old radial scheme.
+• Runs in linear time; suitable for real-time visualisation.
 
 ---
 

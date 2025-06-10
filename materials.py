@@ -85,6 +85,7 @@ class MaterialDatabase:
     def __init__(self):
         self.properties = self._init_material_properties()
         self.weathering_products = self._init_weathering_products()
+        self.absorption_coeff = self._init_optical_absorption()
     
     def _init_material_properties(self) -> Dict[MaterialType, MaterialProperties]:
         """Initialize physical properties for all rock types"""
@@ -328,6 +329,19 @@ class MaterialDatabase:
             MaterialType.ANDESITE: [MaterialType.SHALE],
             MaterialType.CONGLOMERATE: [MaterialType.SANDSTONE]
         }
+    
+    def _init_optical_absorption(self) -> Dict[MaterialType, float]:
+        """Per-cell fractional absorption of incoming solar flux (0-1). Values <1 transmit light."""
+        return {
+            MaterialType.AIR: 0.05,
+            MaterialType.WATER_VAPOR: 0.05,
+            MaterialType.WATER: 0.1,
+            MaterialType.ICE: 0.05,
+        }
+    
+    def get_solar_absorption(self, material_type: MaterialType) -> float:
+        """Return fractional absorption for material (defaults to 1 for opaque solids)."""
+        return self.absorption_coeff.get(material_type, 1.0)
     
     def get_metamorphic_product(self, material_type: MaterialType, temperature: float, pressure: float) -> Optional[MaterialType]:
         """Determine metamorphic product based on P-T conditions using new transition system"""

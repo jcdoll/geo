@@ -96,9 +96,9 @@ class GeologySimulation:
         self.max_diffusion_substeps = 50               # Maximum substeps for diffusion stability
         
         # Atmospheric absorption method options:
-        # - "ray_tracing": Full ray tracing with shadowing (accurate but slow for complex geometry)
-        # - "layer_by_layer": Fast distance-based exponential attenuation (good performance)
-        self.atmospheric_absorption_method = "layer_by_layer"  # Default: good balance of speed and accuracy
+        # - "directional_sweep": Fast O(N) Amanatides & Woo sweep with proper shadowing
+        #   (all legacy methods removed – keep dispatcher for future extensions)
+        self.atmospheric_absorption_method = "directional_sweep"
 
         # General physics settings (not performance-dependent)
         self.atmospheric_diffusivity_enhancement = 5.0  # Enhanced diffusivity in the atomsphere to mimic convection
@@ -124,12 +124,11 @@ class GeologySimulation:
         self.average_fluid_density = 2000               # Average fluid density (kg/m³)
 
         # Solar and greenhouse constants (balanced for stable temperatures)
-        self.solar_constant = 1361                     # Solar constant (W/m²)
-        self.solar_angle = 45.0                        # Solar angle in degrees: 0°=equator, +90°=north pole, -90°=south pole
-        self.planetary_distance_factor = 0.001         # Distance factor for solar intensity - further reduced to prevent hot spots (was 0.0001)
-        self.atmospheric_absorption_per_cell = 0.0001   # Atmospheric absorption fraction per cell (0.05% per layer) - reduced to prevent hot spots
-        self.base_greenhouse_effect = 0.6              # Base greenhouse effect fraction - increased to retain more heat
-        self.max_greenhouse_effect = 0.85              # Maximum greenhouse effect fraction - increased
+        self.solar_constant = 50                       # Solar constant (W/m²)
+        self.solar_angle = 0.0                         # Solar angle in degrees: 0°=equator, +90°=north pole, -90°=south pole
+        self.planetary_distance_factor = 1             # Distance factor for solar intensity - further reduced to prevent hot spots (was 0.0001)
+        self.base_greenhouse_effect = 0.2              # Base greenhouse effect fraction - increased to retain more heat
+        self.max_greenhouse_effect = 0.8               # Maximum greenhouse effect fraction - increased
         self.greenhouse_vapor_scaling = 1000.0         # Water vapor mass scaling for greenhouse effect
 
         # Material mobility probabilities
@@ -900,12 +899,17 @@ class GeologySimulation:
         # Initialize source term
         source_term = np.zeros_like(self.temperature)
 
-        # Only apply to non-space solid materials with valid properties
+        # Only apply to non-space solid materials with valid properties (exclude atmospheric gases)
+        atmosphere_mask = (
+            (self.material_types == MaterialType.AIR) |
+            (self.material_types == MaterialType.WATER_VAPOR)
+        )
         valid_heating = (
             non_space_mask &
             (self.density > 0) &
             (self.specific_heat > 0) &
-            (self.material_types != MaterialType.SPACE)
+            (self.material_types != MaterialType.SPACE) &
+            ~atmosphere_mask  # Atmospheric gases don't have radioactive/internal heating
         )
 
         if not np.any(valid_heating):
@@ -918,20 +922,28 @@ class GeologySimulation:
         planet_radius = self._get_planet_radius()
         relative_depth = np.clip(1.0 - distances / planet_radius, 0.0, 1.0)
 
-        # Physics-based radioactive heating (W/m³)
-        # Crustal rocks: ~1-3 µW/m³ from K, U, Th decay
-        # Core: much higher due to pressure concentration and primordial heat
-        # Increased to make internal heating visible in power visualization
+        # ---------------------------  RADIOGENIC + PRIMORDIAL HEATING  ---------------------------
+        # 1. Radiogenic crust/mantle heating (dominates upper ~50 km)
+        #    Earth-like average ≈ 1–3 µW/m³.  We taper it towards the centre with an exponential
+        #    so that most heat is generated near the surface.
 
-        # More dramatic core heating profile for visibility
-        crustal_heating_rate = 1e-6 * relative_depth**2  # W/m³ - crustal heating increases with depth
+        CRUSTAL_SURFACE_RATE = 3e-6      # 3 µW/m³ at surface-adjacent rock
+        crust_decay_length = 0.1         # non-dimensional thickness of radiogenic layer (~10 % of radius)
 
-        # Much stronger core heating that's clearly visible
-        # Use quadratic profile for stronger contrast: deeper = much more heating
-        core_heating_rate = 1e-3 * relative_depth**3  # W/m³ - cubic profile for dramatic core heating (up to 1 mW/m³)
+        crustal_heating_rate = CRUSTAL_SURFACE_RATE * np.exp(-(1.0 - relative_depth) / crust_decay_length)
 
-        # Calculate total power density grid
-        total_power_density_grid = crustal_heating_rate + core_heating_rate  # W/m³
+        # 2. Core/primordial heating (latent heat + gravitational segregation)
+        #    Set by "core_heating_depth_scale".  A Gaussian centred at r=0 gives a smooth core profile.
+
+        CORE_CENTRE_RATE = 10e-6          # 10 µW/m³ at the very centre (can be adjusted)
+        core_sigma = max(1e-3, self.core_heating_depth_scale)  # avoid div-by-zero
+
+        core_heating_rate = CORE_CENTRE_RATE * np.exp(-(relative_depth / core_sigma) ** 2)
+
+        # 3. Optional visibility boost (set to 1 for physical, >1 for pedagogy)
+        internal_boost = getattr(self, "internal_heating_boost", 1.0)
+
+        total_power_density_grid = (crustal_heating_rate + core_heating_rate) * internal_boost  # W/m³
 
         # Apply only to valid heating cells
         # Q/(ρcp) where Q is W/m³, ρ is kg/m³, cp is J/(kg⋅K)
@@ -957,8 +969,12 @@ class GeologySimulation:
         # Find surface cells that can receive solar radiation
         space_mask = ~non_space_mask
 
-        # Surface cells are those adjacent to space or outer atmosphere (using circular kernel)
-        surface_candidates = ndimage.binary_dilation(space_mask, structure=self._circular_kernel_3x3) & non_space_mask
+        # Surface cells are those adjacent to space, but exclude atmospheric cells (they get separate atmospheric heating)
+        atmosphere_mask = (
+            (self.material_types == MaterialType.AIR) |
+            (self.material_types == MaterialType.WATER_VAPOR)
+        )
+        surface_candidates = ndimage.binary_dilation(space_mask, structure=self._circular_kernel_3x3) & non_space_mask & ~atmosphere_mask
 
         if not np.any(surface_candidates):
             return source_term
@@ -1074,279 +1090,73 @@ class GeologySimulation:
                                     effective_solar_constant: float, source_term: np.ndarray) -> np.ndarray:
         """Master atmospheric absorption solver - dispatches to selected implementation method"""
         
-        if self.atmospheric_absorption_method == "ray_tracing":
-            return self._atmospheric_absorption_ray_tracing(non_space_mask, solar_intensity_factor, effective_solar_constant, source_term)
-        elif self.atmospheric_absorption_method == "layer_by_layer":
-            return self._atmospheric_absorption_layer_by_layer(non_space_mask, solar_intensity_factor, effective_solar_constant, source_term)
+        if self.atmospheric_absorption_method == "directional_sweep":
+            return self._atmospheric_absorption_directional_sweep(non_space_mask, solar_intensity_factor, effective_solar_constant, source_term)
         else:
             raise ValueError(f"Unknown atmospheric absorption method: {self.atmospheric_absorption_method}. "
-                           f"Available options: 'ray_tracing', 'layer_by_layer'")
+                           f"Available options: 'directional_sweep'")
 
-    def _atmospheric_absorption_ray_tracing(self, non_space_mask: np.ndarray, solar_intensity_factor: np.ndarray,
-                                          effective_solar_constant: float, source_term: np.ndarray) -> np.ndarray:
-        """
-        Fast grid-based ray tracing atmospheric absorption with shadowing
-        
-        Method: Traces rays from space through atmosphere, applying sequential absorption
-        Advantages: Handles shadows, irregular shapes, proper flux reduction through layers
-        Disadvantages: Slightly more computation than layer-by-layer
-        """
-        # Initialize solar flux grid
-        initial_solar_flux = effective_solar_constant * self.planetary_distance_factor * solar_intensity_factor
-        remaining_flux = initial_solar_flux.copy()
+    def _atmospheric_absorption_directional_sweep(self, non_space_mask: np.ndarray, solar_intensity_factor: np.ndarray,
+                                                   effective_solar_constant: float, source_term: np.ndarray) -> np.ndarray:
+        """Directional sweep (DDA) atmospheric absorption working for *any* solar angle."""
 
-        # Find atmospheric materials
-        atmosphere_mask = (
-            (self.material_types == MaterialType.AIR) |
-            (self.material_types == MaterialType.WATER_VAPOR)
-        )
+        initial_flux = effective_solar_constant * self.planetary_distance_factor * solar_intensity_factor
+        remaining_flux = np.zeros_like(initial_flux)
 
-        if not np.any(atmosphere_mask):
-            return remaining_flux  # No atmosphere, all solar radiation reaches surface
+        ux, uy = self._get_solar_direction()
+        if ux == 0 and uy == 0:
+            return initial_flux
 
-        # Get solar direction from physics settings
-        solar_dir_x, solar_dir_y = self._get_solar_direction()
-        
-        # Cast rays from outside the atmosphere toward the planet
-        # Start rays from space and march inward in the OPPOSITE direction of solar rays
-        ray_dir_x = -solar_dir_x  # Rays come FROM the sun, so opposite direction
-        ray_dir_y = -solar_dir_y
-        
-        # Find bounds of the simulation
-        center_x, center_y = self.center_of_mass
-        planet_radius = self._get_planet_radius()
-        
-        # Cast rays in a grid pattern from outside the atmosphere
-        ray_spacing = 1  # Use every cell for accuracy
-        step_size = 0.5
-        
-        # Determine starting positions outside atmosphere
-        max_radius = planet_radius * 1.5  # Start well outside atmosphere
-        
-        for grid_y in range(self.height):
-            for grid_x in range(self.width):
-                # Skip if this position gets no solar flux
-                if initial_solar_flux[grid_y, grid_x] <= 0:
-                    continue
-                
-                # Calculate starting position for ray (project backwards from this cell)
-                # Start from outside the atmosphere and march toward this cell
-                start_distance = max_radius * 2
-                start_x = grid_x - ray_dir_x * start_distance
-                start_y = grid_y - ray_dir_y * start_distance
-                
-                # March ray from space toward planet
-                current_flux = initial_solar_flux[grid_y, grid_x]
-                x, y = start_x, start_y
-                
-                for step in range(int(start_distance / step_size + 50)):
-                    # Current grid position
-                    curr_grid_x, curr_grid_y = int(round(x)), int(round(y))
-                    
-                    # Check bounds
-                    if (curr_grid_x < 0 or curr_grid_x >= self.width or 
-                        curr_grid_y < 0 or curr_grid_y >= self.height):
-                        # Step along ray
-                        x += ray_dir_x * step_size
-                        y += ray_dir_y * step_size
-                        continue
-                    
-                    # If this is an atmospheric cell, apply absorption
-                    if atmosphere_mask[curr_grid_y, curr_grid_x]:
-                        # Each atmospheric cell absorbs a small fraction
-                        absorbed_flux = current_flux * self.atmospheric_absorption_per_cell
-                        current_flux *= (1.0 - self.atmospheric_absorption_per_cell)
-                        
-                        # Apply heating to this atmospheric cell
-                        if (absorbed_flux > 0 and 
-                            self.density[curr_grid_y, curr_grid_x] > 0 and 
-                            self.specific_heat[curr_grid_y, curr_grid_x] > 0):
-                            
-                            # Convert to volumetric power density
-                            volumetric_power_density = absorbed_flux / self.cell_size
-                            
-                            # Convert to temperature source term
-                            heating_source = (
-                                volumetric_power_density / 
-                                (self.density[curr_grid_y, curr_grid_x] * self.specific_heat[curr_grid_y, curr_grid_x])
-                            ) * self.seconds_per_year
-                            
-                            # Add heating
-                            source_term[curr_grid_y, curr_grid_x] += heating_source
-                            
-                            # Track power density for visualization
-                            self.power_density[curr_grid_y, curr_grid_x] += volumetric_power_density
-                            
-                            # Track total atmospheric heating
-                            cell_volume = self.cell_size ** 3
-                            self.thermal_fluxes['atmospheric_heating'] += volumetric_power_density * cell_volume
-                    
-                    # Update remaining flux at the target position
-                    if curr_grid_x == grid_x and curr_grid_y == grid_y:
-                        remaining_flux[grid_y, grid_x] = current_flux
-                        break  # We've reached our target
-                    
-                    # Step along ray
-                    x += ray_dir_x * step_size
-                    y += ray_dir_y * step_size
+        # DDA stepping direction: move OPPOSITE to incoming solar vector so that we march from the day-side boundary into the planet
+        step_x = -1 if ux > 0 else 1
+        step_y = -1 if uy > 0 else 1
+        inv_dx = abs(1.0 / ux) if ux != 0 else float('inf')
+        inv_dy = abs(1.0 / uy) if uy != 0 else float('inf')
 
-        return remaining_flux
-    
-    def _trace_atmospheric_ray(self, start_x: float, start_y: float, ray_dx: float, ray_dy: float, 
-                              atmosphere_mask: np.ndarray) -> int:
-        """
-        Trace ray through atmosphere to count atmospheric depth
-        Uses simple grid traversal (similar to Bresenham's line algorithm)
-        """
-        atmospheric_depth = 0
-        
-        # Current position (start inside atmosphere)
-        x, y = start_x, start_y
-        
-        # Step size for ray marching (smaller = more accurate)
-        step_size = 0.5
-        
-        # Maximum steps to prevent infinite loops
-        max_steps = int(max(self.width, self.height) * 2)
-        
-        for step in range(max_steps):
-            # Check if we're still in bounds
-            grid_x, grid_y = int(round(x)), int(round(y))
-            
-            if (grid_x < 0 or grid_x >= self.width or 
-                grid_y < 0 or grid_y >= self.height):
-                # Reached edge of grid (space) - ray successful
-                break
-                
-            # Check if current cell is atmospheric
-            if atmosphere_mask[grid_y, grid_x]:
-                atmospheric_depth += 1
-            
-            # Check if we reached space
-            if self.material_types[grid_y, grid_x] == MaterialType.SPACE:
-                # Reached space - ray successful
-                break
-                
-            # Step along ray
-            x += ray_dx * step_size
-            y += ray_dy * step_size
-        
-        return atmospheric_depth
+        # Select all entry cells on the day-side boundary (once per frame)
+        if abs(ux) >= abs(uy):  # shallow ray → enter from side opposite to ray direction
+            entry_x = self.width - 1 if ux > 0 else 0  # rays travel towards −x when ux>0
+            entry_cells = ((entry_x, y) for y in range(self.height))
+        else:  # steep ray → enter from top/bottom opposite to ray direction
+            entry_y = self.height - 1 if uy > 0 else 0
+            entry_cells = ((x, entry_y) for x in range(self.width))
 
-    def _atmospheric_absorption_layer_by_layer(self, non_space_mask: np.ndarray, solar_intensity_factor: np.ndarray,
-                                               effective_solar_constant: float, source_term: np.ndarray) -> np.ndarray:
-        """
-        Layer-by-layer atmospheric absorption (fast method)
-        
-        Method: Uses distance transform for depth-based exponential attenuation
-        Advantages: Very fast, proper exponential Beer-Lambert law, works for any planet shape
-        Disadvantages: No directional shadowing effects
-        """
+        for sx, sy in entry_cells: # main DDA march
+            I = initial_flux[sy, sx]
+            t_max_x = inv_dx
+            t_max_y = inv_dy
 
-        # Initialize solar flux grid (starts with full intensity, modified by latitude)
-        initial_solar_flux = effective_solar_constant * self.planetary_distance_factor * solar_intensity_factor
-        remaining_flux = initial_solar_flux.copy()
+            while 0 <= sx < self.width and 0 <= sy < self.height and I > 0:
+                mat = self.material_types[sy, sx]
 
-        # Find atmospheric materials
-        atmosphere_mask = (
-            (self.material_types == MaterialType.AIR) |
-            (self.material_types == MaterialType.WATER_VAPOR)
-        )
+                if mat != MaterialType.SPACE:
+                    k = self.material_db.get_solar_absorption(mat)
+                    absorbed = I * k
 
-        if not np.any(atmosphere_mask):
-            return remaining_flux  # No atmosphere, all solar radiation reaches surface
+                    if absorbed > 0 and self.density[sy, sx] > 0 and self.specific_heat[sy, sx] > 0:
+                        vol_power = absorbed / self.cell_size
+                        source_term[sy, sx] += (vol_power / (self.density[sy, sx] * self.specific_heat[sy, sx])) * self.seconds_per_year
+                        self.power_density[sy, sx] += vol_power
 
-        # True layer-by-layer atmospheric absorption with sequential flux reduction
-        # Calculate atmospheric depth for each cell (distance from space)
-        space_mask = ~non_space_mask
-        distances_from_space = ndimage.distance_transform_edt(~space_mask)
-        
-        # Process atmospheric layers from outside to inside (layer by layer)
-        atmo_coords = np.where(atmosphere_mask)
-        total_atmospheric_cells = len(atmo_coords[0])
-        
-        if len(atmo_coords[0]) > 0:
-            atmo_depths = distances_from_space[atmo_coords]
-            
-            # Get unique depths and sort from outside (small depth) to inside (large depth)
-            unique_depths = np.unique(atmo_depths)
-            unique_depths = unique_depths[unique_depths > 0]  # Exclude depth 0 (space boundary)
-            unique_depths = np.sort(unique_depths)
-            
-            print(f"Processing {len(unique_depths)} atmospheric layers with {total_atmospheric_cells} total cells")
-            
-            # Start with full solar flux
-            current_flux_grid = initial_solar_flux.copy()
-            
-            # Process each atmospheric layer in sequence from outside to inside
-            for i, depth in enumerate(unique_depths):
-                # Find all atmospheric cells at this depth
-                layer_mask = (distances_from_space == depth) & atmosphere_mask
-                if not np.any(layer_mask):
-                    continue
-                    
-                layer_coords = np.where(layer_mask)
-                layer_size = len(layer_coords[0])
-                
-                # Get incoming flux for this layer
-                incoming_flux = current_flux_grid[layer_coords]
-                avg_incoming_flux = np.mean(incoming_flux) if layer_size > 0 else 0
-                
-                # Each cell in this layer absorbs a small fraction
-                absorbed_flux = incoming_flux * self.atmospheric_absorption_per_cell
-                transmitted_flux = incoming_flux * (1.0 - self.atmospheric_absorption_per_cell)
-                avg_absorbed_flux = np.mean(absorbed_flux) if layer_size > 0 else 0
-                
-                # Debug print for first few layers
-                if i < 5:
-                    print(f"Layer {i+1} (depth={depth:.1f}): {layer_size} cells, avg_flux_in={avg_incoming_flux:.6f}, avg_absorbed={avg_absorbed_flux:.6f}")
-                    
-                    # Show power density for this layer
-                    if np.any(valid_heating):
-                        avg_power_density = np.mean(volumetric_power_density)
-                        print(f"  -> Power density: {avg_power_density:.3e} W/m³")
-                
-                # Update the flux grid for next layer (flux is reduced by absorption)
-                current_flux_grid[layer_coords] = transmitted_flux
-                
-                # Apply heating to cells in this layer
-                layer_density = self.density[layer_coords]
-                layer_specific_heat = self.specific_heat[layer_coords]
-                
-                valid_heating = (layer_density > 0) & (layer_specific_heat > 0) & (absorbed_flux > 0)
-                if np.any(valid_heating):
-                    valid_idx = np.where(valid_heating)[0]
-                    valid_y = layer_coords[0][valid_idx]
-                    valid_x = layer_coords[1][valid_idx]
-                    
-                    # Convert surface flux (W/m²) to volumetric power density (W/m³)
-                    volumetric_power_density = absorbed_flux[valid_idx] / self.cell_size
-                    
-                    # Convert to temperature source term
-                    heating_source = (
-                        volumetric_power_density /
-                        (layer_density[valid_idx] * layer_specific_heat[valid_idx])
-                    ) * self.seconds_per_year
-                    
-                    # Add to source term
-                    source_term[valid_y, valid_x] += heating_source
-                    
-                    # Track atmospheric solar power density for visualization
-                    # Accumulate properly - each layer adds its contribution
-                    self.power_density[valid_y, valid_x] += volumetric_power_density
-                    
-                    # Track total atmospheric heating for debugging
-                    cell_volume = self.cell_size ** 3
-                    total_atmo_power = np.sum(volumetric_power_density * cell_volume)
-                    self.thermal_fluxes['atmospheric_heating'] += total_atmo_power
-            
-            # Final remaining flux is what's left after all atmospheric absorption
-            remaining_flux = current_flux_grid
-            
-            # Debug summary
-            total_heated_cells = np.sum(self.power_density > 0)
-            atmo_heated_cells = np.sum((self.power_density > 0) & atmosphere_mask)
-            print(f"Total cells with heating: {total_heated_cells}, Atmospheric cells with heating: {atmo_heated_cells}")
+                        # Categorise energy deposition for diagnostics
+                        if mat in (MaterialType.AIR, MaterialType.WATER_VAPOR):
+                            self.thermal_fluxes['atmospheric_heating'] += vol_power * (self.cell_size ** 3)
+                        else:
+                            self.thermal_fluxes['solar_input'] += vol_power * (self.cell_size ** 3)
+
+                    I -= absorbed
+
+                    if k >= 1.0 or I <= 0:
+                        remaining_flux[sy, sx] += I
+                        break  # ray terminated at opaque surface or fully absorbed
+
+                # advance to next grid cell using DDA
+                if t_max_x < t_max_y:
+                    sx += step_x
+                    t_max_x += inv_dx
+                else:
+                    sy += step_y
+                    t_max_y += inv_dy
 
         return remaining_flux
 
@@ -2354,5 +2164,28 @@ class GeologySimulation:
         final_coords_y = radiative_coords[0][cooling_idx]
         final_coords_x = radiative_coords[1][cooling_idx]
         working_temp[final_coords_y, final_coords_x] = T_new
+
+        # ------------------  POWER / FLUX ACCOUNTING  ------------------
+        # Re-compute instantaneous radiative flux for bookkeeping
+        # Greenhouse attenuation (reuse same dynamic factor as linearized method)
+        water_vapor_mask = (self.material_types == MaterialType.WATER_VAPOR)
+        total_water_vapor_mass = np.sum(self.density[water_vapor_mask]) if np.any(water_vapor_mask) else 0.0
+        if total_water_vapor_mass > 0:
+            vapor_factor = np.log1p(total_water_vapor_mass / self.greenhouse_vapor_scaling) / 10.0
+            greenhouse_factor = self.base_greenhouse_effect + (self.max_greenhouse_effect - self.base_greenhouse_effect) * np.tanh(vapor_factor)
+        else:
+            greenhouse_factor = self.base_greenhouse_effect
+
+        effective_stefan = stefan_geological * (1.0 - greenhouse_factor)
+        power_per_area = effective_stefan * emissivity * (T_new**4 - T_space**4)  # J/(year·m²)
+
+        surface_thickness = self.cell_size * self.surface_radiation_depth_fraction
+        volumetric_power_density = power_per_area / (surface_thickness * self.seconds_per_year)  # W/m³
+
+        # Negative sign: cooling removes energy
+        self.power_density[final_coords_y, final_coords_x] -= volumetric_power_density
+
+        total_radiative_power = np.sum(volumetric_power_density * (self.cell_size ** 3))  # W (positive magnitude)
+        self.thermal_fluxes['radiative_output'] = total_radiative_power
 
         return working_temp
