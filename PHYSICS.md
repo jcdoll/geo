@@ -171,14 +171,26 @@ P_solid = max(P_surface, ρ_solid × g × depth / 10⁶)
 Where:
 - `ρ_solid = 3000 kg/m³`
 
-### Center of Mass Calculation
+### Centre of Mass Calculation  (`_calculate_center_of_mass`)
+Gravity in every mass-movement routine points toward a dynamically updated centre-of-mass (COM):
 
-**Vectorized calculation:**
-```
-COM_x = Σ(ρᵢ × Vᵢ × xᵢ) / Σ(ρᵢ × Vᵢ)
-COM_y = Σ(ρᵢ × Vᵢ × yᵢ) / Σ(ρᵢ × Vᵢ)
-```
-Where `V` = cell volume
+1. **Cell masses** – `m = ρ · V` where `V = cell_size³` and `ρ` already includes thermal-expansion corrections.
+2. **Coordinates** – build `x_idx` and `y_idx` arrays (0 … width-1 / height-1) representing cell centres.
+3. **Mask** – exclude `MaterialType.SPACE`; vacuum has zero mass.
+4. **First moments**  
+   `Σm   = mass[mask].sum()`  
+   `Σmx  = (mass * x_idx)[mask].sum()`  
+   `Σmy  = (mass * y_idx)[mask].sum()`
+5. **COM**  
+   `COM_x = Σmx / Σm`  
+   `COM_y = Σmy / Σm`
+
+The coordinates are stored in `self.center_of_mass` (floats).  All gravity-driven
+algorithms use the vector **pointing from a voxel to this COM** as the inward
+"down" direction.  Because density updates every macro-step, large magma bodies
+or buoyant plumes can shift the COM and slightly re-orient gravity, giving a
+first-order coupling between thermal/density anomalies and the gravitational
+field without solving Poisson's equation.
 
 ---
 
