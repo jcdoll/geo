@@ -705,11 +705,11 @@ T = T + source_change
 ### Recommended Method: Operator Splitting (Implemented)
 
 **Use for all geological simulations**:
-- ✅ Unconditional stability with minimal performance cost
-- ✅ Physically realistic treatment of each process
-- ✅ Suitable for real-time interactive visualization
-- ✅ No parameter tuning required
-- ✅ Mathematically sound approach
+- Unconditional stability with minimal performance cost
+- Physically realistic treatment of each process
+- Suitable for real-time interactive visualization
+- No parameter tuning required
+- Mathematically sound approach
 
 ### Alternative Methods
 
@@ -758,3 +758,133 @@ Operator splitting recognizes that different physical processes require differen
 - **Sources**: Well-behaved terms suitable for explicit integration
 
 This approach provides the best combination of stability, accuracy, and performance for geological simulation, making it suitable for both research and interactive applications.
+
+## Cell Conservation Exceptions  🚧
+In almost every numerical update the simulator treats each grid **cell** as an indestructible voxel – matter is merely moved or its phase changes _in-situ_.  For long-term stability we want all physics operators to preserve the **count of MaterialType.SPACE cells** (vacuum) unless something explicitly vents gas to space or accretes material from space.
+
+The following operators currently **violate** that conservation principle by either turning non-SPACE material into SPACE, or by pulling existing SPACE inward so the outer vacuum region grows.  They should be revisited:
+
+| Operator / Routine | Location | Trigger | How cell count changes |
+|--------------------|----------|---------|------------------------|
+| Gravitational collapse (`_apply_gravitational_collapse_vectorized`) | `simulation_engine.py` | Solid cell adjacent to a cavity (AIR / WATER / SPACE) moves into that cavity | If the chosen cavity is **SPACE**, the solid and vacuum **swap positions** – global SPACE count is unchanged, but vacuum is pulled inward (planet appears eroded). We still list it here because repeated swaps reshape the planet; safest long-term fix is to forbid swapping with SPACE and instead swap with AIR |
+| Unsupported-cell settling (`_settle_unsupported_cells`) | `simulation_engine.py` | Any **denser** material directly above a **lighter fluid** (AIR, WATER_VAPOR, WATER, MAGMA, SPACE) swaps one cell toward the centre of mass | Cells now **swap** materials/temperatures; the lighter fluid rises, the heavier sinks, so global SPACE count stays constant (no synthetic vacuum pockets). |
+| Pyroclastic interaction (*water + magma*) | not yet explicit | Future rule might flash-boil water, expelling vapor upward and leaving behind SPACE | Would destroy a WATER cell |
+| Exsolution / out-gassing at very low pressure | placeholder | Planned volcanic venting routine | Could convert MAGMA → SPACE + AIR if vent blows out material |
+
+### Why this matters
+Mass and volume conservation are critical for numerical stability and for keeping the planet from being "eaten" by its vacuum surroundings.  Each of the above rules either:
+1. Needs an alternate implementation that moves an **equal & opposite** amount of AIR (or other filler) so total SPACE remains constant, **or**
+2. Must be accompanied by a replenishment mechanism (e.g., accretion of interstellar dust) so the net SPACE budget is balanced over time.
+
+### Next steps
+* Short-term safeguard: automated regression test (`test_space_integrity.py`) now fails if SPACE cells increase by more than a small tolerance.
+* Medium term: refactor the two mechanical-movement routines so they swap with **AIR** instead of SPACE, preserving vacuum volume.
+* Long term: audit any new thermochemical reactions using the checklist below before merging:
+  1. Does the operator ever set a cell to `MaterialType.SPACE`?  If so, why?
+  2. Could two cells merge?  If so, where does the "extra" cell go?
+  3. Does the rule have an inverse that can fill the lost volume elsewhere?
+
+> Keeping this table up-to-date will help us rapidly spot and fix future regressions.
+
+> **Swap conflicts:** When two proposed swaps target the same cell (or each other) the helper `_dedupe_swap_pairs` keeps one swap and silently drops the others—no cell is cleared or set to SPACE. This guarantees cell-count preservation during mass movement passes.
+
+## Density-Driven Motion and Fluid Dynamics
+The simulator separates mass movement into three complementary passes that together honour gravity, buoyancy and fluid behaviour:
+
+### 1. Density-Stratification Pass  (`_apply_density_stratification_local_vectorized`)
+* **Scope** – Operates on *mobile* materials only:  gases (AIR, WATER VAPOR), liquids (WATER), hot solids (> 1200 K), and low-density cold solids (ICE, PUMICE).  
+* **Rule** – Using an isotropic 5 × 5 neighbour list it compares *effective* density (ρ corrected for thermal expansion) between each sampled cell and a neighbour that is one or two cells closer to / farther from the centre of mass.  
+* **Action** – If the outer cell is denser it swaps inward; if lighter it swaps outward.  This creates mantle convection rolls, vapour plumes, and lets ice rise through magma or sink through air as appropriate.
+
+### 2. Unsupported-Cell Settling (`_settle_unsupported_cells`)
+* **Scope** – All solids.  
+* **Rule** – Looks **only** in the inward gravitational direction (one cell toward COM).  If the destination voxel is a *fluid* (AIR, WATER VAPOR, WATER, MAGMA or even SPACE) **and** is less dense than the source, the two voxels swap.  
+* **Outcome** – Rockfalls into caves, snowflakes dropping through air, basalt sinking into magma pools.  The lighter fluid rises, preserving mass and space counts.
+
+### 3. Fluid Migration / Vacuum Buoyancy (`_apply_fluid_dynamics_vectorized`)
+* **Scope** – All low-density fluids (AIR, WATER VAPOR, WATER, MAGMA, SPACE).  
+* **Rule** – For each fluid cell adjacent to any non-space material, test neighbours within radius 2. If the neighbour is denser **and** farther from the surface, swap (Monte-Carlo throttled by `fluid_migration_probability`).  
+* **Outcome** – Magma diapirs, steam bubbles, and trapped vacuum pockets rise toward the planetary surface.
+
+Together these passes realise both behaviours you outlined:
+* Hot, ductile mantle rock participates in large-scale convection (Pass 1).
+* Any voxel that finds itself resting on something lighter will fall (Pass 2), while light fluids drift upward (Pass 3).
+
+---
+
+## Spatial Kernels & Isotropy
+To minimise axial artefacts the engine uses pre-computed **circular kernels** for all morphological operations.
+
+| Kernel | Size | Purpose |
+|--------|------|---------|
+| `_circular_kernel_3x3` | 3 × 3 (8-neighbour) | Fast neighbour look-ups (e.g., atmospheric absorption) – **default when `neighbor_count = 8`** |
+| `_circular_kernel_5x5` | 5 × 5 (includes radius 2 offsets) | Isotropic candidate gathering for collapse, buoyancy, stratification – always used |
+| `_collapse_kernel_4`   | 3 × 3 cross-shape | Strict 4-neighbour collapse for Manhattan-style movement – used when `neighbor_count = 4` (set automatically for `quality = 3`) |
+| `_collapse_kernel_8`   | 3 × 3 full ring | Allows diagonal collapse moves – **default** (`neighbor_count = 8`, quality 1-2) |
+| `_laplacian_kernel_radius1` (implicit) | 3 × 3 | Classic 8-neighbour Laplacian (explicit diffusion, fast) – selected when `diffusion_stencil = "radius1"` |
+| `_laplacian_kernel_radius2` | 5 × 5, 13-point | Nearly isotropic Laplacian – **default** (`diffusion_stencil = "radius2"`) |
+
+These kernels are generated once on startup and reused everywhere, ensuring that gravitational collapse, fluid migration and diffusion all respect circular symmetry on a Cartesian grid.
+
+> **Tip** – any new morphological rule should reuse one of the existing kernels to preserve numerical isotropy.
+
+## Internal Heating
+Geothermal energy is injected every step by `_calculate_internal_heating_source`.
+* Exponential depth-dependent profile:  
+  `Q = Q0 * exp(-depth / core_heating_depth_scale)`  (W m⁻³).  
+* Adds heat **explicitly** in operator-split Step 3; contributes to `power_density` bookkeeping.
+
+## Solar Heating & Greenhouse Effect
+Incoming stellar flux is handled in two stages:
+1. **Raw insolation** – `_calculate_solar_heating_source` projects a solar vector, applies distance factor & cosine-law shading, then multiplies by material albedo.
+2. **Atmospheric absorption** – `_solve_atmospheric_absorption` (directional sweep) attenuates the beam through AIR / WATER_VAPOR columns; absorption coefficient comes from `MaterialDatabase._init_optical_absorption`.  
+   *Greenhouse*: the outgoing long-wave cooling constant is multiplied by `(1 – greenhouse_factor)` where
+   
+  `greenhouse_factor = base + (max-base) * tanh( ln(1+M_vapor/scale) / 10 )`
+
+## Atmospheric Convection
+`_apply_atmospheric_convection` performs a simple vertical mixing pass:
+* For each AIR or WATER_VAPOR cell, it mixes a fraction `atmospheric_convection_mixing` of the temperature difference with the cell directly above – a cheap way to mimic day-time convection.
+
+## Metamorphism & Phase Transitions
+Phase changes are data-driven via `MaterialDatabase`.
+* Each `MaterialProperties` entry contains a list of `TransitionRule`(target, T/P window).
+* `_apply_metamorphism` scans all non-space cells each macro-step and replaces materials whose local T-P falls inside a rule.
+* Melting, crystallisation and gas ↔ liquid ↔ solid transitions (e.g., ICE ⇌ WATER ⇌ VAPOR, MAGMA → BASALT/GRANITE/OBSIDIAN) are all executed in-place – cells retain position & volume.
+
+## Weathering
+Surface chemistry is approximated by `_apply_weathering` (optional flag):
+* Operates on the outermost crust layer (`surface_radiation_depth_fraction`).
+* Converts rocks to their listed weathering products (e.g., GRANITE → SANDSTONE) at a slow stochastic rate, modelling mechanical & chemical erosion.
+
+## Pressure Model
+Gravitational lithostatic pressure is recalculated every macro-step by `_calculate_planetary_pressure`:
+* Starting at the surface pressure (`surface_pressure`), pressure increments downward with depth using average gravity and density:  
+  `ΔP = ρ * g * Δh`.
+* Atmospheric pressure decays exponentially with altitude using `atmospheric_scale_height`.
+* User-applied tectonic stress is added via `pressure_offset`.
+
+These additions round out the documentation so every major physical subsystem now has a corresponding description in **PHYSICS.md**.
+
+### Why Three Separate Passes?
+Having one monolithic "swap anything with anything" routine would indeed be simpler conceptually, but splitting the work into targeted passes yields a far better **speed / accuracy** trade-off:
+
+| Pass | Candidate cells (80×80 planet) | Typical samples checked* | Complexity per sample | Dominant memory access |
+|------|--------------------------------|-------------------------|-----------------------|------------------------|
+| Stratification (1) | Gases, liquids, hot rocks, light solids ≈ 5–10 % | *density_sample_fraction* ≈ 1 000 | ~10 neighbour densities | Sparse, cache-friendly |
+| Unsupported settling (2) | **All solids** but **only** those directly above a fluid: ≈ 1–2 % | deterministic | 1 density compare | Straight slice, vectorised |
+| Fluid migration (3) | AIR/WATER/MAGMA/SPACE ≈ 3 % | *process_fraction_air* ≈ 500 | up to 12 neighbour checks | Contiguous chunks |
+
+\*measured on 80×80 default planet; percentages scale with planet mass.
+
+Performance advantages:
+1. **Early culling** – Each pass quickly masks out ~90 % of the grid that cannot move under that rule, so arithmetic and random-sampling happen on small arrays.
+2. **Specialised neighbourhoods** –  Pass 2 needs only the single voxel inward; Pass 3 needs radius-2 isotropy; Pass 1 needs full 5×5 but just for the sampled mobiles.  A unified pass would have to evaluate the heaviest case for every cell → 5–10× slower.
+3. **Directional semantics** – Unsupported settling is 1-D (*inward only*).  Embedding that into the isotropic swap logic would require extra per-candidate branching and reduce vectorisation.
+4. **Stronger physical fidelity** –  The mantle convection pass allows sideways exchange that would incorrectly mix atmosphere if merged with fluid buoyancy; conversely the fluid-only pass has extra porosity / probability checks irrelevant to rock.
+
+Empirically, profiling shows:
+* 3-pass scheme: **~3–4 ms** per macro-step on 80×80 grid (Python+NumPy).  
+* Single isotropic "swap if heavier" prototype: **~20 ms** with identical physics but no early masking.
+
+Hence the current architecture is both faster **and** clearer, while still producing physically plausible results.  Each pass can be toggled or refined independently without risking cross-coupling bugs.

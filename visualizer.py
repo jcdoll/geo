@@ -1146,12 +1146,8 @@ class GeologyVisualizer:
                 # 4: Power view
                 self.display_mode = 'power'
             elif event.key == pygame.K_r:
-                # R: Reset simulation
-                self.simulation._setup_planetary_conditions()
-                self.simulation.age = np.zeros((self.simulation.height, self.simulation.width), dtype=np.float64)
-                self.simulation.time = 0.0
-                self.simulation.history.clear()
-                self.simulation._update_material_properties()
+                # R: Reset simulation (now centralized in GeologySimulation)
+                self.simulation.reset()
             elif event.key == pygame.K_q:
                 # Q: Change quality setting (cycle between 1=Full, 2=Balanced, 3=Fast)
                 current_quality = getattr(self.simulation, '_quality_level', 1)

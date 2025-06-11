@@ -114,6 +114,7 @@ class GeologySimulation:
         self.surface_temperature = 50.0 + 273.15        # Initial planetary surface temperature (K) - warmer for stability
         self.temperature_decay_constant = 2.0           # Temperature gradient decay factor - steeper gradient
         self.melting_temperature = 1200 + 273.15        # General melting temperature threshold (K)
+        self.hot_solid_temperature_threshold = 1200.0   # °C: solids hotter than this behave as fluids in density stratification
         self.core_heating_depth_scale = 0.5             # Exponential scale factor for core heating vs depth
 
         # Pressure constants
@@ -125,15 +126,15 @@ class GeologySimulation:
 
         # Solar and greenhouse constants (balanced for stable temperatures)
         self.solar_constant = 50                       # Solar constant (W/m²)
-        self.solar_angle = 0.0                         # Solar angle in degrees: 0°=equator, +90°=north pole, -90°=south pole
+        self.solar_angle = 90.0                         # Solar angle in degrees: 0°=equator, +90°=north pole, -90°=south pole
         self.planetary_distance_factor = 1             # Distance factor for solar intensity - further reduced to prevent hot spots (was 0.0001)
         self.base_greenhouse_effect = 0.2              # Base greenhouse effect fraction - increased to retain more heat
         self.max_greenhouse_effect = 0.8               # Maximum greenhouse effect fraction - increased
         self.greenhouse_vapor_scaling = 1000.0         # Water vapor mass scaling for greenhouse effect
 
         # Material mobility probabilities
-        self.gravitational_fall_probability = 0.7       # Initial fall probability for collapse
-        self.gravitational_fall_probability_later = 0.3 # Later fall probability for collapse
+        self.gravitational_fall_probability = 1.0       # Initial fall probability for collapse
+        self.gravitational_fall_probability_later = 1.0 # Later fall probability for collapse
         self.fluid_migration_probability = 0.5          # Air/fluid migration probability
         self.density_swap_probability = 0.5             # Density stratification swap probability
 
@@ -176,6 +177,15 @@ class GeologySimulation:
         self._properties_dirty = True
         self._update_material_properties()
         self._calculate_center_of_mass()
+
+        # Diffusion stencil options:
+        # - "radius1": classic 8-neighbour (fast, slightly axis-biased)
+        # - "radius2": 13-point isotropic stencil (default)
+        self.diffusion_stencil = "radius2"
+
+        # interval (macro-steps) between deterministic settle sweeps
+        self.settle_interval = 5
+        self._need_settle = True  # trigger initial settling once
 
     def _setup_performance_config(self, quality: int):
         """Setup performance configuration based on quality level"""
@@ -235,8 +245,8 @@ class GeologySimulation:
         # 8-neighbor offsets (cardinal + diagonal)
         self.neighbors_8 = np.array([(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)])
 
-        # Distance factors for diagonal neighbors (1/√2 ≈ 0.707)
-        self.distance_factors_8 = np.array([0.707, 1.0, 0.707, 1.0, 1.0, 0.707, 1.0, 0.707])
+        # Isotropic diffusion stencil: treat all 8 neighbours equally (eliminates octagonal bias)
+        self.distance_factors_8 = np.ones(8)
 
         # Pre-compute coordinate grids for vectorized operations
         self.y_coords, self.x_coords = np.ogrid[:self.height, :self.width]
@@ -247,7 +257,18 @@ class GeologySimulation:
 
         # Collapse kernels for geological processes
         self._collapse_kernel_4 = np.array([[0, 1, 0], [1, 0, 1], [0, 1, 0]], dtype=bool)  # 4-neighbor
-        self._collapse_kernel_8 = self._circular_kernel_3x3  # Use circular kernel for 8-neighbor
+        # Use a 5×5 circular kernel for more isotropic neighbour detection (reduces octagonal bias)
+        self._collapse_kernel_8 = self._circular_kernel_5x5.copy()
+        self._collapse_kernel_8[2, 2] = False  # exclude centre
+
+        # Radius-2 isotropic Laplacian (13-point) – coefficients sum to 0
+        lap_kernel = (1.0/6.0) * np.array([
+            [0, 0, 1, 0, 0],
+            [0, 1, 2, 1, 0],
+            [1, 2,-16,2, 1],
+            [0, 1, 2, 1, 0],
+            [0, 0, 1, 0, 0]], dtype=np.float64)
+        self._laplacian_kernel_radius2 = lap_kernel
 
     def _create_circular_kernel(self, size: int) -> np.ndarray:
         """Create a circular kernel for morphological operations to reduce grid artifacts"""
@@ -426,8 +447,9 @@ class GeologySimulation:
         dx_squared = self.cell_size ** 2
         max_alpha = np.max(thermal_diffusivity[non_space_mask]) if np.any(non_space_mask) else 0.0
 
-        # Pure diffusion stability limit
-        diffusion_dt_limit = dx_squared / (4.0 * max_alpha) if max_alpha > 0 else float('inf')
+        # Pure diffusion stability limit depends on stencil
+        stencil_denominator = 4.0 if self.diffusion_stencil == "radius1" else 16.0
+        diffusion_dt_limit = dx_squared / (stencil_denominator * max_alpha) if max_alpha > 0 else float('inf')
 
         # Adaptive time step for diffusion (clamp between min substep and full timestep)
         min_dt_seconds = self.dt * self.seconds_per_year / self.max_diffusion_substeps
@@ -478,18 +500,15 @@ class GeologySimulation:
         dt_seconds = dt * self.seconds_per_year
         dx_squared = self.cell_size ** 2
 
-        # Calculate discrete Laplacian: ∇²T = rate of temperature curvature
-        # Physical meaning: how much faster/slower should this cell heat up based on neighbors?
-        # Uses 8-neighbor stencil with distance weighting for rotational invariance
-        laplacian = np.zeros_like(temperature)
-        
-        for i, (dy, dx) in enumerate(self.neighbors_8):
-            neighbor_temp = np.roll(np.roll(temperature, dy, axis=0), dx, axis=1)
-            weight = self.distance_factors_8[i]  # 1.0 for cardinal, 0.707 for diagonal
-            laplacian += weight * (neighbor_temp - temperature)
-        
-        # Normalize by sum of weights (precomputed: 4*1.0 + 4*0.707 = 6.828)
-        laplacian /= np.sum(self.distance_factors_8)
+        if self.diffusion_stencil == "radius1":
+            laplacian = np.zeros_like(temperature)
+            for i, (dy, dx) in enumerate(self.neighbors_8):
+                neighbor_temp = np.roll(np.roll(temperature, dy, axis=0), dx, axis=1)
+                weight = self.distance_factors_8[i]
+                laplacian += weight * (neighbor_temp - temperature)
+            laplacian /= np.sum(self.distance_factors_8)
+        else:  # radius2 isotropic default
+            laplacian = ndimage.convolve(temperature, self._laplacian_kernel_radius2, mode="nearest")
 
         # Zero out Laplacian for space cells (no diffusion)
         laplacian[~non_space_mask] = 0.0
@@ -763,6 +782,35 @@ class GeologySimulation:
 
         return neighbors
 
+    def _dedupe_swap_pairs(
+        self,
+        src_y: np.ndarray, src_x: np.ndarray,
+        tgt_y: np.ndarray, tgt_x: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Return pair arrays where each grid index appears at most once.
+
+        The first occurrence (lowest index) is preserved; duplicates are
+        dropped.  Debug assertions guarantee uniqueness when not running
+        with the -O flag.
+        """
+
+        if len(src_y) == 0:
+            return src_y, src_x, tgt_y, tgt_x
+
+        src_flat = src_y * self.width + src_x
+        tgt_flat = tgt_y * self.width + tgt_x
+
+        _, src_unique = np.unique(src_flat, return_index=True)
+        _, tgt_unique = np.unique(tgt_flat, return_index=True)
+
+        keep = np.intersect1d(src_unique, tgt_unique)
+
+        if __debug__:
+            assert len(np.unique(src_flat[keep])) == len(keep)
+            assert len(np.unique(tgt_flat[keep])) == len(keep)
+
+        return src_y[keep], src_x[keep], tgt_y[keep], tgt_x[keep]
+
     def _calculate_temperature_factors(self, threshold: float, scale: float = 200.0, max_factor: float = 10.0) -> np.ndarray:
         """Calculate exponential temperature factors for mobility"""
         temp_excess = np.maximum(0, self.temperature - threshold)
@@ -974,7 +1022,7 @@ class GeologySimulation:
             (self.material_types == MaterialType.AIR) |
             (self.material_types == MaterialType.WATER_VAPOR)
         )
-        surface_candidates = ndimage.binary_dilation(space_mask, structure=self._circular_kernel_3x3) & non_space_mask & ~atmosphere_mask
+        surface_candidates = ndimage.binary_dilation(space_mask, structure=self._circular_kernel_5x5) & non_space_mask & ~atmosphere_mask
 
         if not np.any(surface_candidates):
             return source_term
@@ -1201,7 +1249,7 @@ class GeologySimulation:
             outer_atmo_mask = np.zeros_like(atmosphere_mask, dtype=bool)
         else:
             # Find atmosphere regions adjacent to space (using circular kernel)
-            space_neighbors = ndimage.binary_dilation(space_mask, structure=self._circular_kernel_3x3)
+            space_neighbors = ndimage.binary_dilation(space_mask, structure=self._circular_kernel_5x5)
             space_adjacent_atmo = space_neighbors & atmosphere_mask
 
             if np.any(space_adjacent_atmo):
@@ -1219,7 +1267,7 @@ class GeologySimulation:
         solid_mask = ~(space_mask | atmosphere_mask)  # All non-space, non-atmosphere
 
         # Surface solids are adjacent to outer atmosphere or space (using circular kernel)
-        surface_candidates = ndimage.binary_dilation(outer_atmo_mask | space_mask, structure=self._circular_kernel_3x3)
+        surface_candidates = ndimage.binary_dilation(outer_atmo_mask | space_mask, structure=self._circular_kernel_5x5)
         surface_solid_mask = surface_candidates & solid_mask
 
         # Combine outer atmosphere and surface solids for radiation
@@ -1443,8 +1491,20 @@ class GeologySimulation:
         if self.enable_weathering and step_count % 10 == 0:  # Every 10th step when enabled
             weathering_changes = self._apply_weathering()
 
+        # Flag when processes that can create voids have moved material
+        if collapse_changes or fluid_changes or density_stratification_changes:
+            self._need_settle = True
+
+        settle_changes = False
+        # Attempt settle only if flagged and on interval
+        if self._need_settle and step_count % self.settle_interval == 0:
+            settle_changes = self._settle_unsupported_cells()
+            # If nothing moved, unset flag until new voids appear
+            self._need_settle = settle_changes
+
         # Update material properties if material types changed
-        if metamorphic_changes or density_stratification_changes or collapse_changes or fluid_changes or weathering_changes:
+        if (metamorphic_changes or density_stratification_changes or collapse_changes or
+            fluid_changes or weathering_changes or settle_changes):
             self._update_material_properties()
 
         # Update age and time with the effective time step
@@ -1476,8 +1536,10 @@ class GeologySimulation:
 
         # Debug logging for thermal balance
         if self.logger.isEnabledFor(logging.DEBUG):
-            # Calculate step number (approximate from time and dt)
-            step_number = int(self.time / self.dt) if self.dt > 0 else 0
+            # ------------------------------------------------------------------
+            # Diagnostic header – use fractional step index and higher-precision time
+            # ------------------------------------------------------------------
+            step_index = self.time / self.dt if self.dt > 0 else 0.0  # may be fractional due to sub-stepping
 
             non_space_mask = (self.material_types != MaterialType.SPACE)
             temp_celsius = self.temperature - 273.15
@@ -1487,7 +1549,7 @@ class GeologySimulation:
 
             # Clean, formatted header with step number and key info
             self.logger.debug("=" * 65)
-            self.logger.debug(f"STEP {step_number:4d} | Time: {self.time:6.1f}y | Planet Avg: {avg_planet_temp:6.1f}°C")
+            self.logger.debug(f"STEP {step_index:6.2f} | Time: {self.time:7.2f}y | Planet Avg: {avg_planet_temp:7.1f}°C")
             self.logger.debug("=" * 65)
 
             # Temperature statistics
@@ -1511,8 +1573,9 @@ class GeologySimulation:
             water_vapor_mask = (self.material_types == MaterialType.WATER_VAPOR)
             water_mask = (self.material_types == MaterialType.WATER)
             ice_mask = (self.material_types == MaterialType.ICE)
-            atmosphere_mask = air_mask | water_vapor_mask
-            water_total_mask = water_mask | water_vapor_mask | ice_mask
+            atmosphere_mask = air_mask | water_vapor_mask            # gases only
+            water_total_mask = water_mask | ice_mask                 # condensed phases only
+            # Remaining cells are counted as "rock" (includes magma & solid crust)
             rock_mask = non_space_mask & ~atmosphere_mask & ~water_total_mask
 
             self.logger.debug("MATERIAL BREAKDOWN:")
@@ -1564,6 +1627,10 @@ class GeologySimulation:
                 self.logger.debug(f"Max Thermal Diff:   {self._max_thermal_diffusivity:10.3e} m²/s")
 
             self.logger.debug("=" * 65)
+
+            if self.logger.isEnabledFor(logging.DEBUG):
+                total_cells = np.sum(self.material_types != MaterialType.SPACE)
+                self.logger.debug(f"  Non-SPACE cells: {total_cells}")
 
     def step_backward(self):
         """Reverse simulation by one time step"""
@@ -1689,11 +1756,14 @@ class GeologySimulation:
         center_x, center_y = self.center_of_mass
         distances = self._get_distances_from_center(center_x, center_y)
 
-        # Create solid and non-solid masks
+        # Create solid and cavity masks
         solid_mask = self._get_solid_mask()
-        non_solid_mask = ~solid_mask & (self.material_types != MaterialType.SPACE)
+        # A cavity is any cell that is not solid (AIR, WATER, or SPACE). Including
+        # SPACE ensures surface rocks adjacent to vacuum are free to detach and
+        # fall inward when a deeper cell is available.
+        cavity_mask = ~solid_mask
 
-        if not np.any(solid_mask) or not np.any(non_solid_mask):
+        if not np.any(solid_mask) or not np.any(cavity_mask):
             return False
 
         # Vectorized fall steps
@@ -1702,8 +1772,8 @@ class GeologySimulation:
         for fall_step in range(self.max_fall_steps):
             step_changes = False
 
-            # Find solid materials adjacent to non-solid materials (fast morphological operation)
-            solid_near_cavities = solid_mask & ndimage.binary_dilation(non_solid_mask, structure=kernel)
+            # Find solid materials adjacent to cavities (fast morphological operation)
+            solid_near_cavities = solid_mask & ndimage.binary_dilation(cavity_mask, structure=kernel)
 
             if not np.any(solid_near_cavities):
                 break
@@ -1726,87 +1796,120 @@ class GeologySimulation:
             moves_made = 0
             max_moves_per_step = min(len(solid_coords[0]), 100)  # Limit for stability
 
-            # Get neighbor offsets using the helper function (shuffled to avoid grid artifacts)
-            neighbor_offsets = self._get_neighbors(self.neighbor_count, shuffle=True)
+            # Build an isotropic list of neighbor offsets (radius ≤2) for collapse moves
+            if self.neighbor_count == 8:
+                offsets = []
+                for dy in range(-2, 3):
+                    for dx in range(-2, 3):
+                        if dy == 0 and dx == 0:
+                            continue
+                        if self._circular_kernel_5x5[dy + 2, dx + 2]:
+                            offsets.append((dy, dx))
+                np.random.shuffle(offsets)
+                neighbor_offsets_collapse = offsets
+            else:
+                neighbor_offsets_collapse = [(-1,0),(1,0),(0,-1),(0,1)]
 
-            # Vectorized neighbor checking
-            for dy, dx in neighbor_offsets:
-                if moves_made >= max_moves_per_step:
-                    break
+            # ---------- NEW isotropic candidate gathering ----------
+            # Collect all potential swaps first, then randomly choose up to max_moves_per_step
+            cand_solid_y = []
+            cand_solid_x = []
+            cand_neighbor_y = []
+            cand_neighbor_x = []
 
-                # Calculate neighbor positions
+            for dy, dx in neighbor_offsets_collapse:
+                # Neighbor positions for all solid cells
                 neighbor_y = solid_coords[0] + dy
                 neighbor_x = solid_coords[1] + dx
 
-                # Bounds check
-                in_bounds = ((neighbor_y >= 0) & (neighbor_y < self.height) &
-                           (neighbor_x >= 0) & (neighbor_x < self.width))
-
+                # Bounds
+                in_bounds = (
+                    (neighbor_y >= 0) & (neighbor_y < self.height) &
+                    (neighbor_x >= 0) & (neighbor_x < self.width)
+                )
                 if not np.any(in_bounds):
                     continue
 
                 valid_idx = np.where(in_bounds)[0]
-                valid_solid_y = solid_coords[0][valid_idx]
-                valid_solid_x = solid_coords[1][valid_idx]
-                valid_neighbor_y = neighbor_y[valid_idx]
-                valid_neighbor_x = neighbor_x[valid_idx]
+                v_solid_y = solid_coords[0][valid_idx]
+                v_solid_x = solid_coords[1][valid_idx]
+                v_neighbor_y = neighbor_y[valid_idx]
+                v_neighbor_x = neighbor_x[valid_idx]
 
-                # Check if neighbors are non-solid and closer to center
-                neighbor_distances = distances[valid_neighbor_y, valid_neighbor_x]
+                neighbor_distances = distances[v_neighbor_y, v_neighbor_x]
                 solid_distances_valid = solid_distances[valid_idx]
 
-                is_non_solid = non_solid_mask[valid_neighbor_y, valid_neighbor_x]
+                is_non_solid = cavity_mask[v_neighbor_y, v_neighbor_x]
+                is_not_space = self.material_types[v_neighbor_y, v_neighbor_x] != MaterialType.SPACE
                 is_closer = neighbor_distances < solid_distances_valid
-                can_collapse = is_non_solid & is_closer
+                can_collapse = is_non_solid & is_not_space & is_closer
 
-                if not np.any(can_collapse):
-                    continue
+                if np.any(can_collapse):
+                    idx = np.where(can_collapse)[0]
+                    cand_solid_y.append(v_solid_y[idx])
+                    cand_solid_x.append(v_solid_x[idx])
+                    cand_neighbor_y.append(v_neighbor_y[idx])
+                    cand_neighbor_x.append(v_neighbor_x[idx])
 
-                # Apply fall probability and limit moves
-                collapse_idx = np.where(can_collapse)[0]
-                fall_prob = self.gravitational_fall_probability if fall_step == 0 else self.gravitational_fall_probability_later
+            if cand_solid_y:
+                # Concatenate lists
+                cs_y = np.concatenate(cand_solid_y)
+                cs_x = np.concatenate(cand_solid_x)
+                cn_y = np.concatenate(cand_neighbor_y)
+                cn_x = np.concatenate(cand_neighbor_x)
 
-                # Randomly sample collapses
-                random_mask = np.random.random(len(collapse_idx)) < fall_prob
-                final_collapse_idx = collapse_idx[random_mask]
+                total_candidates = len(cs_y)
+                if total_candidates > 0:
+                    # Apply fall probability
+                    fall_prob = (
+                        self.gravitational_fall_probability if fall_step == 0
+                        else self.gravitational_fall_probability_later
+                    )
+                    rand_mask = np.random.random(total_candidates) < fall_prob
+                    cs_y = cs_y[rand_mask]
+                    cs_x = cs_x[rand_mask]
+                    cn_y = cn_y[rand_mask]
+                    cn_x = cn_x[rand_mask]
 
-                if len(final_collapse_idx) == 0:
-                    continue
+                    # Limit moves
+                    limit = min(max_moves_per_step, len(cs_y))
+                    if limit > 0:
+                        sel = np.random.choice(len(cs_y), size=limit, replace=False)
+                        cs_y, cs_x = cs_y[sel], cs_x[sel]
+                        cn_y, cn_x = cn_y[sel], cn_x[sel]
 
-                # Limit number of moves for stability
-                final_collapse_idx = final_collapse_idx[:max_moves_per_step - moves_made]
+                        # ------------------------------------------------------------------
+                        # Ensure each grid index participates in AT MOST one swap this pass.
+                        # This prevents material "loss" when two candidate moves target the
+                        # same cell (or when one cell is both a source and a target).
+                        # ------------------------------------------------------------------
+                        cs_y, cs_x, cn_y, cn_x = self._dedupe_swap_pairs(cs_y, cs_x, cn_y, cn_x)
 
-                # Get final coordinates
-                collapse_solid_y = valid_solid_y[final_collapse_idx]
-                collapse_solid_x = valid_solid_x[final_collapse_idx]
-                collapse_neighbor_y = valid_neighbor_y[final_collapse_idx]
-                collapse_neighbor_x = valid_neighbor_x[final_collapse_idx]
+                        # Debug-mode assertion: verify true uniqueness
+                        if __debug__:
+                            assert len(np.unique(cs_y * self.width + cs_x)) == len(cs_y)
+                            assert len(np.unique(cn_y * self.width + cn_x)) == len(cn_y)
 
-                # Vectorized material swapping
-                if len(final_collapse_idx) > 0:
-                    # Store materials
-                    solid_materials = self.material_types[collapse_solid_y, collapse_solid_x].copy()
-                    cavity_materials = self.material_types[collapse_neighbor_y, collapse_neighbor_x].copy()
+                        # Perform the swaps
+                        solid_materials = self.material_types[cs_y, cs_x].copy()
+                        cavity_materials = self.material_types[cn_y, cn_x].copy()
+                        self.material_types[cn_y, cn_x] = solid_materials
+                        self.material_types[cs_y, cs_x] = cavity_materials
 
-                    # Swap materials
-                    self.material_types[collapse_neighbor_y, collapse_neighbor_x] = solid_materials
-                    self.material_types[collapse_solid_y, collapse_solid_x] = cavity_materials
+                        solid_temps = self.temperature[cs_y, cs_x].copy()
+                        self.temperature[cn_y, cn_x] = solid_temps
+                        self.temperature[cs_y, cs_x] = (solid_temps + 273.15) / 2
 
-                    # Transfer temperatures (vectorized)
-                    solid_temps = self.temperature[collapse_solid_y, collapse_solid_x].copy()
-                    self.temperature[collapse_neighbor_y, collapse_neighbor_x] = solid_temps
-                    self.temperature[collapse_solid_y, collapse_solid_x] = (solid_temps + 273.15) / 2
-
-                    moves_made += len(final_collapse_idx)
-                    step_changes = True
-                    changes_made = True
+                        moves_made += limit
+                        step_changes = True
+                        changes_made = True
 
             # Update masks for next iteration if changes were made
             if step_changes:
                 solid_mask = self._get_solid_mask()
-                non_solid_mask = ~solid_mask & (self.material_types != MaterialType.SPACE)
+                cavity_mask = ~solid_mask
             else:
-                break  # No changes, stop iterating
+                break  # No changes
 
         return changes_made
 
@@ -1814,11 +1917,22 @@ class GeologySimulation:
         """Fast vectorized fluid dynamics using morphological operations"""
         changes_made = False
 
-        if not np.any((self.material_types == MaterialType.AIR)):
+        # Treat true vacuum as the lightest fluid so that trapped SPACE pockets
+        # can buoyantly migrate toward the surface just like AIR.
+
+        fluid_mask_total = (
+            (self.material_types == MaterialType.AIR) |
+            (self.material_types == MaterialType.SPACE) |
+            (self.material_types == MaterialType.WATER_VAPOR) |
+            (self.material_types == MaterialType.MAGMA) |
+            (self.material_types == MaterialType.WATER)
+        )
+
+        if not np.any(fluid_mask_total):
             return False
 
-        # Air migration using vectorized operations
-        air_mask = (self.material_types == MaterialType.AIR)
+        # Fluid migration using vectorized operations (includes gases and magma/water)
+        air_mask = fluid_mask_total
         distances = self._get_distances_from_center()
 
         # Find air cells adjacent to non-space materials (using circular kernel to reduce artifacts)
@@ -1838,77 +1952,92 @@ class GeologySimulation:
 
             air_distances = distances[air_coords]
 
-            # Vectorized neighbor checking for air migration (shuffled to avoid grid artifacts)
-            neighbor_offsets = self._get_neighbors(self.neighbor_count, shuffle=True)
+            # Build isotropic neighbor offsets (radius ≤2)
+            offsets = []
+            for dy in range(-2, 3):
+                for dx in range(-2, 3):
+                    if dy == 0 and dx == 0:
+                        continue
+                    if self._circular_kernel_5x5[dy + 2, dx + 2]:
+                        offsets.append((dy, dx))
 
-            # Find best migration targets for each air cell
-            for dy, dx in neighbor_offsets:
+            # Pool all potential migration pairs
+            cand_air_y = []
+            cand_air_x = []
+            cand_nei_y = []
+            cand_nei_x = []
+
+            for dy, dx in offsets:
                 neighbor_y = air_coords[0] + dy
                 neighbor_x = air_coords[1] + dx
 
-                # Bounds check
-                in_bounds = ((neighbor_y >= 0) & (neighbor_y < self.height) &
-                           (neighbor_x >= 0) & (neighbor_x < self.width))
-
+                in_bounds = (
+                    (neighbor_y >= 0) & (neighbor_y < self.height) &
+                    (neighbor_x >= 0) & (neighbor_x < self.width)
+                )
                 if not np.any(in_bounds):
                     continue
 
-                valid_idx = np.where(in_bounds)[0]
-                valid_air_y = air_coords[0][valid_idx]
-                valid_air_x = air_coords[1][valid_idx]
-                valid_neighbor_y = neighbor_y[valid_idx]
-                valid_neighbor_x = neighbor_x[valid_idx]
+                vidx = np.where(in_bounds)[0]
+                a_y = air_coords[0][vidx]
+                a_x = air_coords[1][vidx]
+                n_y = neighbor_y[vidx]
+                n_x = neighbor_x[vidx]
 
-                # Check migration conditions
-                neighbor_materials = self.material_types[valid_neighbor_y, valid_neighbor_x]
-                neighbor_distances = distances[valid_neighbor_y, valid_neighbor_x]
-                air_distances_valid = air_distances[valid_idx]
+                neighbor_materials = self.material_types[n_y, n_x]
+                neighbor_distances = distances[n_y, n_x]
+                air_distances_valid = air_distances[vidx]
 
-                # Air wants to move toward surface (away from center)
                 not_space = (neighbor_materials != MaterialType.SPACE)
-                toward_surface = (neighbor_distances > air_distances_valid)
+                toward_surface = neighbor_distances > air_distances_valid
 
-                # Check material properties for migration (vectorized where possible)
-                can_migrate = np.zeros(len(valid_idx), dtype=bool)
-                for i, mat in enumerate(neighbor_materials):
-                    if not_space[i] and toward_surface[i]:
-                        props = self.material_db.get_properties(mat)
-                        can_migrate[i] = not props.is_solid or props.porosity > 0.1
+                # Porous or non-solid check
+                props_ok = [not self.material_db.get_properties(m).is_solid or self.material_db.get_properties(m).porosity > 0.1 for m in neighbor_materials]
+                props_ok = np.array(props_ok, dtype=bool)
 
-                if not np.any(can_migrate):
-                    continue
+                can_move = not_space & toward_surface & props_ok
 
-                # Apply migration probability
-                migrate_idx = np.where(can_migrate)[0]
-                migration_prob = self.fluid_migration_probability
+                if np.any(can_move):
+                    idx = np.where(can_move)[0]
+                    cand_air_y.append(a_y[idx])
+                    cand_air_x.append(a_x[idx])
+                    cand_nei_y.append(n_y[idx])
+                    cand_nei_x.append(n_x[idx])
 
-                random_mask = np.random.random(len(migrate_idx)) < migration_prob
-                final_migrate_idx = migrate_idx[random_mask]
+            if cand_air_y:
+                ay = np.concatenate(cand_air_y)
+                ax = np.concatenate(cand_air_x)
+                ny = np.concatenate(cand_nei_y)
+                nx = np.concatenate(cand_nei_x)
 
-                if len(final_migrate_idx) == 0:
-                    continue
+                total = len(ay)
+                if total > 0:
+                    prob_mask = np.random.random(total) < self.fluid_migration_probability
+                    ay, ax, ny, nx = ay[prob_mask], ax[prob_mask], ny[prob_mask], nx[prob_mask]
 
-                # Limit migrations for stability
-                max_migrations = min(len(final_migrate_idx), 50)
-                final_migrate_idx = final_migrate_idx[:max_migrations]
+                    limit = min(len(ay), 50)
+                    if limit > 0:
+                        sel = np.random.choice(len(ay), size=limit, replace=False)
+                        ay, ax, ny, nx = ay[sel], ax[sel], ny[sel], nx[sel]
 
-                # Get final coordinates
-                migrate_air_y = valid_air_y[final_migrate_idx]
-                migrate_air_x = valid_air_x[final_migrate_idx]
-                migrate_neighbor_y = valid_neighbor_y[final_migrate_idx]
-                migrate_neighbor_x = valid_neighbor_x[final_migrate_idx]
+                        # ------------------------------------------------------------------
+                        # Ensure each grid index participates in AT MOST one swap this pass.
+                        # This prevents material "loss" when two candidate moves target the
+                        # same cell (or when one cell is both a source and a target).
+                        # ------------------------------------------------------------------
+                        ay, ax, ny, nx = self._dedupe_swap_pairs(ay, ax, ny, nx)
 
-                # Vectorized material swapping
-                if len(final_migrate_idx) > 0:
-                    air_materials = self.material_types[migrate_air_y, migrate_air_x].copy()
-                    neighbor_materials_swap = self.material_types[migrate_neighbor_y, migrate_neighbor_x].copy()
+                        # Debug-mode assertion: verify true uniqueness
+                        if __debug__:
+                            assert len(np.unique(ay * self.width + ax)) == len(ay)
+                            assert len(np.unique(ny * self.width + nx)) == len(ny)
 
-                    self.material_types[migrate_neighbor_y, migrate_neighbor_x] = air_materials
-                    self.material_types[migrate_air_y, migrate_air_x] = neighbor_materials_swap
-                    changes_made = True
-
-                    # Limit to prevent too many changes per timestep
-                    break
+                        # Perform the swaps
+                        air_mats = self.material_types[ay, ax].copy()
+                        nei_mats = self.material_types[ny, nx].copy()
+                        self.material_types[ny, nx] = air_mats
+                        self.material_types[ay, ax] = nei_mats
+                        changes_made = True
 
         return changes_made
 
@@ -1947,11 +2076,17 @@ class GeologySimulation:
         # Original mobility conditions: gases, liquids, and hot solids
         is_gas = ((sample_materials == MaterialType.AIR) |
                   (sample_materials == MaterialType.WATER_VAPOR))
-        is_liquid = ((sample_materials == MaterialType.WATER) |
-                     (sample_materials == MaterialType.MAGMA))
-        is_hot_solid = (sample_temps > 1200.0)  # Hot solids can flow
+        # Liquids that can buoyantly migrate (exclude magma which should stay until erupting)
+        is_liquid = (sample_materials == MaterialType.WATER)
+        is_hot_solid = (sample_temps > self.hot_solid_temperature_threshold)  # Hot solids behave like fluids
 
-        mobile_mask = is_gas | is_liquid | is_hot_solid
+        # Light cold solids (e.g. ICE, PUMICE) can also migrate through fluids
+        is_light_solid = (
+            (sample_materials == MaterialType.ICE) |
+            (sample_materials == MaterialType.PUMICE)
+        )
+
+        mobile_mask = is_gas | is_liquid | is_hot_solid | is_light_solid
         if not np.any(mobile_mask):
             return False
 
@@ -1960,98 +2095,111 @@ class GeologySimulation:
         mobile_y = sample_y[mobile_indices]
         mobile_x = sample_x[mobile_indices]
 
-        # Original neighbor checking logic - randomized order for each cell
-        neighbor_offsets = self._get_neighbors(num_neighbors=self.neighbor_count, shuffle=True)
+        # Build isotropic offset list (radius ≤2)
+        offsets = []
+        for dy in range(-2, 3):
+            for dx in range(-2, 3):
+                if dy == 0 and dx == 0:
+                    continue
+                if self._circular_kernel_5x5[dy + 2, dx + 2]:
+                    offsets.append((dy, dx))
 
-        # Process each neighbor direction (preserves original local physics)
-        for dy, dx in neighbor_offsets:
-            # Calculate neighbor positions for all mobile cells
+        # Pool all candidate swaps
+        cand_m_y = []
+        cand_m_x = []
+        cand_n_y = []
+        cand_n_x = []
+
+        for dy, dx in offsets:
             neighbor_y = mobile_y + dy
             neighbor_x = mobile_x + dx
 
-            # Bounds check - vectorized
-            in_bounds = ((neighbor_y >= 0) & (neighbor_y < self.height) &
-                        (neighbor_x >= 0) & (neighbor_x < self.width))
-
+            in_bounds = (
+                (neighbor_y >= 0) & (neighbor_y < self.height) &
+                (neighbor_x >= 0) & (neighbor_x < self.width)
+            )
             if not np.any(in_bounds):
                 continue
 
-            # Filter to valid neighbors
-            valid_indices = np.where(in_bounds)[0]
-            valid_mobile_y = mobile_y[valid_indices]
-            valid_mobile_x = mobile_x[valid_indices]
-            valid_neighbor_y = neighbor_y[valid_indices]
-            valid_neighbor_x = neighbor_x[valid_indices]
+            vidx = np.where(in_bounds)[0]
+            m_y = mobile_y[vidx]
+            m_x = mobile_x[vidx]
+            n_y = neighbor_y[vidx]
+            n_x = neighbor_x[vidx]
 
-            # Check if neighbors are non-space materials - vectorized
-            neighbor_materials = self.material_types[valid_neighbor_y, valid_neighbor_x]
+            neighbor_materials = self.material_types[n_y, n_x]
             is_non_space = (neighbor_materials != MaterialType.SPACE)
-
             if not np.any(is_non_space):
                 continue
 
-            # Filter to non-space neighbors
-            ns_indices = np.where(is_non_space)[0]
-            final_mobile_y = valid_mobile_y[ns_indices]
-            final_mobile_x = valid_mobile_x[ns_indices]
-            final_neighbor_y = valid_neighbor_y[ns_indices]
-            final_neighbor_x = valid_neighbor_x[ns_indices]
+            ns_idx = np.where(is_non_space)[0]
+            m_y = m_y[ns_idx]; m_x = m_x[ns_idx]
+            n_y = n_y[ns_idx]; n_x = n_x[ns_idx]
 
-            # Vectorized density and distance calculations (original physics)
-            mobile_densities = effective_density_grid[final_mobile_y, final_mobile_x]
-            neighbor_densities = effective_density_grid[final_neighbor_y, final_neighbor_x]
-            mobile_distances = distances[final_mobile_y, final_mobile_x]
-            neighbor_distances = distances[final_neighbor_y, final_neighbor_x]
+            mobile_densities = effective_density_grid[m_y, m_x]
+            neighbor_densities = effective_density_grid[n_y, n_x]
+            mobile_distances = distances[m_y, m_x]
+            neighbor_distances = distances[n_y, n_x]
 
-            # Original buoyancy physics - vectorized
-            # Case 1: Mobile cell closer to center but less dense (should rise)
             case1 = (mobile_distances < neighbor_distances) & (mobile_densities < neighbor_densities)
-            # Case 2: Mobile cell farther from center but more dense (should sink)
             case2 = (mobile_distances > neighbor_distances) & (mobile_densities > neighbor_densities)
             should_swap = case1 | case2
 
-            # Original density difference threshold - vectorized
-            min_densities = np.minimum(mobile_densities, neighbor_densities)
-            max_densities = np.maximum(mobile_densities, neighbor_densities)
-            density_ratios = np.divide(max_densities, min_densities, out=np.ones_like(max_densities), where=(min_densities > 0))
-            significant_diff = density_ratios >= self.density_ratio_threshold
+            min_d = np.minimum(mobile_densities, neighbor_densities)
+            max_d = np.maximum(mobile_densities, neighbor_densities)
+            ratio = np.divide(max_d, min_d, out=np.ones_like(max_d), where=(min_d > 0))
+            significant = ratio >= self.density_ratio_threshold
 
-            # Final swap condition (original logic)
-            final_swap = should_swap & significant_diff
+            final = should_swap & significant
+            if np.any(final):
+                idx = np.where(final)[0]
+                cand_m_y.append(m_y[idx])
+                cand_m_x.append(m_x[idx])
+                cand_n_y.append(n_y[idx])
+                cand_n_x.append(n_x[idx])
 
-            if not np.any(final_swap):
-                continue
+        if cand_m_y:
+            my = np.concatenate(cand_m_y)
+            mx = np.concatenate(cand_m_x)
+            ny = np.concatenate(cand_n_y)
+            nx = np.concatenate(cand_n_x)
 
-            # Apply random probability (preserves stochastic nature)
-            swap_indices = np.where(final_swap)[0]
-            random_mask = np.random.random(len(swap_indices)) < self.density_swap_probability
-            final_swap_indices = swap_indices[random_mask]
+            total = len(my)
+            if total > 0:
+                prob_mask = np.random.random(total) < self.density_swap_probability
+                my, mx, ny, nx = my[prob_mask], mx[prob_mask], ny[prob_mask], nx[prob_mask]
 
-            if len(final_swap_indices) == 0:
-                continue
+                # perform swaps (limit one per mobile cell)
+                limit = len(my)
+                if limit > 0:
+                    # ------------------------------------------------------------------
+                    # Swap deduplication – ensure every cell appears at most once.
+                    # ------------------------------------------------------------------
+                    src_flat = my * self.width + mx
+                    tgt_flat = ny * self.width + nx
 
-            # Get cells to swap
-            swap_mobile_y = final_mobile_y[final_swap_indices]
-            swap_mobile_x = final_mobile_x[final_swap_indices]
-            swap_neighbor_y = final_neighbor_y[final_swap_indices]
-            swap_neighbor_x = final_neighbor_x[final_swap_indices]
+                    _, src_unique_idx = np.unique(src_flat, return_index=True)
+                    _, tgt_unique_idx = np.unique(tgt_flat, return_index=True)
+                    unique_idx = np.intersect1d(src_unique_idx, tgt_unique_idx)
 
-            # Vectorized swapping (preserves original swap mechanics)
-            if len(final_swap_indices) > 0:
-                # Swap materials
-                mobile_materials = self.material_types[swap_mobile_y, swap_mobile_x].copy()
-                neighbor_materials_swap = self.material_types[swap_neighbor_y, swap_neighbor_x].copy()
-                self.material_types[swap_mobile_y, swap_mobile_x] = neighbor_materials_swap
-                self.material_types[swap_neighbor_y, swap_neighbor_x] = mobile_materials
+                    my, mx = my[unique_idx], mx[unique_idx]
+                    ny, nx = ny[unique_idx], nx[unique_idx]
 
-                # Swap temperatures (convective heat transfer)
-                mobile_temps = self.temperature[swap_mobile_y, swap_mobile_x].copy()
-                neighbor_temps = self.temperature[swap_neighbor_y, swap_neighbor_x].copy()
-                self.temperature[swap_mobile_y, swap_mobile_x] = neighbor_temps
-                self.temperature[swap_neighbor_y, swap_neighbor_x] = mobile_temps
+                    if __debug__:
+                        assert len(np.unique(my * self.width + mx)) == len(my)
+                        assert len(np.unique(ny * self.width + nx)) == len(ny)
 
-                changes_made = True
-                break  # Only one swap per cell per iteration (original behavior)
+                    mobile_mats = self.material_types[my, mx].copy()
+                    neighbor_mats = self.material_types[ny, nx].copy()
+                    self.material_types[my, mx] = neighbor_mats
+                    self.material_types[ny, nx] = mobile_mats
+
+                    mobile_temps = self.temperature[my, mx].copy()
+                    neighbor_temps = self.temperature[ny, nx].copy()
+                    self.temperature[my, mx] = neighbor_temps
+                    self.temperature[ny, nx] = mobile_temps
+
+                    changes_made = True
 
         # Handle phase transitions for water/vapor (original logic)
         if changes_made:
@@ -2106,7 +2254,7 @@ class GeologySimulation:
         )
 
         # Surface cells are those adjacent to space or outer atmosphere
-        surface_candidates = ndimage.binary_dilation(space_mask, structure=self._circular_kernel_3x3) & non_space_mask
+        surface_candidates = ndimage.binary_dilation(space_mask, structure=self._circular_kernel_5x5) & non_space_mask
 
         if not np.any(surface_candidates):
             return working_temp
@@ -2189,3 +2337,100 @@ class GeologySimulation:
         self.thermal_fluxes['radiative_output'] = total_radiative_power
 
         return working_temp
+
+    def _settle_unsupported_cells(self) -> bool:
+        """Single-pass vectorised drop of unsupported material toward COM.
+        Runs in O(N) time; returns True if any swaps performed."""
+
+        matter_mask = (self.material_types != MaterialType.SPACE)
+        if not np.any(matter_mask):
+            return False
+
+        cy, cx = map(int, self.center_of_mass)
+        y_idx, x_idx = np.indices(self.material_types.shape)
+
+        # One-cell step toward centre of mass (gravity direction)
+        dst_y = np.clip(y_idx - np.sign(y_idx - cy), 0, self.height - 1)
+        dst_x = np.clip(x_idx - np.sign(x_idx - cx), 0, self.width  - 1)
+
+        # Identify destination material and its "fluid" status (not solid)
+        dst_materials = self.material_types[dst_y, dst_x]
+        # Build a boolean mask for fluids (AIR, WATER, etc., including SPACE)
+        # This lookup is vectorised via numpy's vectorise over material properties.
+        unique_mats = list(set(dst_materials.flatten()))
+        fluid_lookup = {m: (not self.material_db.get_properties(m).is_solid) for m in unique_mats}
+        dst_is_fluid = np.vectorize(fluid_lookup.get)(dst_materials)
+
+        # Density comparison: move if current cell is denser than destination fluid
+        src_density = self.density
+        dst_density = self.density[dst_y, dst_x]
+
+        heavier_than_dest = src_density > dst_density
+
+        movers_mask = matter_mask & dst_is_fluid & heavier_than_dest
+        if not np.any(movers_mask):
+            return False
+
+        sy, sx = np.where(movers_mask)
+        ty, tx = dst_y[movers_mask], dst_x[movers_mask]
+
+        sy, sx, ty, tx = self._dedupe_swap_pairs(sy, sx, ty, tx)
+
+        if len(sy) == 0:
+            return False
+
+        moving_mats   = self.material_types[sy, sx].copy()
+        moving_temps  = self.temperature[sy, sx].copy()
+        dest_mats     = self.material_types[ty, tx].copy()
+        dest_temps    = self.temperature[ty, tx].copy()
+
+        # Swap materials and temperatures
+        self.material_types[ty, tx] = moving_mats
+        self.temperature[ty, tx]    = moving_temps
+
+        self.material_types[sy, sx] = dest_mats  # lighter fluid rises
+        self.temperature[sy, sx]    = dest_temps
+
+        return True
+
+    def reset(self):
+        """Completely reset the simulation to its initial planetary state.
+
+        This reproduces the same behavior as the visualizer's keyboard
+        'R' shortcut and is now the canonical way to reset a simulation
+        instance. It preserves the configuration parameters (grid size,
+        performance options, etc.) while re-initializing all dynamic state.
+        """
+        # Re-initialize planetary setup and derived fields
+        self._setup_planetary_conditions()
+        self._calculate_planetary_pressure()
+
+        # Reset per-cell dynamic fields
+        self.age.fill(0.0)
+        self.power_density.fill(0.0)
+
+        # Reset global counters and history
+        self.time = 0.0
+        self.history.clear()
+        self._adaptive_time_steps = []
+
+        # Ensure subsequent steps will perform settling when needed
+        if hasattr(self, "_need_settle"):
+            self._need_settle = True
+
+        # Clear time-series data used for graphs
+        for key in self.time_series:
+            self.time_series[key].clear()
+
+        # Recompute material properties so all cached values are valid
+        self._properties_dirty = True
+        self._update_material_properties()
+
+        # Reset thermal flux bookkeeping
+        self.thermal_fluxes = {
+            'solar_input': 0.0,
+            'radiative_output': 0.0,
+            'internal_heating': 0.0,
+            'atmospheric_heating': 0.0,
+            'net_flux': 0.0,
+        }
