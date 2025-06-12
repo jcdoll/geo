@@ -11,6 +11,7 @@ try:
 except ImportError:
     from materials import MaterialType, MaterialDatabase
 from scipy import ndimage
+import time
 
 class GeologySimulation:
     """Main simulation engine for 2D geological processes"""
@@ -106,6 +107,10 @@ class GeologySimulation:
         self.interface_diffusivity_enhancement = 1.5    # Enhanced heat transfer at material interfaces
         self.surface_radiation_depth_fraction = 0.1     # Fraction of cell depth that participates in surface radiation
         self.radiative_cooling_efficiency = 0.9         # Cooling efficiency factor for Stefan-Boltzmann radiation (increased for better balance)
+        
+        # Clamp for unrealistic vacuum thermal diffusivity to maintain numerical stability (m²/s)
+        # Typical rocks/water have α ~1e-6–1e-4; we cap at a generous 1e-3 to stay safe
+        self.max_thermal_diffusivity = 1e-3
 
         # Temperature constants
         self.space_temperature = 2.7                    # Cosmic background temperature (K)
@@ -184,8 +189,15 @@ class GeologySimulation:
         self.diffusion_stencil = "radius2"
 
         # interval (macro-steps) between deterministic settle sweeps
-        self.settle_interval = 5
+        self.settle_interval = 1
         self._need_settle = True  # trigger initial settling once
+
+        # Logging / instrumentation controls
+        self.logging_enabled = False   # Toggle with visualizer (shortcut 'L')
+        self._perf_times: dict[str, float] = {}  # Performance timings per step
+
+        # Max cells a chunk can fall in one settle pass (set to float('inf') for unlimited)
+        self.terminal_settle_velocity = 3
 
     def _setup_performance_config(self, quality: int):
         """Setup performance configuration based on quality level"""
@@ -408,8 +420,9 @@ class GeologySimulation:
         # Debug info
         avg_temp_before = np.mean(self.temperature[non_space_mask]) - 273.15 if np.any(non_space_mask) else 0.0
         avg_temp_after = np.mean(working_temp[non_space_mask]) - 273.15 if np.any(non_space_mask) else 0.0
-        print(f"DEBUG OPERATOR SPLIT: dt={self.dt:.3f}y, diff_factor={diffusion_stability:.3f}")
-        print(f"DEBUG TEMP: {avg_temp_before:.1f}°C → {avg_temp_after:.1f}°C (Δ={avg_temp_after-avg_temp_before:.1f}°C)")
+        if self.logging_enabled:
+            self.logger.debug(
+                f"Diffusion sub-steps: {self._actual_substeps}, ΔT planet avg: {avg_temp_before:6.1f}→{avg_temp_after:6.1f} °C")
 
         return working_temp, overall_stability
 
@@ -442,6 +455,9 @@ class GeologySimulation:
                     enhancement_mask = interface_mask & valid_thermal
                     if np.any(enhancement_mask):
                         thermal_diffusivity[enhancement_mask] *= self.interface_diffusivity_enhancement
+
+        # Clamp extreme thermal diffusivity values (e.g., near-vacuum cells)
+        thermal_diffusivity = np.clip(thermal_diffusivity, 0.0, self.max_thermal_diffusivity)
 
         # Stability analysis for PURE DIFFUSION only (no sources)
         dx_squared = self.cell_size ** 2
@@ -787,11 +803,14 @@ class GeologySimulation:
         src_y: np.ndarray, src_x: np.ndarray,
         tgt_y: np.ndarray, tgt_x: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Return pair arrays where each grid index appears at most once.
+        """Deduplicate swap pairs so that *no* grid cell appears in more than
+        one pair – neither as a source nor as a destination.
 
-        The first occurrence (lowest index) is preserved; duplicates are
-        dropped.  Debug assertions guarantee uniqueness when not running
-        with the -O flag.
+        1.  Build flat indices for sources and destinations.
+        2.  Identify any cell that appears more than once across the *union*
+            of the two arrays.  These represent conflicting moves and are
+            removed entirely (first‐come wins to keep logic simple).
+        3.  Preserve the original ordering for reproducibility.
         """
 
         if len(src_y) == 0:
@@ -800,16 +819,25 @@ class GeologySimulation:
         src_flat = src_y * self.width + src_x
         tgt_flat = tgt_y * self.width + tgt_x
 
-        _, src_unique = np.unique(src_flat, return_index=True)
-        _, tgt_unique = np.unique(tgt_flat, return_index=True)
+        # Identify cells that participate multiple times (either as src or tgt)
+        combined = np.concatenate([src_flat, tgt_flat])
+        unique_cells, counts = np.unique(combined, return_counts=True)
+        conflict_cells = unique_cells[counts > 1]
 
-        keep = np.intersect1d(src_unique, tgt_unique)
+        # Build mask of pairs that are conflict-free
+        conflict_src = np.in1d(src_flat, conflict_cells)
+        conflict_tgt = np.in1d(tgt_flat, conflict_cells)
+        keep_mask = ~(conflict_src | conflict_tgt)
 
         if __debug__:
-            assert len(np.unique(src_flat[keep])) == len(keep)
-            assert len(np.unique(tgt_flat[keep])) == len(keep)
+            # After filtering, every cell should appear exactly once overall
+            sf = src_flat[keep_mask]; tf = tgt_flat[keep_mask]
+            assert len(sf) == len(np.unique(sf))
+            assert len(tf) == len(np.unique(tf))
+            # Ensure disjoint sets
+            assert np.intersect1d(sf, tf).size == 0
 
-        return src_y[keep], src_x[keep], tgt_y[keep], tgt_x[keep]
+        return src_y[keep_mask], src_x[keep_mask], tgt_y[keep_mask], tgt_x[keep_mask]
 
     def _calculate_temperature_factors(self, threshold: float, scale: float = 200.0, max_factor: float = 10.0) -> np.ndarray:
         """Calculate exponential temperature factors for mobility"""
@@ -853,6 +881,21 @@ class GeologySimulation:
                 for i in cond_indices:
                     y, x = cond_coords[0][i], cond_coords[1][i]
                     self.material_types[y, x] = MaterialType.WATER
+
+        # ------------------------------------------------------------------
+        # Deposition: very cold water vapor freezes directly to ICE
+        # ------------------------------------------------------------------
+        # TODO: This should just be a standard material phase transition, deterministic
+        deposit_mask = vapor_mask & (self.temperature < 250)  # < -23 °C
+        if np.any(deposit_mask):
+            dep_coords = np.where(deposit_mask)
+            num_dep = len(dep_coords[0])
+            dep_fraction = 0.05
+            dep_count = max(1, int(num_dep * dep_fraction))
+            dep_indices = np.random.choice(num_dep, size=dep_count, replace=False)
+            for i in dep_indices:
+                y, x = dep_coords[0][i], dep_coords[1][i]
+                self.material_types[y, x] = MaterialType.ICE
 
     def _get_porosity(self, material_type):
         """Get porosity for a material type"""
@@ -1338,7 +1381,7 @@ class GeologySimulation:
         self.power_density[cooling_y, cooling_x] -= volumetric_power_density
 
         # Track total radiative output for debugging
-        total_radiative_power = np.sum(volumetric_power_density * (self.cell_size ** 3))  # W
+        total_radiative_power = np.sum(volumetric_power_density * (self.cell_size ** 3))  # W (positive magnitude)
         self.thermal_fluxes['radiative_output'] = total_radiative_power
 
         return working_temp
