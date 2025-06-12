@@ -936,3 +936,120 @@ Empirically, profiling shows:
 * Single isotropic "swap if heavier" prototype: **~20 ms** with identical physics but no early masking.
 
 Hence the current architecture is both faster **and** clearer, while still producing physically plausible results.  Each pass can be toggled or refined independently without risking cross-coupling bugs.
+
+## Unified Kinematics: Pressure- and Density-Driven Mass Motion
+
+The previous sections document **separate** routines for gravitational collapse, density stratification, and fluid migration.  These capture many first-order behaviours but do not yet model:
+• lateral flow from **pressure gradients** (e.g.
+  water squirting through a fissure)
+• dynamic buoyancy in a *single* momentum framework
+• feedback between velocity, pressure, and material state.
+
+This section outlines a **single kinematic equation** that subsumes those effects while remaining suitable for a cellular-automata engine.
+
+### Governing Momentum Equation (2-D Cartesian grid)
+```
+∂𝐯/∂t =  -∇P / ρ                         ⏤ pressure-gradient acceleration
+         + 𝐠                              ⏤ body-force of gravity (toward COM)
+         + ν ∇²𝐯                          ⏤ viscous / numerical diffusion
+         + 𝐅_buoyancy                    ⏤ Archimedes term (density contrast)
+         + 𝐅_material                    ⏤ material strength & drag
+```
+Where
+• **𝐯(x,y,t)**   cell-centred velocity vector (m s⁻¹)  
+• **P(x,y,t)**    scalar pressure field (Pa)            
+• **ρ(x,y,t)**    *effective* density (includes thermal expansion) (kg m⁻³)  
+• **ν**           kinematic viscosity (m² s⁻¹) – piecewise per material  
+• **𝐠(x,y)**      gravity vector pointing to **COM**  
+
+Buoyancy is written explicitly:
+```
+𝐅_buoyancy =  (ρ_ref − ρ) / ρ   · 𝐠
+```
+with ρ_ref equal to the local average density of the surrounding fluid envelope (air, water, magma, etc.).
+
+For solids, a *drag / rigidity* term suppresses flow so they behave quasi-static:
+```
+𝐅_material = -k_solid · 𝐯         (k_solid ≫ 1 for competent rock)
+```
+Liquids and gases set **k_solid ≈ 0**.
+
+### Pressure Closure (Pseudo-Incompressible)
+To stay inexpensive we adopt the **pseudo-incompressible** assumption (density changes via temperature/phase, not acoustic waves).  Enforcing ∇·𝐯 = 0 yields a Poisson equation each macro-step:
+```
+∇²P = ρ / Δt · ∇·𝐯* ,             with 𝐯* the provisional velocity without the −∇P term.
+```
+We solve this with Successive-Over-Relaxation (SOR) or Jacobi iterations until the divergence is below a tolerance (≲10⁻³).
+
+### Discretisation
+• Grid spacing **Δx = Δy = cell_size** (usually 50 m).  
+• Central differences for ∇P and ∇²𝐯.  
+• Forward Euler or semi-implicit step for viscosity.  
+• **CFL** constraint: Δt ≤ min(Δx / |𝐯|) with a safety factor.
+
+### Boundary Conditions
+• Cells bordering **SPACE** use P = 0 (vacuum).  
+• No-slip (𝐯 = 0) at solid boundaries unless cracked/open.  
+• Open vents/fissures inherit the neighbour pressure for outflow.
+
+### Expected Behaviours Captured
+1. **Gravity**: body force term.  
+2. **Low-density rise / high-density sink**: buoyancy term.  
+3. **Fluid outflow / lateral seepage**: −∇P / ρ term.  
+4. **Collapse when support melts**: rigidity term drops as T→melt ⇒ 𝐅_material →0 so the object accelerates downward.
+
+---
+## Implementation Roadmap & Performance Strategy (≤ 16 ms on 100 × 100)
+
+1. **Add velocity fields** `vx, vy` (float64, shape (h,w)).  Initialise to 0.
+2. **Provisional Velocity** – compute all forces *except* pressure, vectorised NumPy:  
+   `vx += Δt * ax`, `vy += Δt * ay`.
+3. **Pressure Solve** – 15–25 Jacobi/SOR iterations:  
+   ```python
+   for iter in range(max_iter):
+       P[1:-1,1:-1] = 0.25*(P[:-2,1:-1]+P[2:,1:-1]+P[1:-1,:-2]+P[1:-1,2:] 
+                              - rhs*dx*dx)
+   ```
+   • `rhs = ρ/Δt * divergence(vx*,vy*)`  
+   • Stop early when max residual < 1 Pa.
+4. **Velocity Projection** – subtract gradient:  
+   `vx -= Δt/ρ * (P[:,2:]-P[:,:-2])/(2Δx)` (analogous in y).
+5. **Material Advection** – use *semi-Lagrangian* back-trace (two bilinear probes per cell) → stable at large Δt.
+6. **Phase / density update** – reuse existing metamorphism functions; recompute ρ, ν.
+7. **Sparse Updates** – keep a boolean `active_mask` (cells where |𝐯|, |Ṫ|, or material change > ε).  Only those and their 1-cell halo enter steps 2–5.
+8. **Quality Levels** – reuse existing `quality` flag:  
+   • **Full**: whole grid every step.  
+   • **Balanced**: update `active_mask` only.  
+   • **Fast**: subsample active cells (e.g., every other cell) each frame.
+9. **Solver Optimisation**  
+   • Pre-compute 1/ρ where possible.  
+   • Use `numba.njit(parallel=True)` or move the Poisson solve to Cython.
+10. **Frame-Time Budget (100×100)**  
+    | Stage | Target Time | Notes |
+    |-------|-------------|-------|
+    | Force assembly        | ≤ 1 ms | vectorised NumPy |
+    | Poisson (20 iter)     | ≤ 7 ms | SOR ω≈1.7, early-out |
+    | Projection            | ≤ 1 ms | simple gradients |
+    | Advection             | ≤ 4 ms | semi-Lagrangian, only active cells |
+    | Misc/Book-keeping     | ≤ 3 ms | phase, IO, logging |
+    Total ≈ **16 ms** → 60 fps (safety margin included).
+
+11. **Validation Tests**
+    • Rising bubble test (air in water).  
+    • Dam-break pressure surge.  
+    • Rock-on-ice melt collapse.  
+    • Hydrostatic rest ‑ zero velocity residual.
+
+12. **Staged Roll-Out**
+    a. Implement velocity & pressure arrays (no movement yet).  
+    b. Enable gravity + buoyancy; verify static pressure.  
+    c. Add pressure solve & projection.  
+    d. Replace density-stratification / collapse with velocity-driven advection.  
+    e. Benchmark & tune `active_mask` heuristics.
+
+13. **Maintenance**
+    • Keep the old three-pass system behind a feature flag for regression comparison.  
+    • Unit-test the Poisson solver separately.  
+    • Plot residual vs iteration each CI run to catch performance drifts.
+
+> With these steps we gain a single, physically self-consistent motion model while preserving interactive frame rates on modest grids.
