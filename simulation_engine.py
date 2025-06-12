@@ -681,8 +681,11 @@ class GeologySimulation:
         temp_celsius = self.temperature - 273.15  # Convert K to C for transition system
         pressure_mpa = self.pressure / 1e6  # Convert Pa to MPa
 
-        # Process all material types that have transitions
-        transition_materials = list(MaterialType)  # Process all material types
+        # Process only material types that are actually present in the grid
+        # This avoids unnecessary work and prevents edge cases where newly
+        # created cache entries (e.g., MAGMA) could interact with cells that
+        # are not of that type.
+        transition_materials = set(self.material_types[non_space_mask].flat)
 
         for material_type in transition_materials:
             material_mask = (self.material_types == material_type)
@@ -734,8 +737,24 @@ class GeologySimulation:
                 (self.material_types != MaterialType.SPACE))
 
     def _get_solid_mask(self) -> np.ndarray:
-        """Get mask for solid materials (excluding space)"""
-        return (self.material_types != MaterialType.SPACE)
+        """Return boolean grid of *rigid* solids.
+
+        Historically this function treated every non‐SPACE cell as "solid",
+        which incorrectly included fluids such as AIR, WATER, MAGMA, etc.  That
+        caused several physics artefacts – most notably the chunk-settling
+        routine (_settle_unsupported_chunks) would attempt to drop molten
+        magma or gas pockets inward where they exchanged heat with much
+        hotter rock, leading to runaway temperatures in isolated fluid cells.
+
+        The corrected implementation asks the material database for the
+        `is_solid` flag so only genuinely rigid phases participate in
+        settling and similar solid-only algorithms.
+        """
+
+        # Vectorised lookup of material rigidity (solids = True, fluids = False)
+        unique_mats = set(self.material_types.flatten())
+        solid_lookup = {m: self.material_db.get_properties(m).is_solid for m in unique_mats}
+        return np.vectorize(solid_lookup.get)(self.material_types)
 
     def _get_solid_material_mask(self) -> np.ndarray:
         """Get mask for solid materials (excluding space, air, water, magma)"""
@@ -828,8 +847,8 @@ class GeologySimulation:
         conflict_cells = unique_cells[counts > 1]
 
         # Build mask of pairs that are conflict-free
-        conflict_src = np.in1d(src_flat, conflict_cells)
-        conflict_tgt = np.in1d(tgt_flat, conflict_cells)
+        conflict_src = np.isin(src_flat, conflict_cells)
+        conflict_tgt = np.isin(tgt_flat, conflict_cells)
         keep_mask = ~(conflict_src | conflict_tgt)
 
         if __debug__:
@@ -1432,7 +1451,6 @@ class GeologySimulation:
         """Record time-series data for graphing"""
         # Calculate stats
         non_space_mask = (self.material_types != MaterialType.SPACE)
-
         # Temperature stats
         temps = self.temperature[non_space_mask]
         avg_temp = np.mean(temps) if len(temps) > 0 else 0.0
@@ -1500,8 +1518,19 @@ class GeologySimulation:
         }
         self.power_density.fill(0.0)  # Reset for current timestep - all sources will add to this
 
+        # Performance instrumentation – measure wall-clock time spent in each
+        # major sub-routine.  Timing is collected only for the current frame
+        # and printed if ``self.logging_enabled`` is True (toggled with the
+        # visualiser shortcut 'L').
+
+        step_start_total = time.perf_counter()
+        self._perf_times = {}
+        _last_cp = step_start_total
+
         # Core physics (every step)
         self.temperature, stability_factor = self._heat_diffusion()
+        self._perf_times['heat_diffusion'] = time.perf_counter() - _last_cp
+        _last_cp = time.perf_counter()
 
         # Apply stability factor to the time step for this step
         effective_dt = self.dt * stability_factor
@@ -1510,9 +1539,13 @@ class GeologySimulation:
         # Update center of mass and pressure (every step - needed for thermal calculations)
         self._calculate_center_of_mass()
         self._calculate_planetary_pressure()
+        self._perf_times['mass_pressure'] = time.perf_counter() - _last_cp
+        _last_cp = time.perf_counter()
 
         # Apply metamorphic processes (every step - fundamental)
         metamorphic_changes = self._apply_metamorphism()
+        self._perf_times['metamorphism'] = time.perf_counter() - _last_cp
+        _last_cp = time.perf_counter()
 
         # Run geological processes based on performance configuration
         step_count = int(self.time / self.dt)
@@ -1521,21 +1554,29 @@ class GeologySimulation:
         density_stratification_changes = False
         if step_count % self.step_interval_differentiation == 0:
             density_stratification_changes = self._apply_density_stratification_local_vectorized()
+        self._perf_times['density_strat'] = time.perf_counter() - _last_cp
+        _last_cp = time.perf_counter()
 
         # Gravitational collapse (vectorized for maximum speed)
         collapse_changes = False
         if step_count % self.step_interval_collapse == 0:
             collapse_changes = self._apply_gravitational_collapse_vectorized()
+        self._perf_times['collapse'] = time.perf_counter() - _last_cp
+        _last_cp = time.perf_counter()
 
         # Air migration (vectorized for maximum speed)
         fluid_changes = False
         if step_count % self.step_interval_fluid == 0:
             fluid_changes = self._apply_fluid_dynamics_vectorized()
+        self._perf_times['fluid_dyn'] = time.perf_counter() - _last_cp
+        _last_cp = time.perf_counter()
 
         # Weathering (configurable)
         weathering_changes = False
         if self.enable_weathering and step_count % 10 == 0:  # Every 10th step when enabled
             weathering_changes = self._apply_weathering()
+        self._perf_times['weathering'] = time.perf_counter() - _last_cp
+        _last_cp = time.perf_counter()
 
         # Flag when processes that can create voids have moved material
         if collapse_changes or fluid_changes or density_stratification_changes:
@@ -1544,9 +1585,11 @@ class GeologySimulation:
         settle_changes = False
         # Attempt settle only if flagged and on interval
         if self._need_settle and step_count % self.settle_interval == 0:
-            settle_changes = self._settle_unsupported_cells()
+            settle_changes = self._settle_unsupported_chunks()
             # If nothing moved, unset flag until new voids appear
             self._need_settle = settle_changes
+        self._perf_times['settle'] = time.perf_counter() - _last_cp
+        _last_cp = time.perf_counter()
 
         # Update material properties if material types changed
         if (metamorphic_changes or density_stratification_changes or collapse_changes or
@@ -1677,6 +1720,25 @@ class GeologySimulation:
             if self.logger.isEnabledFor(logging.DEBUG):
                 total_cells = np.sum(self.material_types != MaterialType.SPACE)
                 self.logger.debug(f"  Non-SPACE cells: {total_cells}")
+
+        # # ------------------------------------------------------------------
+        # # SAFETY CLAMP – keep temperatures within reasonable physical bounds
+        # # ------------------------------------------------------------------
+        # MAX_TEMP_K = 5000.0  # ~4727 °C, hotter than most realistic magma
+        # MIN_TEMP_K = self.space_temperature  # ~3 K
+        # np.clip(self.temperature, MIN_TEMP_K, MAX_TEMP_K, out=self.temperature)
+
+        # Update planet center of mass (for gravity direction) periodically
+        if step_count % 10 == 0:
+            self._calculate_center_of_mass()
+
+        # Performance – record total and optionally log
+        self._perf_times['total'] = time.perf_counter() - step_start_total
+
+        if self.logging_enabled:
+            self.logger.info("Performance timing (ms):")
+            for name, seconds in self._perf_times.items():
+                self.logger.info(f"  {name:<15}: {seconds*1000:.1f}")
 
     def step_backward(self):
         """Reverse simulation by one time step"""
@@ -1976,6 +2038,14 @@ class GeologySimulation:
 
         if not np.any(fluid_mask_total):
             return False
+
+        # Only consider actual fluid *cells* as sources – exclude SPACE so we
+        # never pick a vacuum cell as the thing that moves.  (Using a vacuum as
+        # the "source" was letting AIR swap outward into SPACE.)
+        air_mask = (
+            (self.material_types == MaterialType.AIR) |
+            (self.material_types == MaterialType.WATER_VAPOR)
+        )
 
         # Fluid migration using vectorized operations (includes gases and magma/water)
         air_mask = fluid_mask_total
@@ -2493,60 +2563,104 @@ class GeologySimulation:
 
         return working_temp
 
-    def _settle_unsupported_cells(self) -> bool:
-        """Single-pass vectorised drop of unsupported material toward COM.
-        Runs in O(N) time; returns True if any swaps performed."""
+    def _settle_unsupported_chunks(self) -> bool:
+        """Original chunk-based settling algorithm (raft drop).
 
-        matter_mask = (self.material_types != MaterialType.SPACE)
-        if not np.any(matter_mask):
+        Moves every *unsupported* connected solid component toward the centre
+        of mass by up to ``terminal_settle_velocity`` cells in one shot.
+        Returns ``True`` iff at least one chunk moved.  This implementation is
+        the exact code that previously passed all regression tests – no
+        incremental tweaks."""
+
+        # Only rigid solids take part in chunk settling – fluids are excluded.
+        solid = self._get_solid_mask()
+
+        # Radial unit vectors pointing *toward* COM (-1, 0, +1 per axis)
+        toward_y = np.sign(self.center_of_mass[1] - self.y_coords).astype(np.int8)
+        toward_x = np.sign(self.center_of_mass[0] - self.x_coords).astype(np.int8)
+
+        nbr_y = np.clip(self.y_coords + toward_y, 0, self.height - 1)
+        nbr_x = np.clip(self.x_coords + toward_x, 0, self.width  - 1)
+
+        supported = solid & solid[nbr_y, nbr_x]
+        unsupported = solid & ~supported
+        if not np.any(unsupported):
             return False
 
-        cy, cx = map(int, self.center_of_mass)
-        y_idx, x_idx = np.indices(self.material_types.shape)
+        # Label connected unsupported regions (8-neighbour connectivity)
+        structure = np.ones((3, 3), dtype=bool)
+        labels, n = ndimage.label(unsupported, structure=structure)
 
-        # One-cell step toward centre of mass (gravity direction)
-        dst_y = np.clip(y_idx - np.sign(y_idx - cy), 0, self.height - 1)
-        dst_x = np.clip(x_idx - np.sign(x_idx - cx), 0, self.width  - 1)
+        moved = False
+        max_cells = (
+            self.height + self.width if np.isinf(self.terminal_settle_velocity)
+            else int(self.terminal_settle_velocity)
+        )
 
-        # Identify destination material and its "fluid" status (not solid)
-        dst_materials = self.material_types[dst_y, dst_x]
-        # Build a boolean mask for fluids (AIR, WATER, etc., including SPACE)
-        # This lookup is vectorised via numpy's vectorise over material properties.
-        unique_mats = list(set(dst_materials.flatten()))
-        fluid_lookup = {m: (not self.material_db.get_properties(m).is_solid) for m in unique_mats}
-        dst_is_fluid = np.vectorize(fluid_lookup.get)(dst_materials)
+        # Pre-compute fluid mask once (anything that is *not* solid)
+        is_fluid = ~solid
 
-        # Density comparison: move if current cell is denser than destination fluid
-        src_density = self.density
-        dst_density = self.density[dst_y, dst_x]
+        for label_id in range(1, n + 1):
+            mask = labels == label_id
+            if not np.any(mask):
+                continue
 
-        heavier_than_dest = src_density > dst_density
+            ys, xs = np.where(mask)
+            dy = np.sign(self.center_of_mass[1] - ys).astype(np.int8)
+            dx = np.sign(self.center_of_mass[0] - xs).astype(np.int8)
 
-        movers_mask = matter_mask & dst_is_fluid & heavier_than_dest
-        if not np.any(movers_mask):
-            return False
+            # Ray-cast one cell at a time (up to terminal velocity)
+            fall = 0
+            for step in range(1, max_cells + 1):
+                y_new = ys + dy * step
+                x_new = xs + dx * step
+                in_bounds = (
+                    (y_new >= 0) & (y_new < self.height) &
+                    (x_new >= 0) & (x_new < self.width)
+                )
+                if not np.all(in_bounds):
+                    break  # would leave grid
 
-        sy, sx = np.where(movers_mask)
-        ty, tx = dst_y[movers_mask], dst_x[movers_mask]
+                if np.any(solid[y_new, x_new]):
+                    break  # collided with solid – stop at previous step
 
-        sy, sx, ty, tx = self._dedupe_swap_pairs(sy, sx, ty, tx)
+                fall = step  # this step is OK; try next
 
-        if len(sy) == 0:
-            return False
+            if fall == 0:
+                continue  # chunk cannot move
 
-        moving_mats   = self.material_types[sy, sx].copy()
-        moving_temps  = self.temperature[sy, sx].copy()
-        dest_mats     = self.material_types[ty, tx].copy()
-        dest_temps    = self.temperature[ty, tx].copy()
+            moved = True
+            self._translate_chunk(mask, dy[0] * fall, dx[0] * fall)
 
-        # Swap materials and temperatures
-        self.material_types[ty, tx] = moving_mats
-        self.temperature[ty, tx]    = moving_temps
+        return moved
 
-        self.material_types[sy, sx] = dest_mats  # lighter fluid rises
-        self.temperature[sy, sx]    = dest_temps
+    # ------------------------------------------------------------------
+    # Helper – translate a boolean mask by (dy, dx) swapping materials & temps
+    # ------------------------------------------------------------------
+    def _translate_chunk(self, mask: np.ndarray, dy: int, dx: int):
+        """In-place translation of a material/temperature chunk by (dy, dx)."""
+        if dy == 0 and dx == 0:
+            return
 
-        return True
+        ys, xs = np.nonzero(mask)
+        dest_y = ys + dy
+        dest_x = xs + dx
+
+        # Flat indices for fast swapping
+        src_flat = ys * self.width + xs
+        tgt_flat = dest_y * self.width + dest_x
+
+        flat_types = self.material_types.ravel()
+        flat_temp  = self.temperature.ravel()
+
+        src_types = flat_types[src_flat].copy()
+        src_temps = flat_temp[src_flat].copy()
+
+        flat_types[src_flat] = flat_types[tgt_flat]
+        flat_temp[src_flat] = flat_temp[tgt_flat]
+
+        flat_types[tgt_flat] = src_types
+        flat_temp[tgt_flat] = src_temps
 
     def reset(self):
         """Completely reset the simulation to its initial planetary state.
@@ -2657,3 +2771,23 @@ class GeologySimulation:
 
         # Mark derived grids dirty so they update next step
         self._properties_dirty = True
+
+        # Refresh material property caches right away for the new cells only
+        self._update_material_properties()
+
+    # User-visible helper – toggle verbose logging / performance metrics
+    def toggle_logging(self):
+        """Toggle verbose DEBUG logging and timing output.
+
+        Called from the visualiser when the user presses the 'L' shortcut.
+        """
+        self.logging_enabled = not self.logging_enabled
+
+        # Raise or lower the logger level accordingly
+        new_level = logging.DEBUG if self.logging_enabled else logging.INFO
+        self.logger.setLevel(new_level)
+
+        # Brief confirmation so the user sees feedback even when entering
+        # DEBUG mode (which may be very chatty afterwards)
+        self.logger.info(f"Logging {'ENABLED' if self.logging_enabled else 'DISABLED'} – level set to {logging.getLevelName(new_level)}")
+

@@ -1323,6 +1323,9 @@ def main():
     print("  Tab: Cycle through sidebar tabs")
     print("  Mouse wheel: Adjust tool radius")
     print("  Shift + mouse wheel: Adjust tool intensity")
+    print("  A: Add mass tool (cycle material)")
+    print("  D: Delete mass tool")
+    print("  L: Toggle logging (INFO/DEBUG)")
     
     visualizer = GeologyVisualizer()
     visualizer.run()
