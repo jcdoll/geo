@@ -206,6 +206,7 @@ class GeologySimulation:
             self.process_fraction_mobile = 1.0      # Process all mobile cells
             self.process_fraction_solid = 1.0       # Process all solid cells
             self.process_fraction_air = 1.0         # Process all air cells
+            self.process_fraction_water = 1.0       # Process all liquid cells (water/magma)
             self.step_interval_differentiation = 1  # Every step
             self.step_interval_collapse = 1         # Every step
             self.step_interval_fluid = 1            # Every step
@@ -221,6 +222,7 @@ class GeologySimulation:
             self.process_fraction_mobile = 0.5      # Process 50% of mobile cells
             self.process_fraction_solid = 0.5       # Process 50% of solid cells
             self.process_fraction_air = 0.5         # Process 50% of air cells
+            self.process_fraction_water = 0.5       # Process 50% of liquid cells
             self.step_interval_differentiation = 2  # Every 2nd step
             self.step_interval_collapse = 2         # Every 2nd step
             self.step_interval_fluid = 3            # Every 3rd step
@@ -236,6 +238,7 @@ class GeologySimulation:
             self.process_fraction_mobile = 0.2      # Process 20% of mobile cells
             self.process_fraction_solid = 0.33      # Process 33% of solid cells
             self.process_fraction_air = 0.25        # Process 25% of air cells
+            self.process_fraction_water = 0.25      # Process 25% of liquid cells
             self.step_interval_differentiation = 3  # Every 3rd step
             self.step_interval_collapse = 4         # Every 4th step
             self.step_interval_fluid = 5            # Every 5th step
@@ -2032,7 +2035,16 @@ class GeologySimulation:
                 air_distances_valid = air_distances[vidx]
 
                 not_space = (neighbor_materials != MaterialType.SPACE)
+                # Allow lateral movement in addition to upward buoyant rise.
+                # "Toward surface" means strictly farther from the center.  A purely
+                # horizontal (lateral) move keeps the radial distance ~equal.  Use a
+                # small tolerance (10 % of a cell size) to treat such moves as
+                # lateral rather than downward.
+
                 toward_surface = neighbor_distances > air_distances_valid
+                lateral_move = np.isclose(neighbor_distances, air_distances_valid, atol=self.cell_size * 0.1)
+
+                toward_surface |= lateral_move
 
                 # Porous or non-solid check
                 props_ok = [not self.material_db.get_properties(m).is_solid or self.material_db.get_properties(m).porosity > 0.1 for m in neighbor_materials]
@@ -2080,6 +2092,101 @@ class GeologySimulation:
                         nei_mats = self.material_types[ny, nx].copy()
                         self.material_types[ny, nx] = air_mats
                         self.material_types[ay, ax] = nei_mats
+                        changes_made = True
+
+        # ------------------------------------------------------------------
+        # SECOND PASS – LIQUID INFILTRATION
+        # Water and magma should be able to flow into neighbouring cavities
+        # (AIR or SPACE) even when those cavities are beside or below the
+        # fluid.  This pass fills holes by swapping liquid cells into adjacent
+        # cavities at equal or lower gravitational potential.
+        # ------------------------------------------------------------------
+
+        liquid_mask = (
+            (self.material_types == MaterialType.WATER) |
+            (self.material_types == MaterialType.MAGMA)
+        )
+
+        cavity_mask = (
+            (self.material_types == MaterialType.AIR) |
+            (self.material_types == MaterialType.SPACE)
+        )
+
+        if np.any(liquid_mask) and np.any(cavity_mask):
+            liquids_near_cavity = liquid_mask & ndimage.binary_dilation(cavity_mask, structure=kernel)
+
+            if np.any(liquids_near_cavity):
+                ly_all, lx_all = np.where(liquids_near_cavity)
+
+                # Sub-sample for performance; use process_fraction_water if defined.
+                sample_frac = getattr(self, 'process_fraction_water', 0.2)
+                total_liq = len(ly_all)
+                sample_size = max(1, int(total_liq * sample_frac))
+                if sample_size < total_liq:
+                    idx = np.random.choice(total_liq, size=sample_size, replace=False)
+                    ly_all, lx_all = ly_all[idx], lx_all[idx]
+
+                liq_distances = distances[ly_all, lx_all]
+
+                cand_ly, cand_lx, cand_cy, cand_cx = [], [], [], []
+
+                for dy, dx in offsets:
+                    cy = ly_all + dy
+                    cx = lx_all + dx
+
+                    in_bounds = (
+                        (cy >= 0) & (cy < self.height) &
+                        (cx >= 0) & (cx < self.width)
+                    )
+                    if not np.any(in_bounds):
+                        continue
+
+                    vidx = np.where(in_bounds)[0]
+                    l_y = ly_all[vidx]; l_x = lx_all[vidx]
+                    cav_y = cy[vidx]; cav_x = cx[vidx]
+
+                    is_cavity = cavity_mask[cav_y, cav_x]
+                    if not np.any(is_cavity):
+                        continue
+
+                    cav_idx = np.where(is_cavity)[0]
+                    l_y = l_y[cav_idx]; l_x = l_x[cav_idx]
+                    cav_y = cav_y[cav_idx]; cav_x = cav_x[cav_idx]
+
+                    cav_distances = distances[cav_y, cav_x]
+                    l_distances = liq_distances[vidx][cav_idx]
+                    same_or_down = cav_distances <= l_distances + (self.cell_size * 0.1)
+
+                    if np.any(same_or_down):
+                        good = np.where(same_or_down)[0]
+                        cand_ly.append(l_y[good])
+                        cand_lx.append(l_x[good])
+                        cand_cy.append(cav_y[good])
+                        cand_cx.append(cav_x[good])
+
+                if cand_ly:
+                    ly = np.concatenate(cand_ly)
+                    lx = np.concatenate(cand_lx)
+                    cy = np.concatenate(cand_cy)
+                    cx = np.concatenate(cand_cx)
+
+                    total_pairs = len(ly)
+                    prob_mask = np.random.random(total_pairs) < self.fluid_migration_probability
+                    ly, lx, cy, cx = ly[prob_mask], lx[prob_mask], cy[prob_mask], cx[prob_mask]
+
+                    ly, lx, cy, cx = self._dedupe_swap_pairs(ly, lx, cy, cx)
+
+                    if len(ly) > 0:
+                        liq_mats = self.material_types[ly, lx].copy()
+                        cav_mats = self.material_types[cy, cx].copy()
+                        self.material_types[cy, cx] = liq_mats
+                        self.material_types[ly, lx] = cav_mats
+
+                        liq_temps = self.temperature[ly, lx].copy()
+                        cav_temps = self.temperature[cy, cx].copy()
+                        self.temperature[cy, cx] = liq_temps
+                        self.temperature[ly, lx] = cav_temps
+
                         changes_made = True
 
         return changes_made
@@ -2212,25 +2319,30 @@ class GeologySimulation:
                 prob_mask = np.random.random(total) < self.density_swap_probability
                 my, mx, ny, nx = my[prob_mask], mx[prob_mask], ny[prob_mask], nx[prob_mask]
 
-                # perform swaps (limit one per mobile cell)
+                # ------------------------------------------------------------------
+                # Swap deduplication – ensure every cell appears at most once across
+                # sources *and* destinations.
+                # ------------------------------------------------------------------
+                my, mx, ny, nx = self._dedupe_swap_pairs(my, mx, ny, nx)
+
+                # ------------------------------------------------------------------
+                # Safety filter: never allow a swap whose destination is SPACE. This
+                # prevents subtle mass-loss bugs where material could be swapped into
+                # vacuum and effectively removed from the planet.
+                # ------------------------------------------------------------------
+                if len(ny) > 0:
+                    dest_space_mask = (self.material_types[ny, nx] == MaterialType.SPACE)
+                    if np.any(dest_space_mask):
+                        keep_mask = ~dest_space_mask
+                        my, mx, ny, nx = my[keep_mask], mx[keep_mask], ny[keep_mask], nx[keep_mask]
+
                 limit = len(my)
                 if limit > 0:
-                    # ------------------------------------------------------------------
-                    # Swap deduplication – ensure every cell appears at most once.
-                    # ------------------------------------------------------------------
-                    src_flat = my * self.width + mx
-                    tgt_flat = ny * self.width + nx
-
-                    _, src_unique_idx = np.unique(src_flat, return_index=True)
-                    _, tgt_unique_idx = np.unique(tgt_flat, return_index=True)
-                    unique_idx = np.intersect1d(src_unique_idx, tgt_unique_idx)
-
-                    my, mx = my[unique_idx], mx[unique_idx]
-                    ny, nx = ny[unique_idx], nx[unique_idx]
-
                     if __debug__:
                         assert len(np.unique(my * self.width + mx)) == len(my)
                         assert len(np.unique(ny * self.width + nx)) == len(ny)
+                        # Destination should never be SPACE after filtering
+                        assert not np.any(self.material_types[ny, nx] == MaterialType.SPACE)
 
                     mobile_mats = self.material_types[my, mx].copy()
                     neighbor_mats = self.material_types[ny, nx].copy()
@@ -2477,3 +2589,71 @@ class GeologySimulation:
             'atmospheric_heating': 0.0,
             'net_flux': 0.0,
         }
+
+    # ------------------------------------------------------------------
+    # Convenience editing helpers
+    # ------------------------------------------------------------------
+    def delete_material_blob(self, x: int, y: int, radius: int = 1):
+        """Remove material in a circular blob by replacing it with SPACE.
+
+        This convenience method is primarily intended for testing and
+        interactive experimentation (e.g., drilling craters).  It performs a
+        simple in‐place edit of the ``material_types`` array without touching
+        any of the dynamic state; material/thermal properties will be updated
+        automatically on the next call to :py:meth:`step_forward`.
+        """
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                if dx * dx + dy * dy <= radius * radius:
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < self.height and 0 <= nx < self.width:
+                        self.material_types[ny, nx] = MaterialType.SPACE
+
+        # Mark derived property grids dirty so they refresh on the next step
+        self._properties_dirty = True
+
+    def add_material_blob(self, x: int, y: int, radius: int, material_type):
+        """Fill a circular patch with the chosen *material_type*.
+
+        The helper is complementary to :py:meth:`delete_material_blob` and is
+        mainly used by the GUI editor/visualiser.  It performs an in-place
+        modification of ``material_types`` and then marks derived property
+        grids dirty so densities, thermal properties, etc. are refreshed on the
+        next simulation step.
+
+        Parameters
+        ----------
+        x, y : int
+            Centre of the blob in grid coordinates.
+        radius : int
+            Radius of the circular area in cells.
+        material_type : MaterialType | int
+            Material to paint.  Accepts either a ``MaterialType`` enum member
+            or the underlying integer code (helpful for quick GUI usage).
+        """
+
+        # Convert plain integers to MaterialType if needed (robust GUI usage)
+        if not isinstance(material_type, MaterialType):
+            try:
+                material_type = MaterialType(material_type)
+            except ValueError:
+                raise ValueError(f"Invalid material_type: {material_type}")
+
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                if dx * dx + dy * dy <= radius * radius:
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < self.height and 0 <= nx < self.width:
+                        self.material_types[ny, nx] = material_type
+                        if material_type == MaterialType.MAGMA:
+                            self.temperature[ny, nx] = max(
+                                self.temperature[ny, nx],
+                                getattr(self, 'melting_temperature', 1200 + 273.15) + 100.0,
+                            )
+                        else:
+                            # Default to near-surface "room" temperature so freshly
+                            # placed rocks don't immediately melt or freeze.
+                            self.temperature[ny, nx] = 300.0  # Kelvin
+
+        # Mark derived grids dirty so they update next step
+        self._properties_dirty = True
