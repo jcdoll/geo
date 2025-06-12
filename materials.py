@@ -61,10 +61,10 @@ class MaterialProperties:
     specific_heat: float  # J/(kg·K)
     strength: float  # MPa (compressive strength)
     porosity: float  # fraction (0-1)
-    emissivity: float  # thermal emissivity (0-1) for radiative cooling
-    albedo: float  # solar albedo (0-1) for solar reflection
-    thermal_expansion: float  # volumetric thermal expansion coefficient (1/K)
     color_rgb: Tuple[int, int, int]  # RGB color for visualization
+    emissivity: float = 0.0  # thermal emissivity (0-1) for radiative cooling
+    albedo: float = 0.0      # solar albedo (0-1) for solar reflection
+    thermal_expansion: float = 0.0  # volumetric expansion coefficient (1/K)
     transitions: List[TransitionRule] = field(default_factory=list)  # All possible transitions for this material
     is_solid: bool = True  # Whether rocks cannot fall through this material (default: solid)
     
@@ -305,7 +305,7 @@ class MaterialDatabase:
                 is_solid=False  # Gas - rocks can fall through it
             ),
             MaterialType.SPACE: MaterialProperties(
-                density=1e-10, thermal_conductivity=1e-10, specific_heat=1e-10,  # Tiny but non-zero to prevent NaN
+                density=1e-10, thermal_conductivity=1e-10, specific_heat=1e-10,  # 0 density for vacuum
                 strength=0, porosity=1,
                 emissivity=0.0, albedo=0.0,  # No emissivity or albedo (perfect vacuum)
                 thermal_expansion=0.0,  # No thermal expansion in vacuum
@@ -336,7 +336,7 @@ class MaterialDatabase:
             MaterialType.AIR: 0.05,
             MaterialType.WATER_VAPOR: 0.05,
             MaterialType.WATER: 0.1,
-            MaterialType.ICE: 0.05,
+            MaterialType.ICE: 0.05
         }
     
     def get_solar_absorption(self, material_type: MaterialType) -> float:
