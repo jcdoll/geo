@@ -1603,7 +1603,14 @@ class GeologySimulation:
         # Record time-series data for graphs
         self._record_time_series_data()
 
-        # Final safety check: ensure SPACE cells stay as SPACE and at cosmic background temp
+        # ------------------------------------------------------------------
+        # Final safety checks
+        # ------------------------------------------------------------------
+
+        # Clamp to 3 K–5000 K (wide but avoids NaN/overflow)
+        np.clip(self.temperature, 3.0, 5000.0, out=self.temperature)
+
+        # Ensure SPACE cells stay at cosmic background temperature and zero pressure
         space_mask = (self.material_types == MaterialType.SPACE)
         self.temperature[space_mask] = self.space_temperature  # Kelvin
         self.pressure[space_mask] = 0.0
@@ -2003,6 +2010,7 @@ class GeologySimulation:
                         cavity_materials = self.material_types[cn_y, cn_x].copy()
                         self.material_types[cn_y, cn_x] = solid_materials
                         self.material_types[cs_y, cs_x] = cavity_materials
+                        self._update_material_properties()
 
                         solid_temps = self.temperature[cs_y, cs_x].copy()
                         self.temperature[cn_y, cn_x] = solid_temps
@@ -2047,9 +2055,26 @@ class GeologySimulation:
             (self.material_types == MaterialType.WATER_VAPOR)
         )
 
+        # Do NOT overwrite the air_mask – we must exclude SPACE cells so that
+        # only actual gas cells attempt to move.  Accidentally including SPACE
+        # as a "fluid source" allowed vacuum pockets to swap with neighbouring
+        # AIR, pulling the atmosphere outward into space.
+
         # Fluid migration using vectorized operations (includes gases and magma/water)
-        air_mask = fluid_mask_total
+        # Keep the original air_mask (AIR + WATER_VAPOR) – SPACE must **not** be
+        # treated as a mobile source.  This prevents the atmosphere from
+        # crawling outward through vacuum.
+        # air_mask = fluid_mask_total  # BUG: This line was causing space to act as mobile fluid!
         distances = self._get_distances_from_center()
+
+        # Build isotropic neighbor offsets (radius ≤2) - used by both air and liquid passes
+        offsets = []
+        for dy in range(-2, 3):
+            for dx in range(-2, 3):
+                if dy == 0 and dx == 0:
+                    continue
+                if self._circular_kernel_5x5[dy + 2, dx + 2]:
+                    offsets.append((dy, dx))
 
         # Find air cells adjacent to non-space materials (using circular kernel to reduce artifacts)
         non_space_mask = (self.material_types != MaterialType.SPACE)
@@ -2067,15 +2092,6 @@ class GeologySimulation:
                 air_coords = (air_coords[0][indices], air_coords[1][indices])
 
             air_distances = distances[air_coords]
-
-            # Build isotropic neighbor offsets (radius ≤2)
-            offsets = []
-            for dy in range(-2, 3):
-                for dx in range(-2, 3):
-                    if dy == 0 and dx == 0:
-                        continue
-                    if self._circular_kernel_5x5[dy + 2, dx + 2]:
-                        offsets.append((dy, dx))
 
             # Pool all potential migration pairs
             cand_air_y = []
@@ -2162,6 +2178,7 @@ class GeologySimulation:
                         nei_mats = self.material_types[ny, nx].copy()
                         self.material_types[ny, nx] = air_mats
                         self.material_types[ay, ax] = nei_mats
+                        self._update_material_properties()
                         changes_made = True
 
         # ------------------------------------------------------------------
@@ -2251,6 +2268,7 @@ class GeologySimulation:
                         cav_mats = self.material_types[cy, cx].copy()
                         self.material_types[cy, cx] = liq_mats
                         self.material_types[ly, lx] = cav_mats
+                        self._update_material_properties()
 
                         liq_temps = self.temperature[ly, lx].copy()
                         cav_temps = self.temperature[cy, cx].copy()
@@ -2418,6 +2436,7 @@ class GeologySimulation:
                     neighbor_mats = self.material_types[ny, nx].copy()
                     self.material_types[my, mx] = neighbor_mats
                     self.material_types[ny, nx] = mobile_mats
+                    self._update_material_properties()
 
                     mobile_temps = self.temperature[my, mx].copy()
                     neighbor_temps = self.temperature[ny, nx].copy()
@@ -2630,37 +2649,40 @@ class GeologySimulation:
                 continue  # chunk cannot move
 
             moved = True
-            self._translate_chunk(mask, dy[0] * fall, dx[0] * fall)
+
+            # Translate each voxel along its own radial direction (rigid body
+            # assumption lifted so that chunks straddling the COM axis move
+            # correctly without leaving the grid).
+            ys_flat = ys
+            xs_flat = xs
+            dest_y = ys_flat + dy * fall
+            dest_x = xs_flat + dx * fall
+
+            # Safety – all dest coords must be inside the grid at this point
+            in_bounds = (
+                (dest_y >= 0) & (dest_y < self.height) &
+                (dest_x >= 0) & (dest_x < self.width)
+            )
+            if not np.all(in_bounds):
+                # Should never happen; skip this chunk rather than crash
+                continue
+
+            src_flat = ys_flat * self.width + xs_flat
+            tgt_flat = dest_y * self.width + dest_x
+
+            flat_types = self.material_types.ravel()
+            flat_temp = self.temperature.ravel()
+
+            src_types = flat_types[src_flat].copy()
+            src_temps = flat_temp[src_flat].copy()
+
+            flat_types[src_flat] = flat_types[tgt_flat]
+            flat_temp[src_flat] = flat_temp[tgt_flat]
+
+            flat_types[tgt_flat] = src_types
+            flat_temp[tgt_flat] = src_temps
 
         return moved
-
-    # ------------------------------------------------------------------
-    # Helper – translate a boolean mask by (dy, dx) swapping materials & temps
-    # ------------------------------------------------------------------
-    def _translate_chunk(self, mask: np.ndarray, dy: int, dx: int):
-        """In-place translation of a material/temperature chunk by (dy, dx)."""
-        if dy == 0 and dx == 0:
-            return
-
-        ys, xs = np.nonzero(mask)
-        dest_y = ys + dy
-        dest_x = xs + dx
-
-        # Flat indices for fast swapping
-        src_flat = ys * self.width + xs
-        tgt_flat = dest_y * self.width + dest_x
-
-        flat_types = self.material_types.ravel()
-        flat_temp  = self.temperature.ravel()
-
-        src_types = flat_types[src_flat].copy()
-        src_temps = flat_temp[src_flat].copy()
-
-        flat_types[src_flat] = flat_types[tgt_flat]
-        flat_temp[src_flat] = flat_temp[tgt_flat]
-
-        flat_types[tgt_flat] = src_types
-        flat_temp[tgt_flat] = src_temps
 
     def reset(self):
         """Completely reset the simulation to its initial planetary state.
