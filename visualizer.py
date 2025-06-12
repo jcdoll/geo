@@ -93,8 +93,8 @@ class GeologyVisualizer:
             'yellow': (255, 255, 100)
         }
         
-        # Simulation state
-        self.simulation = GeologySimulation(sim_width, sim_height, log_level="DEBUG")  # Enable DEBUG logging
+        # Simulation state (start in INFO mode; press 'L' to toggle DEBUG)
+        self.simulation = GeologySimulation(sim_width, sim_height, log_level="INFO")
         self.running = True
         self.paused = True  # Start paused
         self.display_mode = 'materials'  # 'materials', 'temperature', 'pressure'
@@ -105,10 +105,12 @@ class GeologyVisualizer:
         self.max_step_history = 30  # Keep last 30 step times
         
         # Interaction state
-        self.mouse_tool = 'heat'  # 'heat', 'pressure'
+        self.mouse_tool = 'heat'  # 'heat', 'pressure', 'delete', 'add'
         self.tool_radius = 3
         self.tool_intensity = 100
         self.selected_tile = None  # (x, y) coordinates of selected tile
+        self.add_materials = [m for m in MaterialType if m not in (MaterialType.SPACE,)]
+        self._add_material_index = 0
         
         # UI state
         self.sidebar_tab = 'controls'  # 'controls', 'stats', 'composition', 'graphs', 'info'
@@ -186,7 +188,7 @@ class GeologyVisualizer:
         y += spacing * 2
         
         # Tool buttons
-        tools = [('Heat Source', 'heat'), ('Pressure', 'pressure')]
+        tools = [('Heat Source', 'heat'), ('Pressure', 'pressure'), ('Delete', 'delete'), ('Add', 'add')]
         for text, tool in tools:
             buttons.append({
                 'rect': pygame.Rect(x, y, button_width, button_height),
@@ -236,6 +238,9 @@ class GeologyVisualizer:
                     self.display_mode = action.split('_')[1]
                 elif action.startswith('tool_'):
                     self.mouse_tool = action.split('_')[1]
+                    if self.mouse_tool == 'add':
+                        # Ensure button text shows current material
+                        self._update_add_button_text()
                 elif action.startswith('tab_'):
                     self.sidebar_tab = action.split('_')[1]
     
@@ -297,6 +302,11 @@ class GeologyVisualizer:
             elif self.mouse_tool == 'pressure':
                 # Apply pressure increase in MPa
                 self.simulation.apply_tectonic_stress(sim_x, sim_y, self.tool_radius, self.tool_intensity)
+            elif self.mouse_tool == 'delete':
+                self.simulation.delete_material_blob(sim_x, sim_y, self.tool_radius)
+            elif self.mouse_tool == 'add':
+                mat = self.add_materials[self._add_material_index]
+                self.simulation.add_material_blob(sim_x, sim_y, self.tool_radius, mat)
     
     def _get_display_colors(self) -> np.ndarray:
         """Get colors for current display mode"""
@@ -958,6 +968,9 @@ class GeologyVisualizer:
             "  +/-: Change playback speed",
             "  R: Step forward",
             "  T: Step backward",
+            "  A: Add mass tool (cycle material)",
+            "  D: Delete mass tool",
+            "  L: Toggle logging (INFO/DEBUG)",
             "  1/2/3/4: Switch display modes",
             "  Tab: Cycle sidebar tabs",
             "  Q: Change quality setting"
@@ -1159,6 +1172,20 @@ class GeologyVisualizer:
                 tabs = ['controls', 'stats', 'composition', 'graphs', 'info']
                 current_idx = tabs.index(self.sidebar_tab)
                 self.sidebar_tab = tabs[(current_idx + 1) % len(tabs)]
+            elif event.key == pygame.K_d:
+                # D: Delete mass tool
+                self.mouse_tool = 'delete'
+            elif event.key == pygame.K_a:
+                # A: cycle add-mass tool and material
+                if self.mouse_tool != 'add':
+                    self.mouse_tool = 'add'
+                else:
+                    # Cycle to next material
+                    self._add_material_index = (self._add_material_index + 1) % len(self.add_materials)
+                self._update_add_button_text()
+            elif event.key == pygame.K_l:
+                # L: Toggle verbose logging / performance output
+                self.simulation.toggle_logging()
         
         elif event.type == pygame.KEYUP:
             # Handle key releases for repeat functionality
@@ -1205,6 +1232,14 @@ class GeologyVisualizer:
         else:
             # Adjust radius
             self.tool_radius = max(1, min(20, self.tool_radius + event.y))
+    
+    def _update_add_button_text(self):
+        """Update the label on the Add Mass button to show selected material."""
+        material_name = self.add_materials[self._add_material_index].value
+        for btn in self.buttons:
+            if btn['action'] == 'tool_add':
+                btn['text'] = f'Add: {material_name}'
+                break
     
     def run(self):
         """Main visualization loop"""
