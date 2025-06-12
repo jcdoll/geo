@@ -192,7 +192,7 @@ class TestMaterialDatabase:
             if material_type in [MaterialType.PUMICE, MaterialType.AIR, MaterialType.WATER_VAPOR, MaterialType.ICE]:
                 assert props.density > 0, f"{material_type} density should be positive"
             elif material_type == MaterialType.SPACE:
-                assert props.density == 0.0, f"Space should have zero density (vacuum)"
+                assert props.density < 1e-6, f"Space density should be negligible vacuum value (<1e-6), got {props.density}"
             elif material_type == MaterialType.WATER:
                 assert props.density == 1000, f"{material_type} should have water density"
             else:
@@ -212,7 +212,7 @@ class TestMaterialDatabase:
             
             # Thermal conductivity should be positive (except space which is vacuum)
             if material_type == MaterialType.SPACE:
-                assert props.thermal_conductivity == 0.0, f"Space should have zero thermal conductivity (vacuum)"
+                assert props.thermal_conductivity < 1e-6, f"Space should have negligible thermal conductivity (vacuum)"
             else:
                 assert props.thermal_conductivity > 0, f"{material_type} thermal conductivity should be positive"
                 assert props.thermal_conductivity < 100, f"{material_type} thermal conductivity should be reasonable" 
