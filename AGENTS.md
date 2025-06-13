@@ -9,6 +9,8 @@
 
 geo is a simple planetary model.
 
+Refer to the [physics document](PHYSICS.md) for implementation details.
+
 TODO: Add more detail here.
 
 ---
