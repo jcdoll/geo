@@ -4,7 +4,6 @@ Handles thermal diffusion, heat sources, and radiative cooling.
 """
 
 import numpy as np
-from typing import Tuple
 from scipy import ndimage
 try:
     from .materials import MaterialType, MaterialDatabase
@@ -172,83 +171,7 @@ class HeatTransfer:
             new_temp[non_space_mask] += diffusion_change[non_space_mask]
 
         return new_temp
-    
-    def _solve_pure_diffusion(self, temperature: np.ndarray, non_space_mask: np.ndarray) -> tuple[np.ndarray, float]:
-        """
-        Solve pure heat diffusion with adaptive time stepping for stability.
-        
-        Args:
-            temperature: Current temperature field
-            non_space_mask: Mask of non-space cells
-            
-        Returns:
-            tuple: (new_temperature, stability_factor)
-        """
-        if not np.any(non_space_mask):
-            return temperature.copy(), 1.0
-        
-        # Calculate thermal diffusivity with enhancements
-        thermal_diffusivity = self.sim.thermal_conductivity / (self.sim.density * self.sim.specific_heat)
-        
-        # Apply atmospheric enhancement
-        atmosphere_mask = (
-            (self.sim.material_types == MaterialType.AIR) |
-            (self.sim.material_types == MaterialType.WATER_VAPOR)
-        )
-        thermal_diffusivity[atmosphere_mask] *= self.sim.atmospheric_diffusivity_enhancement
-        
-        # Apply interface enhancement
-        interface_mask = self._get_interface_mask(non_space_mask)
-        thermal_diffusivity[interface_mask] *= self.sim.interface_diffusivity_enhancement
-        
-        # Clamp unrealistic values
-        thermal_diffusivity = np.minimum(thermal_diffusivity, self.sim.max_thermal_diffusivity)
-        
-        # Calculate stability constraint
-        max_alpha = np.max(thermal_diffusivity[non_space_mask]) if np.any(non_space_mask) else 0
-        if max_alpha > 0:
-            dt_stable = 0.25 * self.sim.cell_size**2 / max_alpha  # Conservative CFL
-            num_substeps = max(1, int(np.ceil(self.sim.dt * self.sim.seconds_per_year / dt_stable)))
-            num_substeps = min(num_substeps, self.sim.max_diffusion_substeps)
-        else:
-            num_substeps = 1
-        
-        dt_sub = self.sim.dt * self.sim.seconds_per_year / num_substeps
-        stability_factor = num_substeps
-        
-        # Perform substeps
-        working_temp = temperature.copy()
-        for _ in range(num_substeps):
-            working_temp = self._solve_diffusion_step(working_temp, thermal_diffusivity, dt_sub, non_space_mask)
-        
-        return working_temp, stability_factor
-    
-    def _solve_diffusion_step(self, temperature: np.ndarray, thermal_diffusivity: np.ndarray,
-                             dt: float, non_space_mask: np.ndarray) -> np.ndarray:
-        """Single diffusion step using selected method"""
-        if self.sim.thermal_diffusion_method == "explicit_euler":
-            return self._diffusion_step_explicit_euler(temperature, thermal_diffusivity, dt, non_space_mask)
-        else:
-            raise ValueError(f"Unknown thermal diffusion method: {self.sim.thermal_diffusion_method}")
-    
-    def _diffusion_step_explicit_euler(self, temperature: np.ndarray, thermal_diffusivity: np.ndarray,
-                                      dt: float, non_space_mask: np.ndarray) -> np.ndarray:
-        """Explicit Euler diffusion step"""
-        if self.sim.diffusion_stencil == "radius1":
-            # Classic 8-neighbor Laplacian
-            laplacian = ndimage.laplace(temperature) / (self.sim.cell_size**2)
-        elif self.sim.diffusion_stencil == "radius2":
-            # 13-point isotropic stencil
-            laplacian = ndimage.convolve(temperature, self.sim._laplacian_kernel_radius2, mode='constant', cval=0)
-            laplacian /= (self.sim.cell_size**2)
-        else:
-            raise ValueError(f"Unknown diffusion stencil: {self.sim.diffusion_stencil}")
-        
-        # Apply diffusion only to non-space cells
-        diffusion_term = np.zeros_like(temperature)
-        diffusion_term[non_space_mask] = thermal_diffusivity[non_space_mask] * laplacian[non_space_mask]
-        
-        return temperature + dt * diffusion_term
+
     
     def _get_interface_mask(self, non_space_mask: np.ndarray) -> np.ndarray:
         """Get mask of cells at material interfaces"""

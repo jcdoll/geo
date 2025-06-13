@@ -943,12 +943,18 @@ class GeologyVisualizer:
         quality_names = {1: "Full", 2: "Balanced", 3: "Fast"}
         quality_name = quality_names.get(current_quality, f"Level {current_quality}")
         
+        # Get kinematics mode if available
+        kinematics_mode = "N/A"
+        if hasattr(self.simulation, 'get_kinematics_mode'):
+            kinematics_mode = self.simulation.get_kinematics_mode()
+        
         tool_texts = [
             f"Status: {play_status}",
             f"Tool: {self.mouse_tool.title()}",
             f"Radius: {self.tool_radius}",
             f"Intensity: {self.tool_intensity}",
             f"Quality: {quality_name} ({current_quality})",
+            f"Kinematics: {kinematics_mode}",
         ]
         
         for text in tool_texts:
@@ -971,6 +977,7 @@ class GeologyVisualizer:
             "  A: Add mass tool (cycle material)",
             "  D: Delete mass tool",
             "  L: Toggle logging (INFO/DEBUG)",
+            "  M: Toggle kinematics mode",
             "  1/2/3/4: Switch display modes",
             "  Tab: Cycle sidebar tabs",
             "  Q: Change quality setting"
@@ -1186,6 +1193,13 @@ class GeologyVisualizer:
             elif event.key == pygame.K_l:
                 # L: Toggle verbose logging / performance output
                 self.simulation.toggle_logging()
+            elif event.key == pygame.K_m:
+                # M: Toggle kinematics mode (unified vs discrete)
+                if hasattr(self.simulation, 'toggle_kinematics_mode'):
+                    mode = self.simulation.toggle_kinematics_mode()
+                    print(f"Kinematics mode: {mode}")
+                else:
+                    print("Kinematics toggle not available (requires modular simulation)")
         
         elif event.type == pygame.KEYUP:
             # Handle key releases for repeat functionality

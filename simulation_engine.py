@@ -29,6 +29,9 @@ class GeologySimulation(OriginalGeologySimulation):
         
         # Flag to indicate this is the modular version
         self._is_modular = True
+        
+        # Unified kinematics toggle
+        self.use_unified_kinematics = True  # Default to new unified kinematics
     
     def step_forward_modular(self, dt=None):
         """Alternative step_forward using modular components"""
@@ -47,8 +50,14 @@ class GeologySimulation(OriginalGeologySimulation):
 
         # Fluid dynamics processes
         self.fluid_dynamics_module.calculate_planetary_pressure()
-        self.fluid_dynamics_module.apply_gravitational_collapse()
-        self.fluid_dynamics_module.apply_density_stratification()
+        
+        if self.use_unified_kinematics:
+            # Use new unified kinematics approach
+            self.fluid_dynamics_module.apply_unified_kinematics(self.dt)
+        else:
+            # Use old discrete approach
+            self.fluid_dynamics_module.apply_gravitational_collapse()
+            self.fluid_dynamics_module.apply_density_stratification()
 
         # Atmospheric processes
         self.atmospheric_processes_module.apply_atmospheric_convection()
@@ -57,13 +66,28 @@ class GeologySimulation(OriginalGeologySimulation):
         self.material_processes_module.apply_metamorphism()
         self.material_processes_module.apply_phase_transitions()
 
+        # Final update of material properties to ensure cache is clean
+        self._update_material_properties()
+
         # Update time
         self.time += self.dt
 
+    def toggle_kinematics_mode(self):
+        """Toggle between unified kinematics and discrete methods"""
+        self.use_unified_kinematics = not self.use_unified_kinematics
+        mode = "Unified Kinematics" if self.use_unified_kinematics else "Discrete Methods"
+        print(f"Switched to: {mode}")
+        return mode
+    
+    def get_kinematics_mode(self):
+        """Get current kinematics mode"""
+        return "Unified Kinematics" if self.use_unified_kinematics else "Discrete Methods"
+    
     def get_modular_info(self):
         """Get information about the modular components"""
         return {
             'is_modular': True,
+            'kinematics_mode': self.get_kinematics_mode(),
             'modules': {
                 'heat_transfer': type(self.heat_transfer_module).__name__,
                 'fluid_dynamics': type(self.fluid_dynamics_module).__name__,
