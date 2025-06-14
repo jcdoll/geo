@@ -178,7 +178,14 @@ class GeologyVisualizer:
         y += button_height + spacing * 3
         
         # Display mode buttons in a 2-column grid to save vertical space
-        display_modes = [('Materials', 'materials'), ('Temperature', 'temperature'), ('Power', 'power'), ('Pressure', 'pressure'), ('Velocity', 'velocity')]
+        display_modes = [
+            ('Materials', 'materials'),
+            ('Temperature', 'temperature'),
+            ('Power', 'power'),
+            ('Pressure', 'pressure'),
+            ('Velocity', 'velocity'),
+            ('Gravity', 'gravity'),
+        ]
         display_button_width = button_width // 2 - 2
         display_button_height = button_height - 2  # Slightly shorter
         
@@ -429,6 +436,30 @@ class GeologyVisualizer:
                 # Fallback if no fluid dynamics module
                 colors = np.zeros((self.sim_height, self.sim_width, 3), dtype=np.uint8)
                 return colors
+        elif self.display_mode == 'gravity':
+            # Display magnitude of gravity acceleration
+            if hasattr(self.simulation, 'gravity_x') and np.any(self.simulation.gravity_x):
+                gx = self.simulation.gravity_x
+                gy = self.simulation.gravity_y
+            else:
+                # Compute once if missing
+                if hasattr(self.simulation, 'calculate_self_gravity'):
+                    self.simulation.calculate_self_gravity()
+                    gx = self.simulation.gravity_x
+                    gy = self.simulation.gravity_y
+                else:
+                    gx = gy = np.zeros_like(self.simulation.density)
+
+            g_mag = np.sqrt(gx**2 + gy**2)
+            g_norm = np.clip(g_mag / max(1e-10, np.max(g_mag)), 0, 1)
+
+            colors = np.zeros((self.sim_height, self.sim_width, 3), dtype=np.uint8)
+            # Map 0 -> blue, 0.5 green, 1 red (same as velocity)
+            colors[:, :, 2] = ((1 - g_norm) * 255).astype(np.uint8)
+            green_factor = 4 * g_norm * (1 - g_norm)
+            colors[:, :, 1] = (green_factor * 255).astype(np.uint8)
+            colors[:, :, 0] = (g_norm * 255).astype(np.uint8)
+            return colors
     
     def _draw_simulation(self):
         """Draw the simulation grid"""
@@ -471,7 +502,7 @@ class GeologyVisualizer:
         self._draw_selected_tile_info()
         
         # Draw color bar for temperature and pressure modes
-        if self.display_mode in ['temperature', 'pressure', 'power', 'velocity']:
+        if self.display_mode in ['temperature', 'pressure', 'power', 'velocity', 'gravity']:
             self._draw_color_bar()
     
     def _draw_selected_tile_info(self):
@@ -649,6 +680,27 @@ class GeologyVisualizer:
                                (bar_x, bar_y + bar_height - i - 1), 
                                (bar_x + bar_width, bar_y + bar_height - i - 1))
         
+        elif self.display_mode == 'gravity':
+            # Gravity magnitude (linear scale)
+            gx = self.simulation.gravity_x
+            gy = self.simulation.gravity_y
+            g_mag = np.sqrt(gx**2 + gy**2)
+            min_val = 0.0
+            max_val = max(1e-5, np.max(g_mag))
+            unit = "m/s²"
+
+            for i in range(bar_height):
+                normalized = i / bar_height
+                # Blue to red via green
+                blue = int((1 - normalized) * 255)
+                green_factor = 4 * normalized * (1 - normalized)
+                green = int(green_factor * 255)
+                red = int(normalized * 255)
+                color = (red, green, blue)
+                pygame.draw.line(self.screen, color,
+                                 (bar_x, bar_y + bar_height - i - 1),
+                                 (bar_x + bar_width, bar_y + bar_height - i - 1))
+        
         # Draw border around color bar
         pygame.draw.rect(self.screen, self.colors['text'], 
                         (bar_x, bar_y, bar_width, bar_height), 2)
@@ -715,6 +767,8 @@ class GeologyVisualizer:
             title = "Temperature"
         elif self.display_mode == 'velocity':
             title = "Velocity"
+        elif self.display_mode == 'gravity':
+            title = "Gravity"
         else:
             title = "Pressure"
         title_surface = self.small_font.render(title, True, self.colors['text'])
@@ -1300,6 +1354,9 @@ class GeologyVisualizer:
             elif event.key == pygame.K_5:
                 # 5: Velocity view
                 self.display_mode = 'velocity'
+            elif event.key == pygame.K_6:
+                # 6: Gravity view
+                self.display_mode = 'gravity'
             elif event.key == pygame.K_r:
                 # R: Reset simulation (now centralized in GeologySimulation)
                 self.simulation.reset()

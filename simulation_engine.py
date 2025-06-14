@@ -21,6 +21,13 @@ class GeologySimulation(OriginalGeologySimulation):
         if not hasattr(self, 'quality'):
             self.quality = kwargs.get('quality', 1)
         
+        # Ensure velocity fields exist for FluidDynamics
+        import numpy as _np
+        if not hasattr(self, 'velocity_x'):
+            h, w = self.density.shape
+            self.velocity_x = _np.zeros((h, w), dtype=_np.float64)
+            self.velocity_y = _np.zeros((h, w), dtype=_np.float64)
+
         # Initialize modular components
         self.heat_transfer_module = HeatTransfer(self)
         self.fluid_dynamics_module = FluidDynamics(self)
@@ -32,6 +39,30 @@ class GeologySimulation(OriginalGeologySimulation):
         
         # Unified kinematics toggle
         self.use_unified_kinematics = True  # Default to new unified kinematics
+
+        # --------------------------------------------------------------
+        # Self-gravity support (mirrors CoreState implementation)
+        # --------------------------------------------------------------
+        import numpy as _np
+        if not hasattr(self, 'gravity_x'):
+            h, w = self.density.shape
+            self.gravitational_potential = _np.zeros((h, w), dtype=_np.float64)
+            self.gravity_x = _np.zeros((h, w), dtype=_np.float64)
+            self.gravity_y = _np.zeros((h, w), dtype=_np.float64)
+
+        def _calc_self_gravity(G=None):
+            from .gravity_solver import solve_potential, potential_to_gravity, G_SI
+            if G is None:
+                G = G_SI
+            phi = solve_potential(self.density, self.cell_size, G=G)
+            gx, gy = potential_to_gravity(phi, self.cell_size)
+            self.gravitational_potential[:] = phi
+            self.gravity_x[:] = gx
+            self.gravity_y[:] = gy
+
+        # Attach as bound method
+        import types as _types
+        self.calculate_self_gravity = _types.MethodType(_calc_self_gravity, self)
     
     def step_forward_modular(self, dt=None):
         """Alternative step_forward using modular components"""

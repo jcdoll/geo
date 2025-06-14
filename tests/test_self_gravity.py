@@ -50,5 +50,5 @@ def test_gravity_points_inward():
     for y, x in samples:
         dx_c = cx - x
         dy_c = cy - y
-        dot = gx[y, x] * dx_c + gy[y, x] * dy_c  # Negative dot means pointing inward
-        assert dot < 0, "Gravity should point toward high-density region" 
+        dot = gx[y, x] * dx_c + gy[y, x] * dy_c  # Positive dot means pointing inward
+        assert dot > 0, "Gravity should point toward high-density region" 
