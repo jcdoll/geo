@@ -56,20 +56,21 @@ class FluidDynamics:
         self.sim.pressure[:] = np.maximum(0.0, pressure + self.sim.pressure_offset)
     
     def apply_gravitational_collapse(self):
-        """Apply gravitational collapse using vectorized approach"""
-        if self.sim.quality == 3:  # Fast quality
-            neighbor_count = 4
-        else:
-            neighbor_count = 8
-        
-        # Get solid materials that can fall
+        """Deterministic gravitational collapse (no RNG, no sampling)."""
+
+        neighbor_count = 8  # always full neighbourhood for accuracy
+
+        # Solid voxels that may fall into cavities (non-solid)
         solid_mask = self.sim._get_solid_mask()
-        
         if not np.any(solid_mask):
             return
-        
-        # Get neighbors for collapse
-        neighbors = self.sim._get_neighbors(neighbor_count, shuffle=True)
+
+        # Precompute distance-to-COM once for whole grid
+        center_x, center_y = self.sim.center_of_mass
+        yy, xx = np.ogrid[:self.sim.height, :self.sim.width]
+        dist_sq = (xx - center_x) ** 2 + (yy - center_y) ** 2
+
+        neighbors = self.sim._get_neighbors(neighbor_count, shuffle=False)
         
         # Find cells that can potentially fall
         center_x, center_y = self.sim.center_of_mass
@@ -124,21 +125,13 @@ class FluidDynamics:
             if not np.any(can_fall):
                 continue
             
-            # Apply fall probability
+            # Deterministic – all cells that can fall WILL fall
             fall_coords = np.where(can_fall)
             if len(fall_coords[0]) == 0:
                 continue
-            
-            # Random selection based on probability
-            random_vals = np.random.random(len(fall_coords[0]))
-            fall_mask = random_vals < self.sim.gravitational_fall_probability
-            
-            if not np.any(fall_mask):
-                continue
-            
-            # Get final falling cells
-            final_y = fall_coords[0][fall_mask]
-            final_x = fall_coords[1][fall_mask]
+
+            final_y = fall_coords[0]
+            final_x = fall_coords[1]
             
             # Calculate target positions
             target_y = final_y + dy
@@ -168,7 +161,8 @@ class FluidDynamics:
         self._perform_material_swaps(src_y, src_x, tgt_y, tgt_x)
     
     def apply_fluid_dynamics(self):
-        """Apply fluid migration and buoyancy effects"""
+        """Deterministic fluid migration and buoyancy (no RNG, full grid)."""
+
         # Get fluid materials
         fluid_mask = (
             (self.sim.material_types == MaterialType.AIR) |
@@ -181,24 +175,10 @@ class FluidDynamics:
         if not np.any(fluid_mask):
             return
         
-        # Sample subset for performance
+        # Process **all** fluid cells (deterministic behaviour)
         fluid_coords = np.where(fluid_mask)
         if len(fluid_coords[0]) == 0:
             return
-        
-        # Apply sampling based on quality
-        if self.sim.quality == 1:  # Full quality
-            sample_fraction = 1.0
-        elif self.sim.quality == 2:  # Balanced
-            sample_fraction = 0.5
-        else:  # Fast
-            sample_fraction = 0.3
-        
-        num_samples = max(1, int(len(fluid_coords[0]) * sample_fraction))
-        sample_indices = np.random.choice(len(fluid_coords[0]), num_samples, replace=False)
-        
-        sampled_y = fluid_coords[0][sample_indices]
-        sampled_x = fluid_coords[1][sample_indices]
         
         # Get neighbors within radius 2
         neighbors = []
@@ -215,7 +195,7 @@ class FluidDynamics:
         
         center_x, center_y = self.sim.center_of_mass
         
-        for i, (y, x) in enumerate(zip(sampled_y, sampled_x)):
+        for i, (y, x) in enumerate(zip(fluid_coords[0], fluid_coords[1])):
             current_material = self.sim.material_types[y, x]
             current_density = self.sim.density[y, x]
             
@@ -243,10 +223,7 @@ class FluidDynamics:
                 current_dist = np.sqrt((x - center_x)**2 + (y - center_y)**2)
                 neighbor_dist = np.sqrt((nx - center_x)**2 + (ny - center_y)**2)
                 
-                if (neighbor_density > current_density and 
-                    neighbor_dist > current_dist and
-                    np.random.random() < self.sim.fluid_migration_probability):
-                    
+                if (neighbor_density > current_density and neighbor_dist > current_dist):
                     src_y_list.append(y)
                     src_x_list.append(x)
                     tgt_y_list.append(ny)
@@ -271,31 +248,13 @@ class FluidDynamics:
         self._perform_material_swaps(src_y, src_x, tgt_y, tgt_x)
     
     def apply_density_stratification(self):
-        """Apply density-driven stratification using vectorized approach"""
-        # Get mobile materials
+        """Deterministic density stratification (no RNG, full grid)."""
+
         mobile_mask = self.sim._get_mobile_mask()
-        
         if not np.any(mobile_mask):
             return
-        
-        # Sample for performance
-        mobile_coords = np.where(mobile_mask)
-        if len(mobile_coords[0]) == 0:
-            return
-        
-        # Apply sampling based on quality
-        if self.sim.quality == 1:  # Full quality
-            sample_fraction = 1.0
-        elif self.sim.quality == 2:  # Balanced
-            sample_fraction = 0.5
-        else:  # Fast
-            sample_fraction = 0.3
-        
-        num_samples = max(1, int(len(mobile_coords[0]) * sample_fraction))
-        sample_indices = np.random.choice(len(mobile_coords[0]), num_samples, replace=False)
-        
-        sampled_y = mobile_coords[0][sample_indices]
-        sampled_x = mobile_coords[1][sample_indices]
+
+        sampled_y, sampled_x = np.where(mobile_mask)
         
         # Get 5x5 neighbors for isotropic sampling
         neighbors = []
@@ -306,8 +265,7 @@ class FluidDynamics:
                 if dx**2 + dy**2 <= 6:  # Roughly circular
                     neighbors.append((dy, dx))
         
-        # Shuffle neighbors for randomness
-        np.random.shuffle(neighbors)
+        # Keep fixed neighbour order for deterministic behaviour
         
         # Collect potential swaps
         src_y_list, src_x_list = [], []
@@ -350,7 +308,7 @@ class FluidDynamics:
                     # Lighter material closer in - should rise outward
                     should_swap = True
                 
-                if should_swap and np.random.random() < self.sim.density_swap_probability:
+                if should_swap:
                     src_y_list.append(y)
                     src_x_list.append(x)
                     tgt_y_list.append(ny)
