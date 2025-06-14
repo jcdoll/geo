@@ -487,6 +487,9 @@ average_gravity = 9.81 m/s²
 
 **Neighbor shuffling**: Randomized to prevent grid artifacts
 
+### Multigrid smoothers
+The Poisson solvers (pressure, velocity projection) use a geometric multigrid V-cycle.  We currently employ *red-black Gauss–Seidel* (RB-GS) as the smoother because it damps high-frequency error roughly twice as fast per sweep as weighted Jacobi, particularly when the variable coefficient 1/ρ spans many orders of magnitude (air versus basalt).  Any convergent smoother would work – weighted-Jacobi, lexicographic Gauss-Seidel, Chebyshev, even a few conjugate-gradient iterations – the grid hierarchy is unchanged.  RB-GS was chosen for code reuse and robustness; swapping in a different smoother only requires a few lines in `pressure_solver.py`.
+
 ---
 
 ## PHYSICAL ASSUMPTIONS
@@ -1125,3 +1128,29 @@ Roadmap
 ```
 
 The current RB-SOR implementation is adequate for gameplay-scale grids, but Multigrid (or FFT where applicable) will give the same answer faster **and** in a fully theoretical framework – no empirical corrections necessary.
+
+## ROADMAP & OPEN ITEMS
+
+These tasks have been agreed during the refactor sessions but are **not yet implemented**.  They are listed here so that any contributor can pick them up without digging through chat history.
+
+### Immediate (blocking) 
+1. **Complete SI sweep** – purge any remaining `seconds_per_year` maths in *tests* and documentation examples; delete the placeholder attribute from `simulation_engine_original.py` once reference tests pass.
+2. **FFT / DST pressure projection** – replace the multigrid Poisson solver in `fluid_dynamics.py` with a frequency-space implementation for O(N log N) performance and predictable convergence.
+3. **Energy conservation regression** – add an automated test that steps an isolated closed system for ≥10 years and asserts that total internal energy changes < 0.1 %.  This will guard against future source / sink sign errors.
+4. **Material property cache validation** – convert the ad-hoc debug script into a pytest that randomly deletes materials and checks that `_material_props_cache` is perfectly pruned.
+
+### Short-term enhancements
+• **Temperature-dependent viscosity** – damp velocities as a smooth function of local melt fraction; this replaces the temporary solid drag factor 0.2.
+• **Variable cell-size support** – allow `cell_size` ≠ 50 m so small-scale phenomena (lava tubes, glaciers) can be simulated in separate runs.
+• **Greenhouse coupling** – link water-vapour mass directly to `atmospheric_processes.calculate_greenhouse_effect()` instead of the current heuristic.
+• **Moist-convective rainfall** – precipitate WATER when saturated vapour cools below the Clausius-Clapeyron curve; feeds erosion module.
+
+### Research backlog (nice-to-have)
+• Coupled **erosion & sediment transport** (height-field + fluvial flow).
+• **Partial melt phase diagram** for silicates – returns melt fraction and latent heat sink.
+• **GPU kernels** for heat diffusion and Poisson solves via CuPy (optional acceleration path).
+• **3-D extrusion prototype** – prove that the 2-D solver generalises to shallow-layer quasi-3-D without re-architecting.
+
+Contributors should update this list (and cross-reference issue numbers) whenever an item is started or completed.
+
+---

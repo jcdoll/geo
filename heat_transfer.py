@@ -100,12 +100,9 @@ class HeatTransfer:
         diffusion_dt_limit = dx_squared / (stencil_denominator * max_alpha) if max_alpha > 0 else float('inf')
 
         # Adaptive time step for diffusion (clamp between min substep and full timestep)
-        min_dt_seconds = self.sim.dt * self.sim.seconds_per_year / self.sim.max_diffusion_substeps
-        target_dt_seconds = np.clip(diffusion_dt_limit, min_dt_seconds, self.sim.dt * self.sim.seconds_per_year)
-
-        # Convert back to years
-        adaptive_dt = target_dt_seconds / self.sim.seconds_per_year
-        stability_factor = adaptive_dt / self.sim.dt
+        min_dt_seconds = self.sim.dt / self.sim.max_diffusion_substeps
+        target_dt_seconds = np.clip(diffusion_dt_limit, min_dt_seconds, self.sim.dt)
+        adaptive_dt = target_dt_seconds
 
         # Use sub-steps for stability
         num_substeps = max(1, min(self.sim.max_diffusion_substeps, int(np.ceil(self.sim.dt / adaptive_dt))))
@@ -145,7 +142,7 @@ class HeatTransfer:
         Disadvantages: Requires small time steps for stability
         """
         # Convert dt to seconds for proper units
-        dt_seconds = dt * self.sim.seconds_per_year
+        dt_seconds = dt  # dt in seconds
         dx_squared = self.sim.cell_size ** 2
 
         if self.sim.diffusion_stencil == "radius1":
@@ -256,14 +253,14 @@ class HeatTransfer:
         
         # Linearized Stefan-Boltzmann: Q = h(T - T_space) where h = 4σεT₀³
         T_reference = np.maximum(T_cooling, 300.0)  # Use actual temperature as reference
-        h_effective = 4 * self.sim.stefan_boltzmann_geological * (1.0 - greenhouse_factor) * emissivity * T_reference**3
+        h_effective = 4 * self.sim.stefan_boltzmann * (1.0 - greenhouse_factor) * emissivity * T_reference**3
         
         # Calculate cooling rate
         surface_thickness = self.sim.cell_size * self.sim.surface_radiation_depth_fraction
         cooling_rate = h_effective * (T_cooling - T_space) / (density_cooling * specific_heat_cooling * surface_thickness)
         
         # Apply cooling with time step
-        dt_seconds = self.sim.dt * self.sim.seconds_per_year
+        dt_seconds = self.sim.dt
         T_new = T_cooling - dt_seconds * cooling_rate
         T_new = np.maximum(T_new, T_space)  # Don't cool below space temperature
         
@@ -273,7 +270,7 @@ class HeatTransfer:
         working_temp[final_coords_y, final_coords_x] = T_new
         
         # Update power density for visualization
-        volumetric_power_density = h_effective * (T_cooling - T_space) / (surface_thickness * self.sim.seconds_per_year)
+        volumetric_power_density = h_effective * (T_cooling - T_space) / surface_thickness
         self.sim.power_density[final_coords_y, final_coords_x] -= volumetric_power_density
         
         # Track total radiative output (positive magnitude)
@@ -332,11 +329,11 @@ class HeatTransfer:
             greenhouse_factor = self.sim.base_greenhouse_effect
         
         # Stefan-Boltzmann constant with greenhouse effect
-        stefan_geological = self.sim.stefan_boltzmann_geological / 1000.0  # Conservative scaling
+        stefan_geological = self.sim.stefan_boltzmann / 1000.0  # Conservative scaling # TODO: remov
         surface_thickness = self.sim.cell_size * self.sim.surface_radiation_depth_fraction
         alpha = (stefan_geological * emissivity * self.sim.radiative_cooling_efficiency * (1.0 - greenhouse_factor)) / (density_cooling * specific_heat_cooling * surface_thickness)
         
-        dt_seconds = self.sim.dt * self.sim.seconds_per_year
+        dt_seconds = self.sim.dt
         
         # Newton-Raphson iteration for implicit radiation
         T_new = T_cooling.copy()
@@ -363,7 +360,7 @@ class HeatTransfer:
         # Update power density for visualization
         effective_stefan = stefan_geological * (1.0 - greenhouse_factor)
         power_per_area = effective_stefan * emissivity * (T_new**4 - T_space**4)
-        volumetric_power_density = power_per_area / (surface_thickness * self.sim.seconds_per_year)
+        volumetric_power_density = power_per_area / surface_thickness
         self.sim.power_density[final_coords_y, final_coords_x] -= volumetric_power_density
         
         # Track total radiative output (positive magnitude)
@@ -388,7 +385,13 @@ class HeatTransfer:
         return working_temp
     
     def _calculate_internal_heating_source(self, non_space_mask: np.ndarray) -> np.ndarray:
-        """Calculate internal heating source term Q/(ρcp) in K/year"""
+        """Calculate internal heating source term Q/(ρcp).
+
+        Returns the instantaneous temperature change rate in K/s which will
+        subsequently be multiplied by the global time-step (``self.sim.dt``)
+        to obtain the actual temperature increment for the current macro
+        step.
+        """
         source_term = np.zeros_like(self.sim.temperature)
         
         if not np.any(non_space_mask):
@@ -430,7 +433,7 @@ class HeatTransfer:
         if np.any(valid_cells):
             source_term[valid_cells] = heating_rate[valid_cells] / (
                 self.sim.density[valid_cells] * self.sim.specific_heat[valid_cells]
-            ) * self.sim.seconds_per_year  # K/year
+            )  # K per step (SI)
         
         # Update power density and flux tracking
         self.sim.power_density[valid_cells] += heating_rate[valid_cells]
@@ -440,7 +443,11 @@ class HeatTransfer:
         return source_term
     
     def _calculate_solar_heating_source(self, non_space_mask: np.ndarray) -> np.ndarray:
-        """Calculate solar heating source term Q/(ρcp) in K/year"""
+        """Calculate solar heating source term Q/(ρcp).
+
+        The returned array contains rates in K/s which are later integrated
+        over ``self.sim.dt`` seconds to update the temperature field.
+        """
         source_term = np.zeros_like(self.sim.temperature)
         
         # Find surface cells that can receive solar radiation
@@ -556,7 +563,7 @@ class HeatTransfer:
                     volumetric_power = effective_absorbed / surface_thickness
                     
                     # Convert to temperature change rate
-                    temp_change_rate = volumetric_power / (self.sim.density[y, x] * self.sim.specific_heat[y, x]) * self.sim.seconds_per_year
+                    temp_change_rate = volumetric_power / (self.sim.density[y, x] * self.sim.specific_heat[y, x])
                     source_term[y, x] += temp_change_rate
                     
                     # Update power density

@@ -73,13 +73,12 @@ class CoreState:
         self.thermal_conductivity = np.zeros((height, width), dtype=np.float64)
         self.specific_heat = np.zeros((height, width), dtype=np.float64)
 
-        # ---------- simulation parameters ---------------------------------
-        self.time = 0.0  # years
-        self.dt = 1.0    # years per macro-step
+        # ---------- simulation parameters (SI) ---------------------------
+        self.time = 0.0      # seconds since start
+        self.dt = 10_000.0   # seconds per macro-step (≈2.8 h)
 
-        # Unit conversions
-        self.seconds_per_year = 365.25 * 24 * 3600
-        self.stefan_boltzmann_geological = 5.67e-8 * self.seconds_per_year  # J/(year·m²·K⁴)
+        # Physical constant (SI)
+        self.stefan_boltzmann = 5.670e-8  # W/(m²·K⁴)
 
         # Planetary constants (identical to legacy engine)
         self.planet_radius_fraction = 0.8
@@ -105,7 +104,7 @@ class CoreState:
         self.core_heating_depth_scale = 0.5
         self.surface_pressure = 0.1  # MPa
         self.atmospheric_scale_height = 8400  # m
-        self.average_gravity = 9.81
+        self.average_gravity = 9.81 # m/s^2 for external sources
         self.average_solid_density = 3000
         self.average_fluid_density = 2000
         self.solar_constant = 50
@@ -175,6 +174,17 @@ class CoreState:
         # ------------------------------------------------------------------
         self.thermal_diffusion_method = "explicit_euler"  # only method implemented so far
         self.radiative_cooling_method = "linearized_stefan_boltzmann"
+
+        # Constant external gravitational field (m/s²).  Positive y is downward in
+        # array coordinates, so Earth-like gravity uses (0, +9.81).
+        # Modules add these components to the self-gravity field produced by the
+        # Poisson solve so that laboratory-scale scenarios still experience a
+        # meaningful buoyancy force even when the radial self-gravity is nearly
+        # zero.
+        self.external_gravity: tuple[float, float] = (0.0, self.average_gravity)
+
+        # Toggle for applying empirical solid drag in unified kinematics
+        self.enable_solid_drag: bool = True
 
     # ------------------------------------------------------------------
     #  Performance presets (copied from legacy engine)

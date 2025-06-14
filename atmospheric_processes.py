@@ -136,7 +136,7 @@ class AtmosphericProcesses:
                     
                     if absorbed > 0 and self.sim.density[sy, sx] > 0 and self.sim.specific_heat[sy, sx] > 0:
                         vol_power = absorbed / self.sim.cell_size
-                        source_term[sy, sx] += (vol_power / (self.sim.density[sy, sx] * self.sim.specific_heat[sy, sx])) * self.sim.seconds_per_year
+                        source_term[sy, sx] += vol_power / (self.sim.density[sy, sx] * self.sim.specific_heat[sy, sx])
                         self.sim.power_density[sy, sx] += vol_power
                         
                         # Categorise energy deposition for diagnostics

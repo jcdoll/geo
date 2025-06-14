@@ -44,6 +44,45 @@ class GeologyVisualizer:
         else:
             return f"{power_watts / 1e12:.1f} TW"
     
+    # --------------------------------------------------------------
+    # Smart time formatter (seconds → s / h / d / y)
+    # --------------------------------------------------------------
+    _SECONDS_PER_HOUR = 3600.0
+    _SECONDS_PER_DAY = 86_400.0
+    _SECONDS_PER_YEAR = 365.25 * 24 * 3600.0
+
+    def _format_time_smart(self, time_seconds: float) -> str:
+        """Return human-readable time string with adaptive unit.
+
+        Rules (simple, avoids minutes for brevity):
+            < 60 s       → "{N}s"
+            < 48 h       → "{h:.1f}h"
+            < 730 d (~2y)→ "{d:.1f}d"
+            otherwise    → "{y:.1f}y"
+        """
+        if time_seconds < 60.0:
+            return f"{time_seconds:.0f}s"
+        if time_seconds < 48 * self._SECONDS_PER_HOUR:
+            hours = time_seconds / self._SECONDS_PER_HOUR
+            return f"{hours:.1f}h"
+        if time_seconds < 2 * self._SECONDS_PER_YEAR:
+            days = time_seconds / self._SECONDS_PER_DAY
+            return f"{days:.1f}d"
+        years = time_seconds / self._SECONDS_PER_YEAR
+        return f"{years:.1f}y"
+    
+    # -------- Smart velocity formatter ---------------------------------
+    @staticmethod
+    def _format_velocity(value: float) -> str:
+        """Format velocity in m/s using concise scientific notation."""
+        if value == 0:
+            return "0 m/s"
+        if 0.001 <= value < 1000:
+            # Use fixed-point with 3 sig figs for moderate range
+            return f"{value:.3g} m/s"
+        # For very small or very large use scientific notation with 1 digit
+        return f"{value:.0e} m/s"
+    
     def __init__(self, sim_width: int = 128, sim_height: int = 128, window_width: int = 1200, window_height: int = 800):
         """
         Initialize the visualizer
@@ -407,21 +446,17 @@ class GeologyVisualizer:
                 vy_grid = vy_grid - vy_grid.mean()
                 velocity_magnitude = np.sqrt(vx_grid**2 + vy_grid**2)
                 
-                # Convert to mm/s (SI time base)
-                velocity_mm_s = velocity_magnitude * 1000.0  # m/s → mm/s
-                
-                # Logarithmic scaling – auto range based on current field
+                # Keep velocity in m/s (SI)
                 epsilon = 1e-12
-                log_velocity = np.log10(velocity_mm_s + epsilon)
+                log_velocity = np.log10(velocity_magnitude + epsilon)
 
                 # Auto-determine dynamic range (4 orders of magnitude span)
-                current_max = np.max(velocity_mm_s)
-                current_max = max(current_max, 1e-9)  # clamp at 1 µm/s
-                log_max = np.ceil(np.log10(current_max))
-                log_min = log_max - 4.0  # show four decades below the peak
+                current_max = max(np.max(velocity_magnitude), 1e-9)
+                log_max = math.ceil(math.log10(current_max))
+                log_min = log_max - 4.0  # show four decades below peak
                 
                 # Normalize to [0, 1] range
-                velocity_norm = np.clip((log_velocity - log_min) / (log_max - log_min), 0, 1)
+                velocity_norm = np.clip((log_velocity - log_min) / (log_max - log_min + 1e-12), 0, 1)
                 
                 # Create color map: blue (slow) to red (fast) through green
                 colors = np.zeros((self.sim_height, self.sim_width, 3), dtype=np.uint8)
@@ -554,11 +589,10 @@ class GeologyVisualizer:
             vx = self.simulation.fluid_dynamics.velocity_x[y, x] - self.simulation.fluid_dynamics.velocity_x.mean()
             vy = self.simulation.fluid_dynamics.velocity_y[y, x] - self.simulation.fluid_dynamics.velocity_y.mean()
             velocity_magnitude = (vx**2 + vy**2)**0.5  # m/s
-            velocity_mm_s = velocity_magnitude * 1000.0
-            if velocity_mm_s > 1e-6:  # Only show if significant
-                velocity_info = f"{velocity_mm_s:.2e} mm/s"
+            if velocity_magnitude > 1e-9:  # Only show if significant
+                velocity_info = self._format_velocity(velocity_magnitude)
             else:
-                velocity_info = "~0 mm/s"
+                velocity_info = "~0 m/s"
         
         # Position in top-left of simulation area
         info_x = 10  # 10px from left edge
@@ -674,12 +708,16 @@ class GeologyVisualizer:
                                (bar_x + bar_width, bar_y + bar_height - i - 1))
         
         elif self.display_mode == 'velocity':
-            # Velocity range (logarithmic scale)
-            log_min = -6.0   # 1e-6 mm/year
-            log_max = 2.0    # 100 mm/year
+            # Dynamic log scale (m/s) based on current field
+            vx = self.simulation.fluid_dynamics.velocity_x - self.simulation.fluid_dynamics.velocity_x.mean()
+            vy = self.simulation.fluid_dynamics.velocity_y - self.simulation.fluid_dynamics.velocity_y.mean()
+            vel_mag = np.sqrt(vx**2 + vy**2)
+            current_max = max(np.max(vel_mag), 1e-9)
+            log_max = math.ceil(math.log10(current_max))
+            log_min = log_max - 4.0
             min_val = 10**log_min
             max_val = 10**log_max
-            unit = "mm/year"
+            unit = "m/s"
             
             # Draw gradient bar (blue to green to red for velocity)
             for i in range(bar_height):
@@ -771,15 +809,15 @@ class GeologyVisualizer:
             self.screen.blit(cool_surface, (label_x, bar_y + bar_height - 15))
         elif self.display_mode == 'velocity':
             # Special formatting for velocity (logarithmic scale)
-            max_text = f"100 {unit}s"
+            max_text = "1 m/s"
             max_surface = self.small_font.render(max_text, True, self.colors['text'])
             self.screen.blit(max_surface, (label_x, bar_y - 5))
             
-            mid_text = f"0.01 {unit}s"
+            mid_text = "1e-3 m/s"
             mid_surface = self.small_font.render(mid_text, True, self.colors['text'])
             self.screen.blit(mid_surface, (label_x, bar_y + bar_height // 2 - 10))
             
-            min_text = f"1e-6 {unit}s"
+            min_text = "1e-6 m/s"
             min_surface = self.small_font.render(min_text, True, self.colors['text'])
             self.screen.blit(min_surface, (label_x, bar_y + bar_height - 15))
         else:
@@ -975,7 +1013,10 @@ class GeologyVisualizer:
             avg_step_time = sum(self.step_times) / len(self.step_times)
             perf_info = f" | Step: {avg_step_time:.1f}ms"
         
-        status_text = f"{play_status} | Time: {stats['time']:.0f}y | Temp: {stats['avg_temperature']:.0f}°C (max {stats['max_temperature']:.0f}°C) | Pressure: {stats['avg_pressure']:.1f} MPa | Tool: {self.mouse_tool.title()} (R:{self.tool_radius}, I:{self.tool_intensity}){perf_info}"
+        time_str = self._format_time_smart(stats['time'])
+        status_text = (f"{play_status} | Time: {time_str} | Temp: {stats['avg_temperature']:.0f}°C "
+                       f"(max {stats['max_temperature']:.0f}°C) | Pressure: {stats['avg_pressure']:.1f} MPa | "
+                       f"Tool: {self.mouse_tool.title()} (R:{self.tool_radius}, I:{self.tool_intensity}){perf_info}")
         
         text_surface = self.small_font.render(status_text, True, self.colors['text'])
         self.screen.blit(text_surface, (5, 5))
@@ -1134,13 +1175,17 @@ class GeologyVisualizer:
         y_offset += 20
         
         # Time and simulation stats
+        dt_str = self._format_time_smart(stats['dt'])
+        eff_dt_str = self._format_time_smart(stats['effective_dt'])
+        time_str = self._format_time_smart(stats['time'])
+
         stat_texts = [
-            f"Time Step: {stats['dt']:.0f} years",
-            f"Effective dt: {stats['effective_dt']:.1f} years",
+            f"Time Step: {dt_str}",
+            f"Effective dt: {eff_dt_str}",
             f"Stability Factor: {stats['stability_factor']:.3f}",
             f"Max Thermal Diff: {stats['max_thermal_diffusivity']:.2e} m²/s",
             "",
-            f"Simulation Time: {stats['time']:.0f} years",
+            f"Simulation Time: {time_str}",
             f"History Length: {stats['history_length']} steps",
             "",
             f"Temperature Range:",

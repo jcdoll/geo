@@ -813,7 +813,7 @@ Looking at your unified kinematic model, you're essentially solving the **incomp
 
 This is a **velocity-pressure coupled system** that requires special numerical treatment.
 
-## Solver Options for Your System
+## Solver Options for Your System.
 
 ### **Option 1: Projection Method** (Recommended)
 
@@ -1879,3 +1879,33 @@ Let me know if you want me to:
 wire in the full multigrid projection now,
 experiment with the FFT version, or
 run timing benchmarks on your actual grid size before deciding.
+
+=== Fixing the zero velocity problem ===
+
+Here is what I found after reading every line of PLAN.md, PHYSICS.md, and the current implementation:
+1 Force assembly is basically correct
+fx = ρ g − ∂P/∂x and fy = ρ g − ∂P/∂y are computed in SI units.
+With the self-gravity field + multigrid pressure you usually get nearly hydrostatic balance, so the net body-force is indeed small – that is expected.
+2 Velocity update is physically fine
+u ← u + (f / ρ) Δt is exactly the explicit Euler provisional‐velocity step from the plan.
+3 The projection step is where the motion disappears
+What the plan / theory says
+For variable-density incompressible flow the correction potential φ must satisfy
+∇·( 1/ρ ∇φ ) = (∇·u) / Δt (1)
+i.e. a variable-coefficient Poisson equation with coefficient
+k = 1/ρ.
+What the code does today
+Apply to PLAN.md
+The right-hand side is ρ·div_u / Δt, not div_u / Δt.
+The solver solve_pressure assumes a constant coefficient Laplacian.
+Because ρ varies by more than three orders of magnitude (air vs. rock) the correction term massively overshoots in dense cells and virtually cancels every provisional velocity everywhere.
+Result: velocities sink to ~10⁻¹⁰ m s⁻¹ and never accumulate the 0.5-cell displacement threshold, so nothing moves.
+4 Why the multigrid “force projection” you expected never happens
+The multigrid routine is fine; we are simply calling the wrong one with the wrong equation.
+The file already contains solve_poisson_variable(rhs, k, dx) – that is exactly the variable-ρ solver we need, but it is unused.
+5 Fix in one sentence
+Replace the projection block by a call to the variable-coefficient solver with
+k = 1 / ρ and rhs = div_u / Δt
+then correct the velocity with the usual u -= dt/ρ ∇φ.
+That follows the road-map in PLAN.md verbatim and should let velocities build up to the centimetres-to-metres-per-second range you were expecting.
+If you agree with this diagnosis I can patch fluid_dynamics.py (≈10 lines changed) and push a quick unit test that checks that a dense blob in light fluid starts sinking in the first-couple of steps.
