@@ -129,12 +129,51 @@ class CoreState:
         self._setup_neighbors()
         self._update_material_properties()
 
+        # --------------------------------------------------------------
+        # Additional parameters required by modular FluidDynamics layer
+        # --------------------------------------------------------------
+        # Store quality level explicitly so downstream modules can branch on it
+        self.quality: int = quality
+        # Probability that a solid voxel adjacent to a cavity will fall inward
+        self.gravitational_fall_probability: float = 0.25  # tuned for visual stability
+        # Probability used by density-driven stratification swaps
+        self.density_swap_probability: float = 0.25
+
         # minimal history for undo (optional)
         self.history: list = []
         self.max_history = 100
 
         # Diffusion stencil selection ('radius1' or 'radius2')
         self.diffusion_stencil = "radius2"
+
+        # ------------------------------------------------------------------
+        # Place-holder time-series buffers so the visualiser's graphs work.
+        # Modules are free to push to these lists at their leisure.
+        # ------------------------------------------------------------------
+        self.time_series = {
+            'time': [],
+            'avg_temperature': [],
+            'max_temperature': [],
+            'total_energy': [],
+            'net_power': [],
+            'greenhouse_factor': [],
+            'planet_albedo': [],
+        }
+
+        # Running thermal flux bookkeeping (W).  Updated by HeatTransfer.
+        self.thermal_fluxes = {
+            'solar_input': 0.0,
+            'radiative_output': 0.0,
+            'internal_heating': 0.0,
+            'atmospheric_heating': 0.0,
+            'net_flux': 0.0,
+        }
+
+        # ------------------------------------------------------------------
+        # Algorithmic method selectors used by modular solvers
+        # ------------------------------------------------------------------
+        self.thermal_diffusion_method = "explicit_euler"  # only method implemented so far
+        self.radiative_cooling_method = "linearized_stefan_boltzmann"
 
     # ------------------------------------------------------------------
     #  Performance presets (copied from legacy engine)
@@ -326,4 +365,17 @@ class CoreState:
 
     # Time-series stub (modules may record)
     def _record_time_series_data(self):
-        pass 
+        pass
+
+    def _get_mobile_mask(self, temperature_threshold: float | None = None) -> np.ndarray:
+        """Return boolean mask of *mobile* (liquid or gas) voxels.
+
+        A voxel is considered *mobile* when its temperature exceeds
+        ``temperature_threshold`` (defaults to 800 °C in Kelvin) **and** it is
+        not SPACE.  This matches the legacy behaviour used by density
+        stratification and buoyancy routines.
+        """
+        if temperature_threshold is None:
+            temperature_threshold = 800.0 + 273.15  # 800 °C expressed in Kelvin
+
+        return (self.temperature > temperature_threshold) & (self.material_types != MaterialType.SPACE)
