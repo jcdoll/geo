@@ -398,24 +398,27 @@ class GeologyVisualizer:
             return colors
         elif self.display_mode == 'velocity':
             # Get velocity magnitude from fluid dynamics module
-            if hasattr(self.simulation, 'fluid_dynamics_module'):
-                velocity_x = self.simulation.fluid_dynamics_module.velocity_x
-                velocity_y = self.simulation.fluid_dynamics_module.velocity_y
-                velocity_magnitude = np.sqrt(velocity_x**2 + velocity_y**2)
+            if hasattr(self.simulation, 'fluid_dynamics'):
+                vx_grid = self.simulation.fluid_dynamics.velocity_x
+                vy_grid = self.simulation.fluid_dynamics.velocity_y
                 
-                # Convert to mm/year for better geological visualization
-                seconds_per_year = 365.25 * 24 * 3600
-                velocity_mm_per_year = velocity_magnitude * seconds_per_year * 1000  # m/s to mm/year
+                # Remove bulk translation so relative flow stands out
+                vx_grid = vx_grid - vx_grid.mean()
+                vy_grid = vy_grid - vy_grid.mean()
+                velocity_magnitude = np.sqrt(vx_grid**2 + vy_grid**2)
                 
-                # Use logarithmic scaling for velocity to handle wide range of values
-                # Add small epsilon to avoid log(0)
-                epsilon = 1e-10
-                log_velocity = np.log10(velocity_mm_per_year + epsilon)
+                # Convert to mm/s (SI time base)
+                velocity_mm_s = velocity_magnitude * 1000.0  # m/s → mm/s
                 
-                # Set reasonable velocity range for geological processes (mm/year)
-                # Geological velocities: ~1e-6 mm/year (very slow) to ~100 mm/year (fast flow)
-                log_min = -6.0   # 1e-6 mm/year (extremely slow geological processes)
-                log_max = 2.0    # 100 mm/year (fast geological flow like landslides)
+                # Logarithmic scaling – auto range based on current field
+                epsilon = 1e-12
+                log_velocity = np.log10(velocity_mm_s + epsilon)
+
+                # Auto-determine dynamic range (4 orders of magnitude span)
+                current_max = np.max(velocity_mm_s)
+                current_max = max(current_max, 1e-9)  # clamp at 1 µm/s
+                log_max = np.ceil(np.log10(current_max))
+                log_min = log_max - 4.0  # show four decades below the peak
                 
                 # Normalize to [0, 1] range
                 velocity_norm = np.clip((log_velocity - log_min) / (log_max - log_min), 0, 1)
@@ -547,17 +550,15 @@ class GeologyVisualizer:
         
         # Get velocity information if available
         velocity_info = "N/A"
-        if hasattr(self.simulation, 'fluid_dynamics_module'):
-            vx = self.simulation.fluid_dynamics_module.velocity_x[y, x]
-            vy = self.simulation.fluid_dynamics_module.velocity_y[y, x]
-            velocity_magnitude = (vx**2 + vy**2)**0.5
-            # Convert to mm/year for better readability
-            seconds_per_year = 365.25 * 24 * 3600
-            velocity_mm_per_year = velocity_magnitude * seconds_per_year * 1000
-            if velocity_mm_per_year > 1e-6:  # Only show if significant
-                velocity_info = f"{velocity_mm_per_year:.2e} mm/year"
+        if hasattr(self.simulation, 'fluid_dynamics'):
+            vx = self.simulation.fluid_dynamics.velocity_x[y, x] - self.simulation.fluid_dynamics.velocity_x.mean()
+            vy = self.simulation.fluid_dynamics.velocity_y[y, x] - self.simulation.fluid_dynamics.velocity_y.mean()
+            velocity_magnitude = (vx**2 + vy**2)**0.5  # m/s
+            velocity_mm_s = velocity_magnitude * 1000.0
+            if velocity_mm_s > 1e-6:  # Only show if significant
+                velocity_info = f"{velocity_mm_s:.2e} mm/s"
             else:
-                velocity_info = "~0 mm/year"
+                velocity_info = "~0 mm/s"
         
         # Position in top-left of simulation area
         info_x = 10  # 10px from left edge
@@ -770,15 +771,15 @@ class GeologyVisualizer:
             self.screen.blit(cool_surface, (label_x, bar_y + bar_height - 15))
         elif self.display_mode == 'velocity':
             # Special formatting for velocity (logarithmic scale)
-            max_text = f"100 {unit}"
+            max_text = f"100 {unit}s"
             max_surface = self.small_font.render(max_text, True, self.colors['text'])
             self.screen.blit(max_surface, (label_x, bar_y - 5))
             
-            mid_text = f"0.01 {unit}"
+            mid_text = f"0.01 {unit}s"
             mid_surface = self.small_font.render(mid_text, True, self.colors['text'])
             self.screen.blit(mid_surface, (label_x, bar_y + bar_height // 2 - 10))
             
-            min_text = f"1e-6 {unit}"
+            min_text = f"1e-6 {unit}s"
             min_surface = self.small_font.render(min_text, True, self.colors['text'])
             self.screen.blit(min_surface, (label_x, bar_y + bar_height - 15))
         else:

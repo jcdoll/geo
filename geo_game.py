@@ -202,29 +202,19 @@ class GeoGame(CoreState, CoreToolsMixin):
             self._perf_times["pressure"] = time.perf_counter() - _last_cp
             _last_cp = time.perf_counter()
 
-            # 5) Density-driven processes
-            self.fluid_dynamics.apply_density_stratification()
-            self._perf_times["density_strat"] = time.perf_counter() - _last_cp
+            # 5) Unified kinematics – handles buoyancy, settling, fluid flow
+            self.fluid_dynamics.apply_unified_kinematics(self.dt)
+            self._perf_times["unified_kinematics"] = time.perf_counter() - _last_cp
             _last_cp = time.perf_counter()
 
-            # 6) Fluid migration (air/water/magma)
-            self.fluid_dynamics.apply_fluid_dynamics()
-            self._perf_times["fluid_dyn"] = time.perf_counter() - _last_cp
-            _last_cp = time.perf_counter()
-
-            # 7) Gravitational collapse of unsupported solids
-            self.fluid_dynamics.apply_gravitational_collapse()
-            self._perf_times["collapse"] = time.perf_counter() - _last_cp
-            _last_cp = time.perf_counter()
-
-            # 8) Advance simulation clock using stability-scaled dt
+            # 6) Advance simulation clock using stability-scaled dt
             self.time += self.dt * stability
             self._last_stability_factor = stability
             self._actual_effective_dt = self.dt * stability
             self._perf_times["update_time"] = time.perf_counter() - _last_cp
             _last_cp = time.perf_counter()
 
-            # 9) Optional analytics (graphs)
+            # 7) Optional analytics (graphs)
             self._record_time_series_data()
             self._perf_times["record_ts"] = time.perf_counter() - _last_cp
 

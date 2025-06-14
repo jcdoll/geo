@@ -79,16 +79,9 @@ class GeologySimulation(OriginalGeologySimulation):
         new_temperature, stability_factor = self.heat_transfer_module.solve_heat_diffusion()
         self.temperature = new_temperature
 
-        # Fluid dynamics processes
+        # Fluid dynamics – pressure then kinematics
         self.fluid_dynamics_module.calculate_planetary_pressure()
-        
-        if self.use_unified_kinematics:
-            # Use new unified kinematics approach
-            self.fluid_dynamics_module.apply_unified_kinematics(self.dt)
-        else:
-            # Use old discrete approach
-            self.fluid_dynamics_module.apply_gravitational_collapse()
-            self.fluid_dynamics_module.apply_density_stratification()
+        self.fluid_dynamics_module.apply_unified_kinematics(self.dt)
 
         # Atmospheric processes
         self.atmospheric_processes_module.apply_atmospheric_convection()
