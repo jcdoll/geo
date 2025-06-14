@@ -13,7 +13,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from simulation_engine import GeologySimulation
-from materials import MaterialType
+from geo.materials import MaterialType
 
 
 def test_space_cell_count_stable():

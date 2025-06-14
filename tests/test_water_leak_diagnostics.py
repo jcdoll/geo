@@ -4,11 +4,19 @@ import pytest
 from geo.simulation_engine import GeologySimulation
 from geo.materials import MaterialType
 
+def _disable_phase(sim, dotted_attr: str):
+    """Replace the given dotted attribute path with a no-op lambda."""
+    parts = dotted_attr.split(".")
+    target = sim
+    for p in parts[:-1]:
+        target = getattr(target, p)
+    setattr(target, parts[-1], lambda *a, **kw: False)
+
 PHASE_ATTRS = [
-    "_apply_fluid_dynamics_vectorized",
-    "_apply_density_stratification_local_vectorized",
-    "_apply_gravitational_collapse_vectorized",
-    "_apply_weathering",
+    "fluid_dynamics_module.apply_fluid_dynamics",
+    "fluid_dynamics_module.apply_density_stratification",
+    "fluid_dynamics_module.apply_gravitational_collapse",
+    "material_processes_module.apply_weathering",
 ]
 
 def count_water(sim):
@@ -37,14 +45,14 @@ def test_water_loss_by_phase(disabled_phase, capsys):
 
     if disabled_phase is not None:
         # Monkey-patch the phase to a no-op that returns False
-        setattr(sim, disabled_phase, lambda *a, **kw: False)
+        _disable_phase(sim, disabled_phase)
 
     start = count_water(sim)
     for _ in range(100):
         sim.step_forward()
     end = count_water(sim)
 
-    pct_change = (end - start) / start * 100.0
+    pct_change = 0.0 if start == 0 else (end - start) / start * 100.0
     phase_name = disabled_phase or "None (all active)"
     print(f"Phase disabled: {phase_name:40}  ΔWater = {pct_change:+5.2f}%")
 

@@ -70,14 +70,14 @@ def solve_potential(
     # Eigenvalues of the Laplacian with Dirichlet BCs on a square grid.
     j = np.arange(1, ny + 1)  # 1-based index in DST basis
     i = np.arange(1, nx + 1)
-    sin_j = np.sin(np.pi * j / (ny + 1))
-    sin_i = np.sin(np.pi * i / (nx + 1))
-    lambda_y = 2.0 * (1.0 - sin_j[:, None] ** 2)  # shape (ny, 1)
-    lambda_x = 2.0 * (1.0 - sin_i[None, :] ** 2)  # shape (1, nx)
-    eigvals = (lambda_x + lambda_y)  # Broadcasted sum (ny, nx)
+    sin_j = np.sin(np.pi * j / (2 * (ny + 1)))
+    sin_i = np.sin(np.pi * i / (2 * (nx + 1)))
+    lambda_y = -4.0 * sin_j[:, None] ** 2  # shape (ny, 1)
+    lambda_x = -4.0 * sin_i[None, :] ** 2  # shape (1, nx)
+    eigvals = lambda_x + lambda_y  # Broadcasted sum (ny, nx) – negative values
 
-    # Solve in transform domain: Φ_hat = rhs_hat / (-λ)
-    phi_hat = rhs_hat / (-eigvals)
+    # Solve in transform domain: Φ_hat = rhs_hat / λ
+    phi_hat = rhs_hat / eigvals
 
     # Zero mean potential → set (1,1) component to zero already (handled by eigvals≠0).
 

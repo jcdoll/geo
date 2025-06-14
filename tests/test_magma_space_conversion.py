@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 
 from geo.simulation_engine import GeologySimulation
 from geo.materials import MaterialType
@@ -16,14 +15,14 @@ def test_granite_does_not_melt_in_vacuum():
     sim.temperature[:, :] = 300.0
 
     # Paint a granite blob near the top-centre.
-    granite_center = (width // 2, 3)
+    granite_center = (3, width // 2)  # (y, x)
     granite_radius = 5
-    sim.add_material_blob(*granite_center, radius=granite_radius, material_type=MaterialType.GRANITE)
+    sim.material_processes_module.paint_blob(*granite_center, radius=granite_radius, material=MaterialType.GRANITE)
 
     # Advance one full physics step – includes settling & metamorphism.
     sim.step_forward()
 
     # Verify **all** cells of the granite blob remain granite.
     yy, xx = np.ogrid[:height, :width]
-    g_mask = (xx - granite_center[0]) ** 2 + (yy - granite_center[1]) ** 2 <= granite_radius ** 2
+    g_mask = (xx - granite_center[1]) ** 2 + (yy - granite_center[0]) ** 2 <= granite_radius ** 2
     assert np.all(sim.material_types[g_mask] == MaterialType.GRANITE), "Granite blob should stay granite in vacuum." 

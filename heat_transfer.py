@@ -276,8 +276,8 @@ class HeatTransfer:
         volumetric_power_density = h_effective * (T_cooling - T_space) / (surface_thickness * self.sim.seconds_per_year)
         self.sim.power_density[final_coords_y, final_coords_x] -= volumetric_power_density
         
-        # Update thermal flux tracking
-        total_radiative_power = np.sum(volumetric_power_density * self.sim.cell_size**2 * surface_thickness)
+        # Track total radiative output (positive magnitude)
+        total_radiative_power = np.sum(volumetric_power_density * (self.sim.cell_size ** 3))  # W
         self.sim.thermal_fluxes['radiative_output'] = total_radiative_power
         
         return working_temp
@@ -366,14 +366,15 @@ class HeatTransfer:
         volumetric_power_density = power_per_area / (surface_thickness * self.sim.seconds_per_year)
         self.sim.power_density[final_coords_y, final_coords_x] -= volumetric_power_density
         
+        # Track total radiative output (positive magnitude)
+        total_radiative_power = np.sum(volumetric_power_density * (self.sim.cell_size ** 3))  # W
+        self.sim.thermal_fluxes['radiative_output'] = total_radiative_power
+        
         return working_temp
     
     def _solve_non_radiative_sources(self, temperature: np.ndarray, non_space_mask: np.ndarray) -> np.ndarray:
         """Apply all non-radiative heat sources"""
         working_temp = temperature.copy()
-        
-        # Reset power density tracking
-        self.sim.power_density.fill(0.0)
         
         # Calculate heat sources
         internal_source = self._calculate_internal_heating_source(non_space_mask)
@@ -393,15 +394,36 @@ class HeatTransfer:
         if not np.any(non_space_mask):
             return source_term
         
-        # Calculate depth-dependent heating
+        # ------------------------------------------------------------------
+        # Match the original two-component heating model:
+        #   1.  **Crustal radiogenic heating** concentrated near the surface
+        #       with an exponential fall-off.
+        #   2.  **Core / primordial heating** represented by a Gaussian
+        #       centred at the planetary core.
+        # This reproduces the behaviour of
+        # ``simulation_engine_original._calculate_internal_heating_source``.
+        # ------------------------------------------------------------------
+
         distances = self.sim._get_distances_from_center()
         planet_radius = self.sim._get_planet_radius()
-        
-        # Normalized depth (0 at surface, 1 at center)
-        depth_normalized = np.maximum(0, (planet_radius - distances) / planet_radius)
-        
-        # Exponential heating profile
-        heating_rate = 1e-6 * np.exp(depth_normalized / self.sim.core_heating_depth_scale)  # W/m³
+
+        # Relative depth: 0 at surface, 1 at centre.
+        relative_depth = np.clip(1.0 - distances / planet_radius, 0.0, 1.0)
+
+        # ---- 1. Radiogenic crustal heating ---------------------------------
+        CRUSTAL_SURFACE_RATE = 3e-6          # W/m³ at the surface-adjacent crust
+        crust_decay_length = 0.1             # characteristic thickness (fraction of radius)
+        crustal_heating_rate = CRUSTAL_SURFACE_RATE * np.exp(-(1.0 - relative_depth) / crust_decay_length)
+
+        # ---- 2. Core / primordial heating ----------------------------------
+        CORE_CENTRE_RATE = 10e-6             # W/m³ at the very centre
+        core_sigma = max(1e-3, self.sim.core_heating_depth_scale)  # avoid σ=0
+        core_heating_rate = CORE_CENTRE_RATE * np.exp(-(relative_depth / core_sigma) ** 2)
+
+        # Optional visibility boost (kept for pedagogical scaling parity)
+        internal_boost = getattr(self.sim, "internal_heating_boost", 1.0)
+
+        heating_rate = (crustal_heating_rate + core_heating_rate) * internal_boost  # W/m³
         
         # Convert to temperature change rate
         valid_cells = non_space_mask & (self.sim.density > 0) & (self.sim.specific_heat > 0)
@@ -412,7 +434,7 @@ class HeatTransfer:
         
         # Update power density and flux tracking
         self.sim.power_density[valid_cells] += heating_rate[valid_cells]
-        total_internal_power = np.sum(heating_rate[valid_cells] * self.sim.cell_size**2)
+        total_internal_power = np.sum(heating_rate[valid_cells] * (self.sim.cell_size ** 3))  # W
         self.sim.thermal_fluxes['internal_heating'] = total_internal_power
         
         return source_term
@@ -432,6 +454,22 @@ class HeatTransfer:
         if not np.any(surface_candidates):
             return source_term
         
+        # Calculate global planet albedo (same as original simulation)
+        albedo = np.zeros_like(self.sim.temperature)
+        unique_materials = set(self.sim.material_types[surface_candidates].flatten())
+        for material_type in unique_materials:
+            if material_type != MaterialType.SPACE:
+                material_props = self.sim.material_db.get_properties(material_type)
+                material_albedo = getattr(material_props, 'albedo', 0.3)
+                material_mask = (self.sim.material_types == material_type) & surface_candidates
+                albedo[material_mask] = material_albedo
+        
+        if np.any(surface_candidates):
+            surface_weights = np.ones_like(self.sim.temperature)
+            planet_albedo = np.average(albedo[surface_candidates], weights=surface_weights[surface_candidates])
+        else:
+            planet_albedo = 0.2  # Default
+        
         # Calculate solar heating based on angle from solar direction
         center_x, center_y = self.sim.center_of_mass
         solar_dir_x, solar_dir_y = self.sim._get_solar_direction()
@@ -450,8 +488,8 @@ class HeatTransfer:
         dot_product = (pos_x * solar_dir_x + pos_y * solar_dir_y) / safe_distance
         solar_intensity_factor = np.maximum(0.0, dot_product)
         
-        # Calculate effective solar constant
-        effective_solar_constant = self.sim.solar_constant * self.sim.planetary_distance_factor
+        # Calculate effective solar constant (same as original simulation)
+        effective_solar_constant = self.sim.solar_constant * (1.0 - planet_albedo)
         
         # Apply atmospheric absorption
         source_term = self._solve_atmospheric_absorption(non_space_mask, solar_intensity_factor, effective_solar_constant, source_term)
@@ -493,8 +531,8 @@ class HeatTransfer:
                 if self.sim.material_types[y, x] == MaterialType.SPACE:
                     continue
                 
-                # Initial intensity based on solar angle
-                intensity = effective_solar_constant * solar_intensity_factor[y, x]
+                # Initial intensity based on solar angle (same as original simulation)
+                intensity = effective_solar_constant * self.sim.planetary_distance_factor * solar_intensity_factor[y, x]
                 
                 if intensity <= 0:
                     continue
@@ -525,11 +563,11 @@ class HeatTransfer:
                     if (self.sim.material_types[y, x] == MaterialType.AIR or 
                         self.sim.material_types[y, x] == MaterialType.WATER_VAPOR):
                         # Atmospheric heating
-                        self.sim.thermal_fluxes['atmospheric_heating'] += effective_absorbed * self.sim.cell_size**2
+                        self.sim.thermal_fluxes['atmospheric_heating'] += volumetric_power * (self.sim.cell_size ** 3)
                     else:
                         # Surface heating
                         self.sim.power_density[y, x] += volumetric_power
-                        self.sim.thermal_fluxes['solar_input'] += effective_absorbed * self.sim.cell_size**2
+                        self.sim.thermal_fluxes['solar_input'] += volumetric_power * (self.sim.cell_size ** 3)
         
         return source_term
     
@@ -570,4 +608,19 @@ class HeatTransfer:
             temp_diff = avg_atmo_neighbor_temp[mixing_mask] - working_temp[mixing_mask]
             working_temp[mixing_mask] += self.sim.atmospheric_convection_mixing * temp_diff
         
-        return working_temp 
+        return working_temp
+
+    # ------------------------------------------------------------------
+    #  Public helper – modular way to insert a local heat source
+    # ------------------------------------------------------------------
+    def inject_heat(self, y: int, x: int, radius: int, delta_T: float) -> None:
+        """Increase temperature by *delta_T* Kelvin inside a circular blob.
+
+        This is the preferred high-level API for tests and interactive tools
+        when using the new modular architecture.  It operates directly on the
+        main temperature grid and leaves bookkeeping (e.g., property cache
+        invalidation) to the caller if material changes are also applied.
+        """
+        yy, xx = np.ogrid[:self.sim.height, :self.sim.width]
+        mask = (yy - y) ** 2 + (xx - x) ** 2 <= radius ** 2
+        self.sim.temperature[mask] += delta_T 

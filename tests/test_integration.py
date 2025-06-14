@@ -6,7 +6,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from simulation_engine import GeologySimulation
-from materials import MaterialType, MaterialDatabase
+from geo.materials import MaterialType, MaterialDatabase
 
 
 def test_complete_simulation_workflow():
@@ -52,20 +52,23 @@ def test_rock_transformation_workflow():
     
     # Apply extreme conditions to trigger transformations
     # High heat for melting
-    sim.add_heat_source(5, 5, 4, 1800)
+    sim.heat_transfer_module.inject_heat(5, 5, 4, 1800)
     # High pressure for metamorphism  
-    sim.apply_tectonic_stress(2, 8, 3, 300)
+    sim.fluid_dynamics_module.apply_pressure_offset(2, 8, 3, 300)
     
     # Run for many steps to allow transformations
     for _ in range(20):
         sim.step_forward()
     
-    # Check that composition changed or simulation ran successfully
-    final_stats = sim.get_stats()
-    final_composition = final_stats['material_composition']
+    # Compute basic composition
+    material_strings = np.array([m.value for m in sim.material_types.flatten()])
+    unique, counts = np.unique(material_strings, return_counts=True)
+    final_composition = {u: 100.0 * c / material_strings.size for u, c in zip(unique, counts)}
+
+    final_time = sim.time
     
     # At minimum, verify simulation stability
-    assert final_stats['time'] > 0
+    assert final_time > 0
     assert len(final_composition) > 0
     assert abs(sum(final_composition.values()) - 100.0) < 0.1
 
@@ -76,12 +79,11 @@ def test_heat_and_pressure_interaction():
     
     # Apply both heat and pressure to same region
     x, y = 6, 5
-    sim.add_heat_source(x, y, 2, 1000)
-    sim.apply_tectonic_stress(x, y, 2, 200)
+    sim.heat_transfer_module.inject_heat(x, y, 2, 1000)
+    sim.fluid_dynamics_module.apply_pressure_offset(x, y, 2, 200)
     
-    # Record state before and after
-    temp_before = sim.temperature[y, x]
-    pressure_before = sim.pressure[y, x]
+    # Basic sanity check on composition size
+    stats_material_count = len(set(m.value for m in sim.material_types.flatten()))
     
     # Run simulation steps
     for _ in range(5):
@@ -97,6 +99,9 @@ def test_heat_and_pressure_interaction():
     assert isinstance(temp_after, (int, float)), "Temperature should be numeric"
     assert isinstance(pressure_after, (int, float)), "Pressure should be numeric"
 
+    assert sim.time > 0
+    assert stats_material_count > 0
+
 
 def test_simulation_reversibility():
     """Test that simulation can be reversed accurately"""
@@ -111,8 +116,8 @@ def test_simulation_reversibility():
     }
     
     # Use smaller changes to make reversibility more accurate
-    sim.add_heat_source(4, 3, 1, 50)  # Smaller heat change
-    sim.apply_tectonic_stress(2, 2, 1, 10)  # Smaller pressure change
+    sim.heat_transfer_module.inject_heat(4, 3, 1, 50)  # Smaller heat change
+    sim.fluid_dynamics_module.apply_pressure_offset(2, 2, 1, 10)  # Smaller pressure change
     
     # Use fewer steps to minimize accumulated error
     num_steps = 3
@@ -185,7 +190,7 @@ def test_visualization_data_consistency():
     np.testing.assert_array_equal(power1, sim.power_density)
     
     # Apply changes and step forward
-    sim.add_heat_source(5, 4, 2, 900)
+    sim.heat_transfer_module.inject_heat(5, 4, 2, 900)
     sim.step_forward()
     
     # Get new visualization data
@@ -233,10 +238,10 @@ def test_extreme_conditions_handling():
     sim = GeologySimulation(width=10, height=10)
     
     # Apply extreme heat
-    sim.add_heat_source(5, 5, 5, 3000)  # Very high temperature
+    sim.heat_transfer_module.inject_heat(5, 5, 5, 3000)  # Very high temperature
     
     # Apply extreme pressure
-    sim.apply_tectonic_stress(5, 5, 5, 1000)  # Very high pressure
+    sim.fluid_dynamics_module.apply_pressure_offset(5, 5, 5, 1000)  # Very high pressure
     
     # Should not crash and should remain stable
     for _ in range(10):

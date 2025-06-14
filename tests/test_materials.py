@@ -8,7 +8,8 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from materials import MaterialType, MaterialDatabase, MaterialProperties
+from geo.materials import MaterialType, MaterialDatabase, MaterialProperties
+from geo.materials import TransitionRule, MaterialType
 
 
 class TestMaterialType:
@@ -39,7 +40,6 @@ class TestMaterialProperties:
     
     def test_material_properties_creation(self):
         """Test creating material properties"""
-        from materials import TransitionRule, MaterialType
         props = MaterialProperties(
             density=2650.0,
             thermal_conductivity=2.5,

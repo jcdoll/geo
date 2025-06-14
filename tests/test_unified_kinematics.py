@@ -6,7 +6,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from simulation_engine import GeologySimulation
-from materials import MaterialType
+from geo.materials import MaterialType
 import pytest
 
 
@@ -76,6 +76,7 @@ class TestRisingBubbleScenario:
         # Update material properties
         self.sim._update_material_properties()
         self.sim._calculate_planetary_pressure()
+        self.sim.fluid_dynamics_module.calculate_planetary_pressure()
         
         # Initialize velocity fields
         self.sim.velocity_x = np.zeros((20, 20), dtype=np.float64)
@@ -190,7 +191,7 @@ class TestDamBreakScenario:
         
         # Update properties and pressure
         self.sim._update_material_properties()
-        self.sim._calculate_planetary_pressure()
+        self.sim.fluid_dynamics_module.calculate_planetary_pressure()
         
         # Initialize velocity fields
         self.sim.velocity_x = np.zeros((20, 30), dtype=np.float64)
@@ -237,7 +238,7 @@ class TestDamBreakScenario:
         # Remove part of dam to create breach
         breach_y = 10
         self.sim.material_types[breach_y, dam_x] = MaterialType.AIR
-        self.sim._calculate_planetary_pressure()
+        self.sim.fluid_dynamics_module.calculate_planetary_pressure()
         
         # Check that breach exists
         assert self.sim.material_types[breach_y, dam_x] == MaterialType.AIR, "Dam breach should exist"
@@ -279,7 +280,7 @@ class TestRockOnIceMeltCollapse:
         
         # Update properties
         self.sim._update_material_properties()
-        self.sim._calculate_planetary_pressure()
+        self.sim.fluid_dynamics_module.calculate_planetary_pressure()
         
         # Initialize velocity fields
         self.sim.velocity_x = np.zeros((20, 20), dtype=np.float64)
@@ -368,7 +369,7 @@ class TestHydrostaticEquilibrium:
         
         # Update properties and let system settle
         self.sim._update_material_properties()
-        self.sim._calculate_planetary_pressure()
+        self.sim.fluid_dynamics_module.calculate_planetary_pressure()
         
         # Initialize velocity fields to zero
         self.sim.velocity_x = np.zeros((20, 20), dtype=np.float64)

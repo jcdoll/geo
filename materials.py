@@ -38,6 +38,17 @@ class MaterialType(Enum):
     AIR = "air"
     SPACE = "space"
 
+    # ------------------------------------------------------------------
+    # Enable ordering so that high-level numpy helpers like np.unique can
+    # operate directly on arrays of MaterialType.  Ordering is defined by the
+    # lexicographic order of their string value which is deterministic and
+    # adequate for set-like operations (no physical meaning implied).
+    # ------------------------------------------------------------------
+    def __lt__(self, other):  # type: ignore[override]
+        if isinstance(other, MaterialType):
+            return self.value < other.value
+        return NotImplemented
+
 @dataclass
 class TransitionRule:
     """Defines a material transition under specific P-T conditions"""
@@ -65,6 +76,8 @@ class MaterialProperties:
     emissivity: float = 0.0  # thermal emissivity (0-1) for radiative cooling
     albedo: float = 0.0      # solar albedo (0-1) for solar reflection
     thermal_expansion: float = 0.0  # volumetric expansion coefficient (1/K)
+    kinematic_viscosity: float = 1e-6  # m^2/s (default fallback)
+    rigidity_coeff: float = 0.0  # >0 for solids to suppress flow (1/s)
     transitions: List[TransitionRule] = field(default_factory=list)  # All possible transitions for this material
     is_solid: bool = True  # Whether rocks cannot fall through this material (default: solid)
     
@@ -271,7 +284,8 @@ class MaterialDatabase:
                     TransitionRule(MaterialType.ICE, float('-inf'), 0, 0, float('inf'), "Freezing to ice"),
                     TransitionRule(MaterialType.WATER_VAPOR, 100, float('inf'), 0, float('inf'), "Vaporization to water vapor")
                 ],
-                is_solid=False  # Liquid - rocks can sink through it
+                is_solid=False,  # Liquid - rocks can sink through it
+                kinematic_viscosity=1e-6, rigidity_coeff=0.0
             ),
             MaterialType.ICE: MaterialProperties(
                 density=920, thermal_conductivity=2.2, specific_heat=2108,
@@ -302,7 +316,8 @@ class MaterialDatabase:
                 thermal_expansion=3.7e-3,  # High volumetric expansion coefficient for gas (ideal gas law)
                 color_rgb=(245, 245, 255),  # Very light blue/white - dry air
                 transitions=[],  # Dry air doesn't transition (no water content to condense)
-                is_solid=False  # Gas - rocks can fall through it
+                is_solid=False,  # Gas - rocks can fall through it
+                kinematic_viscosity=1.5e-5, rigidity_coeff=0.0
             ),
             MaterialType.SPACE: MaterialProperties(
                 density=1e-10, thermal_conductivity=1e-10, specific_heat=1e-10,  # 0 density for vacuum
@@ -382,4 +397,16 @@ class MaterialDatabase:
     
     def get_weathering_products(self, material_type: MaterialType) -> List[MaterialType]:
         """Get weathering products for a material type"""
-        return self.weathering_products.get(material_type, []) 
+        return self.weathering_products.get(material_type, [])
+
+    # ------------------------------------------------------------------
+    #  New helper – effective density including thermal expansion
+    # ------------------------------------------------------------------
+    def effective_density(self, material_type: MaterialType, temperature: float, *, reference_T: float = 273.15) -> float:
+        """Return density adjusted for thermal expansion β (volumetric).
+
+        ρ_eff = ρ₀ / (1 + β (T - T₀))
+        """
+        props = self.get_properties(material_type)
+        beta = getattr(props, "thermal_expansion", 0.0)
+        return props.density / max(1.0 + beta * (temperature - reference_T), 0.1) 

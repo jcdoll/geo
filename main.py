@@ -37,7 +37,7 @@ if __name__ == "__main__":
     print("• L: Toggle logging (INFO/DEBUG)")
     print("• R: Step forward")
     print("• T: Step backward")
-    print("• 1/2/3/4: Switch display modes")
+    print("• 1/2/3/4/5: Switch display modes")
     print()
     print("Starting simulation...")
     print()

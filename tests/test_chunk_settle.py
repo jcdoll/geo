@@ -24,7 +24,7 @@ def test_chunk_settle_respects_terminal_velocity():
     # Ensure terminal velocity exactly 3 cells
     sim.terminal_settle_velocity = 3
 
-    moved = sim._settle_unsupported_chunks()
+    moved = sim.fluid_dynamics_module.settle_unsupported_chunks()
     assert moved, "Chunk should have moved"
 
     # Expected new row 3 for basalt cell (moved down by 3)
@@ -51,7 +51,7 @@ def test_chunk_settle_inf_velocity_falls_all_the_way():
     sim.center_of_mass = (height // 2, width // 2)
     sim.terminal_settle_velocity = float("inf")
 
-    moved = sim._settle_unsupported_chunks()
+    moved = sim.fluid_dynamics_module.settle_unsupported_chunks()
     assert moved, "Chunk should have moved with infinite velocity"
 
     # Should now be at bottom row (index 9)

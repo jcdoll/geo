@@ -109,7 +109,10 @@ class GeologyVisualizer:
         self.tool_radius = 3
         self.tool_intensity = 100
         self.selected_tile = None  # (x, y) coordinates of selected tile
-        self.add_materials = [m for m in MaterialType if m not in (MaterialType.SPACE,)]
+        # Reorder materials to start with common ones (water, air, magma, water_vapor) then others
+        common_materials = [MaterialType.WATER, MaterialType.AIR, MaterialType.MAGMA, MaterialType.WATER_VAPOR]
+        other_materials = [m for m in MaterialType if m not in (MaterialType.SPACE,) and m not in common_materials]
+        self.add_materials = common_materials + other_materials
         self._add_material_index = 0
         
         # UI state
@@ -174,29 +177,49 @@ class GeologyVisualizer:
             })
         y += button_height + spacing * 3
         
-        # Display mode buttons
-        display_modes = [('Materials', 'materials'), ('Temperature', 'temperature'), ('Pressure', 'pressure'), ('Power', 'power')]
-        for text, mode in display_modes:
+        # Display mode buttons in a 2-column grid to save vertical space
+        display_modes = [('Materials', 'materials'), ('Temperature', 'temperature'), ('Power', 'power'), ('Pressure', 'pressure'), ('Velocity', 'velocity')]
+        display_button_width = button_width // 2 - 2
+        display_button_height = button_height - 2  # Slightly shorter
+        
+        for i, (text, mode) in enumerate(display_modes):
+            col = i % 2  # 0 or 1
+            row = i // 2  # 0, 1, 2
+            button_x = x + col * (display_button_width + 4)
+            button_y = y + row * (display_button_height + spacing)
+            
             buttons.append({
-                'rect': pygame.Rect(x, y, button_width, button_height),
+                'rect': pygame.Rect(button_x, button_y, display_button_width, display_button_height),
                 'text': text,
                 'action': f'display_{mode}',
                 'color': self.colors['button']
             })
-            y += button_height + spacing
+        
+        # Update y to account for the grid (3 rows of buttons)
+        y += 3 * (display_button_height + spacing)
         
         y += spacing * 2
         
-        # Tool buttons
+        # Tool buttons in a 2x2 grid to save vertical space
         tools = [('Heat Source', 'heat'), ('Pressure', 'pressure'), ('Delete', 'delete'), ('Add', 'add')]
-        for text, tool in tools:
+        tool_button_width = button_width // 2 - 2
+        tool_button_height = button_height - 2  # Slightly shorter
+        
+        for i, (text, tool) in enumerate(tools):
+            col = i % 2  # 0 or 1
+            row = i // 2  # 0 or 1
+            button_x = x + col * (tool_button_width + 4)
+            button_y = y + row * (tool_button_height + spacing)
+            
             buttons.append({
-                'rect': pygame.Rect(x, y, button_width, button_height),
+                'rect': pygame.Rect(button_x, button_y, tool_button_width, tool_button_height),
                 'text': text,
                 'action': f'tool_{tool}',
                 'color': self.colors['button']
             })
-            y += button_height + spacing
+        
+        # Update y to account for the grid (2 rows of buttons)
+        y += 2 * (tool_button_height + spacing)
         
         y += spacing * 2
         
@@ -363,6 +386,49 @@ class GeologyVisualizer:
             colors[cool_mask, 2] = (cooling_norm[cool_mask] * 255).astype(np.uint8)
             
             return colors
+        elif self.display_mode == 'velocity':
+            # Get velocity magnitude from fluid dynamics module
+            if hasattr(self.simulation, 'fluid_dynamics_module'):
+                velocity_x = self.simulation.fluid_dynamics_module.velocity_x
+                velocity_y = self.simulation.fluid_dynamics_module.velocity_y
+                velocity_magnitude = np.sqrt(velocity_x**2 + velocity_y**2)
+                
+                # Convert to mm/year for better geological visualization
+                seconds_per_year = 365.25 * 24 * 3600
+                velocity_mm_per_year = velocity_magnitude * seconds_per_year * 1000  # m/s to mm/year
+                
+                # Use logarithmic scaling for velocity to handle wide range of values
+                # Add small epsilon to avoid log(0)
+                epsilon = 1e-10
+                log_velocity = np.log10(velocity_mm_per_year + epsilon)
+                
+                # Set reasonable velocity range for geological processes (mm/year)
+                # Geological velocities: ~1e-6 mm/year (very slow) to ~100 mm/year (fast flow)
+                log_min = -6.0   # 1e-6 mm/year (extremely slow geological processes)
+                log_max = 2.0    # 100 mm/year (fast geological flow like landslides)
+                
+                # Normalize to [0, 1] range
+                velocity_norm = np.clip((log_velocity - log_min) / (log_max - log_min), 0, 1)
+                
+                # Create color map: blue (slow) to red (fast) through green
+                colors = np.zeros((self.sim_height, self.sim_width, 3), dtype=np.uint8)
+                
+                # Use a blue-green-red color scheme
+                # Blue component: high for low velocities, decreases with velocity
+                colors[:, :, 2] = ((1 - velocity_norm) * 255).astype(np.uint8)
+                
+                # Green component: peaks in the middle range
+                green_factor = 4 * velocity_norm * (1 - velocity_norm)  # Parabolic peak at 0.5
+                colors[:, :, 1] = (green_factor * 255).astype(np.uint8)
+                
+                # Red component: high for high velocities
+                colors[:, :, 0] = (velocity_norm * 255).astype(np.uint8)
+                
+                return colors
+            else:
+                # Fallback if no fluid dynamics module
+                colors = np.zeros((self.sim_height, self.sim_width, 3), dtype=np.uint8)
+                return colors
     
     def _draw_simulation(self):
         """Draw the simulation grid"""
@@ -405,7 +471,7 @@ class GeologyVisualizer:
         self._draw_selected_tile_info()
         
         # Draw color bar for temperature and pressure modes
-        if self.display_mode in ['temperature', 'pressure', 'power']:
+        if self.display_mode in ['temperature', 'pressure', 'power', 'velocity']:
             self._draw_color_bar()
     
     def _draw_selected_tile_info(self):
@@ -429,6 +495,20 @@ class GeologyVisualizer:
         power_watts = power_density * cell_volume  # W per cell
         power_formatted = self._format_power_smart(power_watts)
         
+        # Get velocity information if available
+        velocity_info = "N/A"
+        if hasattr(self.simulation, 'fluid_dynamics_module'):
+            vx = self.simulation.fluid_dynamics_module.velocity_x[y, x]
+            vy = self.simulation.fluid_dynamics_module.velocity_y[y, x]
+            velocity_magnitude = (vx**2 + vy**2)**0.5
+            # Convert to mm/year for better readability
+            seconds_per_year = 365.25 * 24 * 3600
+            velocity_mm_per_year = velocity_magnitude * seconds_per_year * 1000
+            if velocity_mm_per_year > 1e-6:  # Only show if significant
+                velocity_info = f"{velocity_mm_per_year:.2e} mm/year"
+            else:
+                velocity_info = "~0 mm/year"
+        
         # Position in top-left of simulation area
         info_x = 10  # 10px from left edge
         info_y = self.status_bar_height + 10  # 10px below status bar
@@ -441,6 +521,7 @@ class GeologyVisualizer:
             f"Temperature: {temp:.1f}°C", 
             f"Pressure: {pressure:.2f} MPa",
             f"Power: {power_formatted}",
+            f"Velocity: {velocity_info}",
             f"Age: {age:.0f} years"
         ]
         
@@ -541,6 +622,33 @@ class GeologyVisualizer:
                                (bar_x, bar_y + bar_height - i - 1), 
                                (bar_x + bar_width, bar_y + bar_height - i - 1))
         
+        elif self.display_mode == 'velocity':
+            # Velocity range (logarithmic scale)
+            log_min = -6.0   # 1e-6 mm/year
+            log_max = 2.0    # 100 mm/year
+            min_val = 10**log_min
+            max_val = 10**log_max
+            unit = "mm/year"
+            
+            # Draw gradient bar (blue to green to red for velocity)
+            for i in range(bar_height):
+                normalized = i / bar_height
+                
+                # Blue component: high for low velocities, decreases with velocity
+                blue = int((1 - normalized) * 255)
+                
+                # Green component: peaks in the middle range
+                green_factor = 4 * normalized * (1 - normalized)  # Parabolic peak at 0.5
+                green = int(green_factor * 255)
+                
+                # Red component: high for high velocities
+                red = int(normalized * 255)
+                
+                color = (red, green, blue)
+                pygame.draw.line(self.screen, color, 
+                               (bar_x, bar_y + bar_height - i - 1), 
+                               (bar_x + bar_width, bar_y + bar_height - i - 1))
+        
         # Draw border around color bar
         pygame.draw.rect(self.screen, self.colors['text'], 
                         (bar_x, bar_y, bar_width, bar_height), 2)
@@ -572,6 +680,19 @@ class GeologyVisualizer:
             cool_text = f"-{self._format_power_smart(max_cooling)}"
             cool_surface = self.small_font.render(cool_text, True, (100, 100, 255))  # Light blue
             self.screen.blit(cool_surface, (label_x, bar_y + bar_height - 15))
+        elif self.display_mode == 'velocity':
+            # Special formatting for velocity (logarithmic scale)
+            max_text = f"100 {unit}"
+            max_surface = self.small_font.render(max_text, True, self.colors['text'])
+            self.screen.blit(max_surface, (label_x, bar_y - 5))
+            
+            mid_text = f"0.01 {unit}"
+            mid_surface = self.small_font.render(mid_text, True, self.colors['text'])
+            self.screen.blit(mid_surface, (label_x, bar_y + bar_height // 2 - 10))
+            
+            min_text = f"1e-6 {unit}"
+            min_surface = self.small_font.render(min_text, True, self.colors['text'])
+            self.screen.blit(min_surface, (label_x, bar_y + bar_height - 15))
         else:
             # Regular scaling for temperature/pressure
             max_text = f"{max_val:.0f}{unit}"
@@ -592,6 +713,8 @@ class GeologyVisualizer:
             title = "Power"
         elif self.display_mode == 'temperature':
             title = "Temperature"
+        elif self.display_mode == 'velocity':
+            title = "Velocity"
         else:
             title = "Pressure"
         title_surface = self.small_font.render(title, True, self.colors['text'])
@@ -830,7 +953,16 @@ class GeologyVisualizer:
     def _draw_tabbed_content(self):
         """Draw content based on selected tab"""
         x_offset = self.main_panel_width + 10
-        y_offset = 440  # Start below the tab buttons with more spacing
+        
+        # Calculate dynamic y_offset based on where tab buttons end
+        # Find the bottom of the tab buttons by looking at their positions
+        tab_buttons = [btn for btn in self.buttons if btn['action'].startswith('tab_')]
+        if tab_buttons:
+            # Tab buttons are in a 2-row grid, so find the bottom of the second row
+            max_bottom = max(btn['rect'].bottom for btn in tab_buttons)
+            y_offset = max_bottom + 15  # Add some spacing below the buttons
+        else:
+            y_offset = 440  # Fallback to old hardcoded value
         
         if self.sidebar_tab == 'controls':
             self._draw_controls_tab(x_offset, y_offset)
@@ -978,7 +1110,7 @@ class GeologyVisualizer:
             "  D: Delete mass tool",
             "  L: Toggle logging (INFO/DEBUG)",
             "  M: Toggle kinematics mode",
-            "  1/2/3/4: Switch display modes",
+            "  1/2/3/4/5: Switch display modes",
             "  Tab: Cycle sidebar tabs",
             "  Q: Change quality setting"
         ]
@@ -1160,11 +1292,14 @@ class GeologyVisualizer:
                 # 2: Temperature view
                 self.display_mode = 'temperature'
             elif event.key == pygame.K_3:
-                # 3: Pressure view
-                self.display_mode = 'pressure'
-            elif event.key == pygame.K_4:
-                # 4: Power view
+                # 3: Power view
                 self.display_mode = 'power'
+            elif event.key == pygame.K_4:
+                # 4: Pressure view
+                self.display_mode = 'pressure'
+            elif event.key == pygame.K_5:
+                # 5: Velocity view
+                self.display_mode = 'velocity'
             elif event.key == pygame.K_r:
                 # R: Reset simulation (now centralized in GeologySimulation)
                 self.simulation.reset()
@@ -1330,7 +1465,7 @@ def main():
     print("  SPACE: Play/Pause simulation")
     print("  Left/Right arrows: Step backward/forward")
     print("  Up/Down arrows: Adjust simulation speed")
-    print("  1-4: Switch visualization modes (Material, Temperature, Pressure, Power)")
+    print("  1-5: Switch visualization modes (Material, Temperature, Power, Pressure, Velocity)")
     print("  R: Reset simulation")
     print("  G: Toggle graphs display")
     print("  Q: Change quality setting (1=Full, 2=Balanced, 3=Fast)")
