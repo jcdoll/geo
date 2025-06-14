@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Optional
 import numpy as np
+import time, traceback
 
 try:
     # Package-relative imports – preferred when running as ``python -m geo.main``
@@ -162,43 +163,83 @@ class GeoGame(CoreState, CoreToolsMixin):
     # ------------------------------------------------------------------
     def step_forward(self, dt: Optional[float] = None):  # type: ignore[override]
         """Advance simulation by one macro-step (default: ``self.dt``)."""
-        import traceback
+        # --------------------------------------------------------------
+        # Performance instrumentation – wall-clock timings per section
+        # --------------------------------------------------------------
+        step_start_total = time.perf_counter()
+        self._perf_times: dict[str, float] = {}
+        _last_cp = step_start_total
+
         try:
+            # Update configurable dt if caller passed an override
             if dt is not None:
                 self.dt = dt
 
-            # Snapshot for undo – keep this *before* mutating state
+            # 0) Snapshot for undo **before** mutating state
             self._save_state()
+            self._perf_times["save_state"] = time.perf_counter() - _last_cp
+            _last_cp = time.perf_counter()
 
-            # 1) Material property refresh (if user edited grid)
+            # 1) Refresh material-property caches when needed
             if getattr(self, "_properties_dirty", False):
                 self._update_material_properties()
+            self._perf_times["update_props"] = time.perf_counter() - _last_cp
+            _last_cp = time.perf_counter()
 
-            # 2) Thermal diffusion & source terms
+            # 2) Heat diffusion & sources
             new_T, stability = self.heat_transfer.solve_heat_diffusion()
             self.temperature = new_T
+            self._perf_times["heat_diffusion"] = time.perf_counter() - _last_cp
+            _last_cp = time.perf_counter()
 
-            # 3) Self-gravity (needed for pressure & fluid phases)
+            # 3) Self-gravity (Poisson solve + gradient)
             self.calculate_self_gravity()
+            self._perf_times["self_gravity"] = time.perf_counter() - _last_cp
+            _last_cp = time.perf_counter()
 
-            # 4) Pressure
+            # 4) Pressure field (fluid-dynamics module)
             self.fluid_dynamics.calculate_planetary_pressure()
+            self._perf_times["pressure"] = time.perf_counter() - _last_cp
+            _last_cp = time.perf_counter()
 
-            # 5) Density-driven effects (order chosen for stability)
+            # 5) Density-driven processes
             self.fluid_dynamics.apply_density_stratification()
+            self._perf_times["density_strat"] = time.perf_counter() - _last_cp
+            _last_cp = time.perf_counter()
+
+            # 6) Fluid migration (air/water/magma)
             self.fluid_dynamics.apply_fluid_dynamics()
+            self._perf_times["fluid_dyn"] = time.perf_counter() - _last_cp
+            _last_cp = time.perf_counter()
+
+            # 7) Gravitational collapse of unsupported solids
             self.fluid_dynamics.apply_gravitational_collapse()
+            self._perf_times["collapse"] = time.perf_counter() - _last_cp
+            _last_cp = time.perf_counter()
 
-            # 6) Increment time – use *effective* dt so GUI displays stable value
+            # 8) Advance simulation clock using stability-scaled dt
             self.time += self.dt * stability
-            self._last_stability_factor = stability  # GUI diagnostic
+            self._last_stability_factor = stability
             self._actual_effective_dt = self.dt * stability
+            self._perf_times["update_time"] = time.perf_counter() - _last_cp
+            _last_cp = time.perf_counter()
 
-            # 7) Optional analytics / graph data hook
+            # 9) Optional analytics (graphs)
             self._record_time_series_data()
+            self._perf_times["record_ts"] = time.perf_counter() - _last_cp
+
         except Exception:
             traceback.print_exc()
             raise
+        finally:
+            # Total wall-clock duration
+            self._perf_times["total"] = time.perf_counter() - step_start_total
+
+            # Emit nicely formatted per-line timings when verbose logging is on
+            if getattr(self, "logging_enabled", False):
+                self.logger.info("Performance timing (ms):")
+                for name, seconds in self._perf_times.items():
+                    self.logger.info("  %s: %.1f", f"{name:<15}", seconds * 1000.0)
 
     def step_backward(self):  # type: ignore[override]
         """Undo last step (if history available)."""

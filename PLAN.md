@@ -1658,3 +1658,133 @@ If so we will:
 3) calculate flulid flow with projection method
 
 But that will be awhile from now. Let's start with agreeing on a plan and then doing item number 1.
+
+=====
+
+o3 feedback:
+
+I’ve gone through geo/PLAN.md line-by-line and everything in it is technically sound and fully compatible with the current code-base:
+Self-gravity potential (Φ) via FFT Poisson
+Constant-coefficient Laplacian ⇒ DST/DCT or full FFT is the fastest choice.
+The vacuum/SPACE mask can be handled by zero-padding or by assigning ρ≈0 outside the planet (your document already mentions this).
+Pressure from multigrid with variable ρ
+Our existing red/black multigrid kernel can be reused verbatim; only the RHS (∇·(ρ g)) changes.
+No more empirical radial patch will be needed because g already points in the correct direction everywhere.
+Velocity projection for incompressible flow
+Again reuses the same multigrid kernel (now with rhs = ρ/Δt · ∇·v).
+Provisional-velocity step exactly matches the unified-kinematics code already sketched.
+I don’t see any red flags. The division of work into three milestones is also practical:
+Milestone 1 – Φ solver + g field (stand-alone test with static densities).
+Milestone 2 – plug Φ into pressure solve and retire the current COM-based routine.
+Milestone 3 – replace the 3-pass material moves with a projection-method fluid loop.
+No re-architecture of the data structures is required; we only add arrays phi, g_x, g_y.
+Therefore I fully agree with the plan.
+Next step ─ implement Milestone 1:
+Add gravity_solver.py module with an FFT-based Poisson solver.
+Expose CoreState.calculate_self_gravity() that fills phi, gravity_x, gravity_y.
+Unit-test on a simple two-layer density column (analytical solution available).
+Let me know if you’d like me to start scaffolding that module now.
+
+====
+
+Here’s the short-to-medium-term roadmap I’m proposing for the “fluid dynamics” milestone. It folds in all mass–transport effects (gases, liquids, molten rock, solids sinking through fluids) while keeping the codebase modular and testable.
+1. Scope recap
+• “Fluid dynamics” will become the single authority for momentum / mass transport.
+It has to handle:
+Buoyant rise & dense-object settling (solids through liquids, liquids through gases, etc.).
+Bulk flow of continuous phases (air, water, magma) driven by pressure gradients.
+Coupling to gravity and to phase-change modules (so newly melted magma can flow, condensed water can drain, etc.).
+2. Planned architecture
+A. Data structures
+Keep the per-cell velocity field velocity_x/y in m s⁻¹ (already allocated in CoreState).
+Add a Boolean is_mobile mask (temperature + phase criteria) that other modules can query.
+B. Key solver stages (per macro-step)
+Density/Buoyancy force assembly
+Build ∆ρ = ρ_cell − ρ_background.
+Compute body force f = −g ∆ρ / ρ_ref.
+Tentative velocity update (explicit Euler for now)
+u* = u + Δt f / ρ_cell.
+Pressure projection (incompressible assumption inside mobile phases)
+Solve ∇²p = (ρ/Δt) ∇·u* using existing multigrid Poisson solver.
+Correct velocity: uⁿ⁺¹ = u* − (Δt/ρ) ∇p.
+Advection / upwind transport for temperature & scalar fields (later).
+Material exchange (settling / swapping)
+If a denser voxel sits above a lighter one and u indicates downward motion, swap with probability density_swap_probability.
+Honor the existing memory: “Settling physics should allow any material to fall into fluids with lower density.”
+C. Quality / performance switches
+quality=3 skips projection and falls back to stochastic swaps (fast mode).
+Sub-stepping only when CFL condition violated (max(|u|) * Δt / cell_size ≤ 0.5).
+3. Implementation tasks (incremental)
+1. Refactor fluid_dynamics.py
+Split into three helpers:
+BuoyancyForces – builds body-force field.
+PressureProjection – generic multigrid wrapper (already half-done).
+MaterialReorder – density-based swapping + chunk settling.
+Add velocity update & projection (stages 2–3 above).
+Replace the current air-only migration with velocity-driven advection (initially first-order upwind).
+Expose a visualisation mode “Velocity” (already stubbed in UI) and colour-coded quiver/heatmap.
+Hook phase-change events:
+When magma solidifies or ice melts, mark is_mobile dirty so velocities zero out or are re-initialised.
+Regression tests
+Column-of-water test: dense rock sphere should sink to bottom; timing measurable.
+Rayleigh-Taylor instability: two-layer fluids should mix in < N steps.
+Optimisation & cleanup
+Switch to SciPy FFT-Poisson in high-quality mode.
+Add Numba optional acceleration for advection loop.
+4. Deliverables per PR/batch
+• PR 1 – “Framework”: new velocity fields, body-force builder, projection solver wired but disabled by default; unit tests compile.
+PR 2 – “Buoyancy & swapping”: enable stages 1, 5; dense sphere test passes; slow but stable.
+PR 3 – “Full flow”: advection + projection enabled; quality modes honoured; velocity visualisation.
+PR 4 – “Phase-change coupling & perf polish”: end-to-end benchmarks, memory cleanup, docs.
+5. Next immediate action
+Start PR 1: refactor fluid_dynamics.py, introduce velocity_x/y update skeleton, wire into GeoGame.step_forward, write minimal tests for force assembly and projection solve convergence.
+Let me know if you’d like any tweaks before I start coding, or if a different phasing makes more sense for your review process.
+
+==
+
+Density-swap choice: deterministic vs. probabilistic
+Deterministic swapping (always swap when ρ₁ > ρ₂)
+Pros
+Physically faithful – heavier parcel always sinks if nothing obstructs it.
+Removes stochastic noise → results reproducible bit-for-bit, which simplifies debugging and regression testing.
+Converges faster to a stratified state; fewer frames wasted in “maybe” moves.
+Cons
+Can create large discontinuous jumps each frame (“checkerboard” artefacts) unless swaps are carefully ordered or done with a true solver.
+Tends to produce numerically stiff behaviour: many neighbouring cells move simultaneously, then overshoot; you end up adding extra relaxations or sub-stepping anyway.
+Makes lower-quality modes almost as expensive as high-quality, because every candidate cell must be inspected every frame.
+Probabilistic swapping (swap with p < 1, e.g. 0.25)
+Pros
+Implicitly throttles the rate of rearrangement, acting like a simple sub-step without extra loops.
+Reduces directional bias: with random sampling each frame, swaps happen in varied directions instead of only the traversal order (helps isotropy).
+Allows cheap performance knobs: lower quality → lower probability and/or sample subset of cells.
+Visually smoother; materials “percolate” rather than teleport.
+Cons
+Adds variance: two identical runs may diverge slightly (though still statistically correct).
+Stratification takes more macro-steps – the planet may look “muddy” longer in real-time.
+Harder to write deterministic unit tests (need statistical assertions or a fixed RNG seed).
+Recommended compromise
+High-quality mode (quality 1): deterministic swaps – accuracy favoured over speed.
+Balanced / fast modes (quality 2–3): probabilistic swaps with tunable density_swap_probability and random sub-sampling, giving a linear performance lever.
+Always keep the probability parameter in the config so advanced users can tweak or set to 1.0 for full determinism regardless of quality.
+That way we get reproducibility when we need it, while retaining a cheap “dial” for interactive performance.
+
+====
+
+Understood—let’s adopt a single, deterministic rule set and drop the probabilistic shortcuts.
+Key adjustments to the plan:
+Eliminate density_swap_probability and any quality-based throttling.
+Swap whenever the local body force (from ∆ρ and gravity) points from cell A into neighbour B and ρ_A > ρ_B.
+This applies to all phases—solids through liquids, liquids through gases, etc.
+Collapse quality modes for mass transport.
+We’ll keep the quality flag for purely numerical shortcuts (e.g. coarser Poisson tolerance in fast mode), but density-driven exchanges will always run the full deterministic algorithm.
+Implementation notes
+The MaterialReorder step will scan every mobile voxel once per macro-step (vectorised), evaluate ∇ρ·g, and execute swaps in a stable order to avoid ping-pong.
+No random sampling, no RNG seed, reproducible results.
+Unit tests simplify: we can assert exact final states instead of statistical ranges.
+Performance mitigation
+Because we lose the “skip fraction” lever, we’ll focus on vectorised NumPy operations and, if needed, optional Numba acceleration; but no behavioural difference between quality levels.
+I’ll proceed with the refactor under these constraints. Next commit will:
+Remove density_swap_probability everywhere.
+Introduce deterministic apply_density_stratification() in fluid_dynamics.py.
+Update any callers/tests accordingly.
+If that sounds good, I’ll start implementing
