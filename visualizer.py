@@ -44,7 +44,7 @@ class GeologyVisualizer:
         else:
             return f"{power_watts / 1e12:.1f} TW"
     
-    def __init__(self, sim_width: int = 120, sim_height: int = 120, window_width: int = 1200, window_height: int = 800):
+    def __init__(self, sim_width: int = 128, sim_height: int = 128, window_width: int = 1200, window_height: int = 800):
         """
         Initialize the visualizer
         

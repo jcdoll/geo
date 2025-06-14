@@ -8,8 +8,10 @@ from typing import Tuple
 from scipy import ndimage
 try:
     from .materials import MaterialType, MaterialDatabase
-except ImportError:
-    from materials import MaterialType, MaterialDatabase
+    from .pressure_solver import solve_pressure
+except ImportError:  # standalone script execution
+    from materials import MaterialType, MaterialDatabase  # type: ignore
+    from pressure_solver import solve_pressure  # type: ignore
 
 
 class FluidDynamics:
@@ -20,73 +22,38 @@ class FluidDynamics:
         self.sim = simulation
     
     def calculate_planetary_pressure(self):
-        """Calculate pressure distribution throughout the planet"""
-        # Initialize pressure array
-        self.sim.pressure.fill(0.0)
-        
-        # Calculate center of mass for gravity direction
-        center_x, center_y = self.sim.center_of_mass
-        
-        # Create coordinate grids
-        y_coords = np.arange(self.sim.height).reshape(-1, 1)
-        x_coords = np.arange(self.sim.width).reshape(1, -1)
-        
-        # Calculate distances from center
-        distances = np.sqrt((x_coords - center_x)**2 + (y_coords - center_y)**2)
-        
-        # Get non-space mask
-        non_space_mask = (self.sim.material_types != MaterialType.SPACE)
-        
-        if not np.any(non_space_mask):
-            return
-        
-        # Find surface (outermost non-space cells)
-        surface_distance = np.max(distances[non_space_mask])
-        
-        # Calculate pressure using hydrostatic/lithostatic approximation
-        depth = np.maximum(0, surface_distance - distances)
-        depth_meters = depth * self.sim.cell_size
-        
-        # Atmospheric pressure (exponential decay with altitude)
+        """Multigrid solve for pressure using self-gravity field."""
+
+        # Ensure gravity field is up-to-date
+        if hasattr(self.sim, 'calculate_self_gravity'):
+            self.sim.calculate_self_gravity()
+
+        gx = self.sim.gravity_x
+        gy = self.sim.gravity_y
+
+        # Divergence of gravity
+        div_g = np.zeros_like(gx)
+        dx = self.sim.cell_size
+        div_g[1:-1, 1:-1] = (
+            (gx[1:-1, 2:] - gx[1:-1, :-2]) + (gy[2:, 1:-1] - gy[:-2, 1:-1])
+        ) / (2 * dx)
+
+        # Build RHS: -ρ ∇·g  (MPa units -> divide 1e6)
+        rhs = (self.sim.density * div_g) / 1e6   # Pa → MPa
+
+        # Solve Poisson
+        pressure = solve_pressure(rhs, dx)
+
+        # Apply Dirichlet boundary (space/atmosphere = 0 MPa)
         atmosphere_mask = (
+            (self.sim.material_types == MaterialType.SPACE) |
             (self.sim.material_types == MaterialType.AIR) |
             (self.sim.material_types == MaterialType.WATER_VAPOR)
         )
-        
-        # Above surface: atmospheric pressure
-        above_surface = distances > surface_distance
-        altitude = (distances - surface_distance) * self.sim.cell_size
-        atmo_pressure = self.sim.surface_pressure * np.exp(-altitude / self.sim.atmospheric_scale_height)
-        self.sim.pressure[above_surface & atmosphere_mask] = atmo_pressure[above_surface & atmosphere_mask]
-        
-        # Below surface: lithostatic/hydrostatic pressure
-        below_surface = non_space_mask & (distances <= surface_distance)
-        
-        if np.any(below_surface):
-            # Use material-specific density for pressure calculation
-            effective_density = np.where(
-                atmosphere_mask,
-                self.sim.average_fluid_density * 0.1,  # Low density for atmosphere
-                np.where(
-                    (self.sim.material_types == MaterialType.WATER) |
-                    (self.sim.material_types == MaterialType.MAGMA),
-                    self.sim.average_fluid_density,
-                    self.sim.average_solid_density
-                )
-            )
-            
-            # Lithostatic pressure
-            lithostatic_pressure = self.sim.surface_pressure + (
-                effective_density * self.sim.average_gravity * depth_meters / 1e6
-            )  # Convert to MPa
-            
-            self.sim.pressure[below_surface] = lithostatic_pressure[below_surface]
-        
-        # Add user-applied pressure offsets
-        self.sim.pressure += self.sim.pressure_offset
-        
-        # Ensure non-negative pressures
-        self.sim.pressure = np.maximum(self.sim.pressure, 0.0)
+        pressure[atmosphere_mask] = 0.0
+
+        # Store & add persistent offsets
+        self.sim.pressure[:] = np.maximum(0.0, pressure + self.sim.pressure_offset)
     
     def apply_gravitational_collapse(self):
         """Apply gravitational collapse using vectorized approach"""
@@ -119,9 +86,9 @@ class FluidDynamics:
         tgt_y_list, tgt_x_list = [], []
         
         for dy, dx in neighbors:
-            # Calculate neighbor positions
-            neighbor_y = np.arange(self.sim.height).reshape(-1, 1) + dy
-            neighbor_x = np.arange(self.sim.width).reshape(1, -1) + dx
+            # Build full H×W neighbor coordinate grids using broadcasting
+            neighbor_y = (np.arange(self.sim.height)[:, None] + dy).repeat(self.sim.width, axis=1)
+            neighbor_x = (np.arange(self.sim.width)[None, :] + dx).repeat(self.sim.height, axis=0)
             
             # Check bounds
             valid_neighbors = (

@@ -10,6 +10,8 @@ This document serves as the authoritative reference for all physical processes, 
 
 3. Use a dispatcher design pattern to select between multiple physics implementation options.
 
+4. When in doubt, add traceback logging so that any error sources are correctly identified.
+
 
 ## TABLE OF CONTENTS
 

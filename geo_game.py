@@ -162,38 +162,43 @@ class GeoGame(CoreState, CoreToolsMixin):
     # ------------------------------------------------------------------
     def step_forward(self, dt: Optional[float] = None):  # type: ignore[override]
         """Advance simulation by one macro-step (default: ``self.dt``)."""
-        if dt is not None:
-            self.dt = dt
+        import traceback
+        try:
+            if dt is not None:
+                self.dt = dt
 
-        # Snapshot for undo – keep this *before* mutating state
-        self._save_state()
+            # Snapshot for undo – keep this *before* mutating state
+            self._save_state()
 
-        # 1) Material property refresh (if user edited grid)
-        if getattr(self, "_properties_dirty", False):
-            self._update_material_properties()
+            # 1) Material property refresh (if user edited grid)
+            if getattr(self, "_properties_dirty", False):
+                self._update_material_properties()
 
-        # 2) Thermal diffusion & source terms
-        new_T, stability = self.heat_transfer.solve_heat_diffusion()
-        self.temperature = new_T
+            # 2) Thermal diffusion & source terms
+            new_T, stability = self.heat_transfer.solve_heat_diffusion()
+            self.temperature = new_T
 
-        # 3) Self-gravity (needed for pressure & fluid phases)
-        self.calculate_self_gravity()
+            # 3) Self-gravity (needed for pressure & fluid phases)
+            self.calculate_self_gravity()
 
-        # 4) Pressure
-        self.fluid_dynamics.calculate_planetary_pressure()
+            # 4) Pressure
+            self.fluid_dynamics.calculate_planetary_pressure()
 
-        # 5) Density-driven effects (order chosen for stability)
-        self.fluid_dynamics.apply_density_stratification()
-        self.fluid_dynamics.apply_fluid_dynamics()
-        self.fluid_dynamics.apply_gravitational_collapse()
+            # 5) Density-driven effects (order chosen for stability)
+            self.fluid_dynamics.apply_density_stratification()
+            self.fluid_dynamics.apply_fluid_dynamics()
+            self.fluid_dynamics.apply_gravitational_collapse()
 
-        # 6) Increment time – use *effective* dt so GUI displays stable value
-        self.time += self.dt * stability
-        self._last_stability_factor = stability  # GUI diagnostic
-        self._actual_effective_dt = self.dt * stability
+            # 6) Increment time – use *effective* dt so GUI displays stable value
+            self.time += self.dt * stability
+            self._last_stability_factor = stability  # GUI diagnostic
+            self._actual_effective_dt = self.dt * stability
 
-        # 7) Optional analytics / graph data hook
-        self._record_time_series_data()
+            # 7) Optional analytics / graph data hook
+            self._record_time_series_data()
+        except Exception:
+            traceback.print_exc()
+            raise
 
     def step_backward(self):  # type: ignore[override]
         """Undo last step (if history available)."""

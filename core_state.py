@@ -138,6 +138,7 @@ class CoreState:
         self.gravitational_fall_probability: float = 0.25  # tuned for visual stability
         # Probability used by density-driven stratification swaps
         self.density_swap_probability: float = 0.25
+        self.fluid_migration_probability: float = 0.25
 
         # minimal history for undo (optional)
         self.history: list = []
