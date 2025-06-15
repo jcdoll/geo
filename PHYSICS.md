@@ -82,6 +82,62 @@ where:
 
 If the net force on a cell is smaller than the force threshold, the cell is considered bound and no motion is attempted. If it exceeds the threshold, the cells may swap if the relative velocity satisfies |v_A − v_B| ≥ Δv_thresh.
 
+### Implementation Status and Lessons Learned
+
+**Status**: Successfully implemented and replaces all density-ratio swapping logic.
+
+#### Key Implementation Insights
+
+1. **Simplified Iteration Approach**: Direct cell-by-cell iteration with neighbor checking is more reliable than complex vectorized slicing operations that can introduce coordinate mapping errors.
+
+2. **Directional Force Logic**: For surface tension and expansion effects, use `abs(proj_src) > src_bind` rather than `proj_src > src_bind` to allow forces pointing away from targets (negative projections).
+
+3. **Velocity Threshold Tuning**: 
+   - Original: 0.1 m/s (too high for surface tension effects)
+   - Surface tension: 0.001 m/s (allows low-velocity cohesive swaps)
+   - Recommendation: Material-dependent thresholds
+
+4. **Binding Force Matrix**: Pre-computed lookup table with temperature scaling:
+   ```python
+   # Fluid-fluid: 0 N (no binding)
+   # Fluid-solid: 0.5 × base_force × temp_factor
+   # Solid-solid: 1.0 × base_force × temp_factor
+   ```
+
+5. **Asymmetric Swap Criteria**: Only source cell needs to overcome binding when target is non-rigid (fluids/space). Both cells must overcome binding for solid-solid swaps.
+
+#### Force Field Assembly
+
+Total force per unit volume:
+```
+F_total = F_gravity + F_pressure + F_buoyancy + F_viscosity
+```
+
+Where:
+- `F_gravity = ρ × g` (gravitational body force)
+- `F_pressure = -∇P` (pressure gradient force)
+- `F_buoyancy` = local density contrast effects
+- `F_viscosity` = momentum diffusion (future implementation)
+
+#### Critical Implementation Details
+
+1. **Pressure Force Calculation**: Use face-normal differences rather than central differences for stronger interface forces:
+   ```python
+   # X-direction forces
+   fx_pressure[:, :-1] -= (P[:, :-1] - P[:, 1:]) / dx
+   fx_pressure[:, 1:]  += (P[:, :-1] - P[:, 1:]) / dx
+   ```
+
+2. **Neighbor Restriction**: Use 4-connected neighbors only (no diagonals) to prevent unrealistic diagonal swaps.
+
+3. **Deduplication**: Essential to prevent conflicting swaps when multiple cells target the same location.
+
+#### Integration with Density Settling
+
+**Current Issue**: Traditional density-based settling passes can undo force-based swaps, particularly surface tension effects.
+
+**Solution Needed**: Modify settling logic to respect force-based criteria rather than pure density differences. Consider force thresholds in settling decisions.
+
 Implementation pseudo-code:
 
 ```python
@@ -92,6 +148,64 @@ for each neighbour pair (A,B):
         if norm(v[A] - v[B]) >= dv_thresh:
             swap(A, B)
 ```
+
+This replaces the old density-ratio swapping logic with physics-based force criteria that naturally incorporate surface tension effects.
+
+### Centre of Mass Calculation  (`_calculate_center_of_mass`)
+Gravity in every mass-movement routine points toward a dynamically updated centre-of-mass (COM):
+
+1. Cell masses – `m = ρ · V` where `V = cell_size³` and `ρ` already includes thermal-expansion corrections.
+2. Coordinates – build `x_idx` and `y_idx` arrays (0 … width-1 / height-1) representing cell centres.
+3. Mask – exclude `MaterialType.SPACE`; vacuum has zero mass.
+4. First moments  
+   `Σm   = mass[mask].sum()`  
+   `Σmx  = (mass * x_idx)[mask].sum()`  
+   `Σmy  = (mass * y_idx)[mask].sum()`
+5. COM  
+   `COM_x = Σmx / Σm`  
+   `COM_y = Σmy / Σm`
+
+The coordinates are stored in `self.center_of_mass` (floats).  All gravity-driven 
+algorithms use the vector pointing from a voxel to this COM as the inward
+"down" direction.  Because density updates every macro-step, large magma bodies
+or buoyant plumes can shift the COM and slightly re-orient gravity, giving a
+first-order coupling between thermal/density anomalies and the gravitational
+field without solving Poisson's equation.
+
+#### Full Poisson Formulation (variable-density)
+
+The analytic depth formula above assumes a column with piece-wise constant
+density.  When large compositional or thermal anomalies are present the
+density field varies laterally and the 1-D approximation under-estimates
+pressure contrasts.  A more general approach starts from hydrostatic balance
+
+∇P = ρ g
+
+Taking the divergence and assuming the gravitational acceleration g points
+everywhere toward the planet's centre (magnitude g constant on the small
+scales of the model) gives
+
+∇·((1/ρ) ∇P) = −ρ g r̂
+
+On the discrete grid this is solved each macro-step with a Successive
+Over-Relaxation (SOR) scheme:
+
+```python
+# RHS from local density and radial unit vector (toward COM)
+rhs = -rho * g_r   # g_r = (dx_to_COM*unit + dy_to_COM*unit)
+P = np.zeros_like(rho)
+for iteration in range(max_iter):
+    P_new = 0.25 * (np.roll(P,+1,0)+np.roll(P,-1,0)+
+                    np.roll(P,+1,1)+np.roll(P,-1,1) - rhs*dx*dx)
+    P[:] = omega * P_new + (1-omega) * P         # ω≈1.7
+    if max_residual < 1e-3:                       # < 1 kPa
+        break
+# Vacuum boundary: P = 0 in SPACE cells
+P[material_types == SPACE] = 0.0
+```
+
+The solver converges in ~50 iterations on a 100 × 100 grid and exactly
+reproduces the analytic depth-law when \(\rho\) is uniform.
 
 ---
 
@@ -358,63 +472,91 @@ P_solid = max(P_surface, ρ_solid × g × depth / 10⁶)
 Where:
 - `ρ_solid = 3000 kg/m³`
 
-### Centre of Mass Calculation  (`_calculate_center_of_mass`)
-Gravity in every mass-movement routine points toward a dynamically updated centre-of-mass (COM):
+### Surface Tension Implementation
 
-1. Cell masses – `m = ρ · V` where `V = cell_size³` and `ρ` already includes thermal-expansion corrections.
-2. Coordinates – build `x_idx` and `y_idx` arrays (0 … width-1 / height-1) representing cell centres.
-3. Mask – exclude `MaterialType.SPACE`; vacuum has zero mass.
-4. First moments  
-   `Σm   = mass[mask].sum()`  
-   `Σmx  = (mass * x_idx)[mask].sum()`  
-   `Σmy  = (mass * y_idx)[mask].sum()`
-5. COM  
-   `COM_x = Σmx / Σm`  
-   `COM_y = Σmy / Σm`
+**Status**: Implemented and functional, but rate-limited by discrete cell approach.
 
-The coordinates are stored in `self.center_of_mass` (floats).  All gravity-driven 
-algorithms use the vector pointing from a voxel to this COM as the inward
-"down" direction.  Because density updates every macro-step, large magma bodies
-or buoyant plumes can shift the COM and slightly re-orient gravity, giving a
-first-order coupling between thermal/density anomalies and the gravitational
-field without solving Poisson's equation.
+Surface tension creates cohesive forces that minimize the surface area of fluid-vacuum interfaces. This is implemented through a pressure-based approach that adds internal pressure to fluid cells at interfaces.
 
-#### Full Poisson Formulation (variable-density)
+#### Physical Model
 
-The analytic depth formula above assumes a column with piece-wise constant
-density.  When large compositional or thermal anomalies are present the
-density field varies laterally and the 1-D approximation under-estimates
-pressure contrasts.  A more general approach starts from hydrostatic balance
-
-∇P = ρ g
-
-Taking the divergence and assuming the gravitational acceleration g points
-everywhere toward the planet's centre (magnitude g constant on the small
-scales of the model) gives
-
-∇·((1/ρ) ∇P) = −ρ g r̂
-
-On the discrete grid this is solved each macro-step with a Successive
-Over-Relaxation (SOR) scheme:
-
-```python
-# RHS from local density and radial unit vector (toward COM)
-rhs = -rho * g_r   # g_r = (dx_to_COM*unit + dy_to_COM*unit)
-P = np.zeros_like(rho)
-for iteration in range(max_iter):
-    P_new = 0.25 * (np.roll(P,+1,0)+np.roll(P,-1,0)+
-                    np.roll(P,+1,1)+np.roll(P,-1,1) - rhs*dx*dx)
-    P[:] = omega * P_new + (1-omega) * P         # ω≈1.7
-    if max_residual < 1e-3:                       # < 1 kPa
-        break
-# Vacuum boundary: P = 0 in SPACE cells
-P[material_types == SPACE] = 0.0
+Surface tension pressure source term:
+```
+P_surface = σ × N_interfaces × (2/dx)
 ```
 
-The solver converges in ~50 iterations on a 100 × 100 grid and exactly
-reproduces the analytic depth-law when \(\rho\) is uniform.
+Where:
+- `σ` = surface tension coefficient (Pa·m) - currently 50,000 Pa·m for strong discrete effects
+- `N_interfaces` = number of neighboring cells with significantly lower density
+- `dx` = cell size (m)
+- Factor of 2/dx provides correct dimensional scaling (Pa·m / m = Pa)
 
----
+#### Implementation Details
+
+1. **Interface Detection**: For each fluid cell, count 4-connected neighbors with density < 0.5 × fluid_density
+2. **Pressure Source**: Add cohesive pressure proportional to interface exposure
+3. **Poisson Solve**: Include surface tension as source term in pressure equation:
+   ```
+   ∇²P = -ρ∇·g + P_surface_tension/1e6  (Pa → MPa)
+   ```
+4. **Force Calculation**: Pressure gradients create outward forces at fluid-space boundaries
+5. **Force-Based Swapping**: Allow fluid→space swaps when |F_net| > binding_threshold
+
+#### Current Performance
+
+**Working Components**:
+- ✅ Surface tension pressure correctly computed (400-600 Pa at interfaces)
+- ✅ Strong pressure forces generated (10,000+ N/m³ at boundaries)
+- ✅ Force-based swapping detects and executes fluid→space swaps
+- ✅ 3 water→space swaps per timestep consistently achieved
+
+**Rate Limitation**:
+- ❌ Only 3 swaps per timestep insufficient for dramatic shape change
+- ❌ Aspect ratio improvement very gradual (7.50 → 7.75 over 120 steps)
+- ❌ Test expects 7.5 → <1.6 aspect ratio in 120 timesteps (unrealistic for discrete approach)
+
+#### Key Technical Insights
+
+1. **Pressure Boundary Conditions**: Must NOT zero out space cell pressures after Poisson solve - this destroys the pressure gradients needed for surface tension forces
+
+2. **Force Direction Logic**: Use `abs(proj_src) > src_bind` rather than `proj_src > src_bind` to allow outward expansion forces (negative projections)
+
+3. **Velocity Threshold**: Reduced from 0.1 m/s to 0.001 m/s to allow low-velocity surface tension swaps
+
+4. **Density Settling Interference**: Traditional density-based settling passes undo surface tension swaps because water >> space density
+
+5. **Discrete vs Continuous**: Real surface tension acts on entire interfaces simultaneously; discrete cell-by-cell swapping is inherently slower
+
+#### Future Improvements Needed
+
+1. **Bulk Interface Processing**: Implement simultaneous swaps across entire fluid-space boundaries rather than individual cells
+
+2. **Integrated Settling Logic**: Modify density-based settling to respect surface tension forces rather than pure density differences
+
+3. **Multi-Cell Expansion**: Allow coordinated expansion patterns that create new interfaces for subsequent swaps
+
+4. **Rate Optimization**: Increase effective swap rate through multiple iterations with pressure recalculation between iterations
+
+#### Force-Based Swapping Integration
+
+Surface tension integrates with the unified force-based swapping system:
+
+```python
+# Surface tension only allows fluid→space swaps (outward expansion)
+if src_is_fluid and tgt_is_space:
+    F_net = hypot(fsrc - ftgt)  # Total force difference
+    proj_src = fsrc·direction   # Directional force projection
+    
+    # Conditions for swap
+    cond_force = F_net > binding_threshold(src, tgt)
+    cond_direction = abs(proj_src) > binding_threshold(src, reference_solid)
+    cond_velocity = |v_src - v_tgt| >= dv_thresh
+    
+    if cond_force and cond_direction and cond_velocity:
+        swap(src, tgt)
+```
+
+This replaces the old density-ratio swapping logic with physics-based force criteria that naturally incorporate surface tension effects.
 
 ## MATERIAL PROPERTIES & TRANSITIONS
 

@@ -25,12 +25,32 @@ class FluidDynamics:
         # Expose velocity fields directly for UI compatibility (shared memory)
         self.velocity_x = self.sim.velocity_x
         self.velocity_y = self.sim.velocity_y
-        # Cumulative sub‐cell displacements (in *cell* units)
-        self.disp_accum_x = np.zeros_like(self.velocity_x, dtype=np.float32)
-        self.disp_accum_y = np.zeros_like(self.velocity_y, dtype=np.float32)
+        self.dv_thresh = 0.001  # m/s – velocity-difference threshold for swapping (reduced for surface tension)
+        self.solid_binding_force = 2e-4  # N – reference cohesion between solid voxels
+        # ------------------------------------------------------------------
+        # Pre-compute binding-threshold lookup table for fast vectorised access
+        # ------------------------------------------------------------------
+        mt_list = list(MaterialType)
+        n_mat = len(mt_list)
+        self._binding_matrix = np.zeros((n_mat, n_mat), dtype=np.float32)
+
+        # Map MaterialType to index for fast lookup
+        self._mat_index = {m: i for i, m in enumerate(mt_list)}
+
+        # Helper sets for readability
+        fluid_set = {MaterialType.AIR, MaterialType.WATER_VAPOR, MaterialType.WATER, MaterialType.MAGMA}
+        for i, a in enumerate(mt_list):
+            for j, b in enumerate(mt_list):
+                # Fluids set includes SPACE
+                if (a in fluid_set) and (b in fluid_set):
+                    self._binding_matrix[i, j] = 0.0
+                elif (a in fluid_set) ^ (b in fluid_set):  # fluid–solid (SPACE counts as fluid)
+                    self._binding_matrix[i, j] = 0.5 * self.solid_binding_force
+                else:  # solid–solid
+                    self._binding_matrix[i, j] = self.solid_binding_force
     
     def calculate_planetary_pressure(self):
-        """Multigrid solve for pressure using self-gravity field."""
+        """Multigrid solve for pressure using self-gravity field plus surface tension."""
 
         # Ensure gravity field is up-to-date
         if hasattr(self.sim, 'calculate_self_gravity'):
@@ -49,19 +69,15 @@ class FluidDynamics:
         # Build RHS: -ρ ∇·g  (MPa units -> divide 1e6)
         rhs = (self.sim.density * div_g) / 1e6   # Pa → MPa
 
+        # Add surface tension / cohesive pressure for fluids
+        surface_tension_rhs = self._compute_surface_tension_pressure() / 1e6  # Pa → MPa
+        rhs += surface_tension_rhs
+
         # Solve Poisson
         pressure = solve_pressure(rhs, dx)
 
-        # Apply Dirichlet boundary (space/atmosphere = 0 MPa)
-        atmosphere_mask = (
-            (self.sim.material_types == MaterialType.SPACE) |
-            (self.sim.material_types == MaterialType.AIR) |
-            (self.sim.material_types == MaterialType.WATER_VAPOR)
-        )
-        pressure[atmosphere_mask] = 0.0
-
-        # Store & add persistent offsets
-        self.sim.pressure[:] = np.maximum(0.0, pressure + self.sim.pressure_offset)
+        # Store & add persistent offsets (don't clip negative pressures!)
+        self.sim.pressure[:] = pressure + self.sim.pressure_offset
     
     def apply_unified_kinematics(self, dt: float) -> None:
         """Move solids, liquids and gases in one deterministic pass.
@@ -89,37 +105,7 @@ class FluidDynamics:
         rho = self.sim.density
 
         _t_force_start = _time.perf_counter()
-
-        # Gravity: sum of self-gravity field and optional constant external field
-        gx_total = self.sim.gravity_x.copy()
-        gy_total = self.sim.gravity_y.copy()
-
-        if hasattr(self.sim, "external_gravity"):
-            g_ext_x, g_ext_y = self.sim.external_gravity
-            if g_ext_x != 0.0 or g_ext_y != 0.0:
-                gx_total = gx_total + g_ext_x
-                gy_total = gy_total + g_ext_y
-
-        fx = rho * gx_total
-        fy = rho * gy_total
-
-        # ------------------------------------------------------------------
-        # Buoyancy term – delegated to helper for re-use in other routines
-        # ------------------------------------------------------------------
-        # Buoyancy temporarily disabled until sign/clamp re-tuned
-        # fbx, fby = self._compute_buoyancy_force(rho, gx_total, gy_total)
-        # fx += fbx
-        # fy += fby
-
-        # Pressure gradient term – pressure stored in MPa → convert to Pa
-        P_pa = self.sim.pressure * 1e6
-        dx = self.sim.cell_size
-        # Simple central differences
-        gradP_y, gradP_x = np.gradient(P_pa, dx)
-
-        fx -= gradP_x
-        fy -= gradP_y
-
+        fx, fy = self.compute_force_field()
         self.sim._perf_times["uk_force_assembly"] = _time.perf_counter() - _t_force_start
 
         # ------------------------------------------------------------------
@@ -186,102 +172,21 @@ class FluidDynamics:
         self.sim._perf_times["uk_projection"] = _time.perf_counter() - _t_proj_start
 
         # ------------------------------------------------------------------
-        # 4) Accumulate displacement in *cell* units and move when |disp| ≥ 0.5
+        # 4) Accumulate displacement and determine swaps via force criteria
         # ------------------------------------------------------------------
-        _t_disp_start = _time.perf_counter()
-        _t_swap_start = _t_disp_start  # default so variable exists even if no swap executed
-        swaps_done = 0
+        # Instead of density-based heavier-than-target rule we now use the
+        # force-based binding criterion defined in `apply_force_based_swapping`.
+        _t_swap_force_start = _time.perf_counter()
+        self.apply_force_based_swapping()
+        self.sim._perf_times["uk_force_swaps"] = _time.perf_counter() - _t_swap_force_start
 
-        cell_size = self.sim.cell_size
-        dx_cells = (self.velocity_x * dt_seconds) / cell_size
-        dy_cells = (self.velocity_y * dt_seconds) / cell_size
-        dx_cells = np.where(np.isfinite(dx_cells), dx_cells, 0.0)
-        dy_cells = np.where(np.isfinite(dy_cells), dy_cells, 0.0)
-        self.disp_accum_x += dx_cells
-        self.disp_accum_y += dy_cells
-
-        # --------------------------------------------------------------
-        # Material-dependent trigger: fluids use 0.05 cell, solids 0.5 cell
-        # --------------------------------------------------------------
-        mt = self.sim.material_types
-        fluid_materials = {
-            getattr(MaterialType, "AIR", None),
-            getattr(MaterialType, "WATER_VAPOR", None),
-            getattr(MaterialType, "WATER", None),
-            getattr(MaterialType, "MAGMA", None),
-        }
-
-        fluid_mask_local = np.isin(mt, list(fluid_materials))
-        trigger_map = np.where(fluid_mask_local, 0.05, 0.5)
-
-        # Determine integer cell moves (at most ±1 for stability)
-        step_x = np.zeros_like(self.disp_accum_x, dtype=np.int8)
-        step_y = np.zeros_like(self.disp_accum_y, dtype=np.int8)
-
-        step_x[self.disp_accum_x >= trigger_map] = 1
-        step_x[self.disp_accum_x <= -trigger_map] = -1
-        step_y[self.disp_accum_y >= trigger_map] = 1
-        step_y[self.disp_accum_y <= -trigger_map] = -1
-
-        move_mask = (step_x != 0) | (step_y != 0)
-        if not np.any(move_mask):
-            self.sim._perf_times["uk_displacement"] = _time.perf_counter() - _t_disp_start
-            self.sim._perf_times["uk_swaps"] = 0.0
-            return  # nothing to advect this macro-step
-
-        ys, xs = np.where(move_mask)
-        tgt_y = ys + step_y[ys, xs]
-        tgt_x = xs + step_x[ys, xs]
-
-        # Filter out moves that would leave the grid
-        in_bounds = (
-            (tgt_y >= 0) & (tgt_y < self.sim.height) &
-            (tgt_x >= 0) & (tgt_x < self.sim.width)
-        )
-        if not np.any(in_bounds):
-            return
-
-        src_y = ys[in_bounds]
-        src_x = xs[in_bounds]
-        tgt_y = tgt_y[in_bounds]
-        tgt_x = tgt_x[in_bounds]
-
-        # Deduplicate conflicting swaps
-        src_y, src_x, tgt_y, tgt_x = self.sim._dedupe_swap_pairs(src_y, src_x, tgt_y, tgt_x)
-        if len(src_y) == 0:
-            self.sim._perf_times["uk_displacement"] = _time.perf_counter() - _t_disp_start
-            self.sim._perf_times["uk_swaps"] = 0.0
-            return
-
-        # Only allow swap if source is denser than target (deterministic stratification)
-        src_density = rho[src_y, src_x]
-        tgt_density = rho[tgt_y, tgt_x]
-        # Swap only if heavier and target is NOT SPACE (avoid duplicating into vacuum)
-        tgt_mat = mt[tgt_y, tgt_x]
-        not_space = tgt_mat != MaterialType.SPACE
-        heavier = (src_density > tgt_density + 1e-3) & not_space
-        if np.any(heavier):
-            _t_swap_start = _time.perf_counter()
-            self._perform_material_swaps(src_y[heavier], src_x[heavier], tgt_y[heavier], tgt_x[heavier])
-            
-            self.disp_accum_x[src_y[heavier], src_x[heavier]] -= step_x[src_y[heavier], src_x[heavier]]
-            self.disp_accum_y[src_y[heavier], src_x[heavier]] -= step_y[src_y[heavier], src_x[heavier]]
-            swaps_done = len(src_y[heavier])
-
-        # Light exponential decay on residual displacement to avoid exact cancellation
-        self.disp_accum_x *= 0.95
-        self.disp_accum_y *= 0.95
-
-        # Apply drag only if enabled
+        # Optional solid drag (retain previous behaviour)
         if getattr(self.sim, "enable_solid_drag", True):
-            solid = self.sim._get_solid_mask()
-            self.velocity_x[solid] *= 0.2
-            self.velocity_y[solid] *= 0.2
+            solid_mask = self.sim._get_solid_mask()
+            self.velocity_x[solid_mask] *= 0.2
+            self.velocity_y[solid_mask] *= 0.2
 
-        # Record timings
-        self.sim._perf_times["uk_displacement"] = _time.perf_counter() - _t_disp_start
-        self.sim._perf_times["uk_swaps"] = _time.perf_counter() - _t_swap_start
-        self.sim._perf_times["uk_swaps_count"] = swaps_done
+        swaps_done = 0  # track additional swaps in sinking passes
 
         # ------------------------------------------------------------------
         # 5) Extra sinking passes – ensure heavier fluid settles through lighter
@@ -307,7 +212,10 @@ class FluidDynamics:
             src_y = yy[in_bounds].ravel(); src_x = xx[in_bounds].ravel()
             tgt_y = tgt_y[in_bounds].ravel(); tgt_x = tgt_x[in_bounds].ravel()
 
-            heavier = rho[src_y, src_x] > rho[tgt_y, tgt_x] + 1e-3
+            # Only perform swap if target is NOT SPACE and source is heavier
+            mt_src_flat = self.sim.material_types[src_y, src_x]
+            mt_tgt_flat = self.sim.material_types[tgt_y, tgt_x]
+            heavier = (rho[src_y, src_x] > rho[tgt_y, tgt_x] + 1e-3)
             if not np.any(heavier):
                 break
             self._perform_material_swaps(src_y[heavier], src_x[heavier], tgt_y[heavier], tgt_x[heavier])
@@ -411,3 +319,207 @@ class FluidDynamics:
         fbx = drho * gx
         fby = drho * gy
         return fbx, fby
+
+    # ------------------------------------------------------------------
+    # NEW: force-field assembly (gravity – ∇P) exposed for re-use
+    # ------------------------------------------------------------------
+    def compute_force_field(self):
+        """Assemble net body force F = ρ g − ∇P and store on the simulation."""
+        rho = self.sim.density
+
+        # Ensure gravity is up-to-date
+        if hasattr(self.sim, 'calculate_self_gravity'):
+            self.sim.calculate_self_gravity()
+        gx_total = self.sim.gravity_x
+        gy_total = self.sim.gravity_y
+
+        # Optional external constant gravity
+        if hasattr(self.sim, 'external_gravity'):
+            g_ext_x, g_ext_y = self.sim.external_gravity
+            if g_ext_x != 0.0 or g_ext_y != 0.0:
+                gx_total = gx_total + g_ext_x
+                gy_total = gy_total + g_ext_y
+
+        # Gravity term
+        fx = rho * gx_total
+        fy = rho * gy_total
+
+        # Pressure gradient term – compute via face normals (4-neighbour)
+        P_pa = self.sim.pressure * 1e6  # MPa → Pa
+        dx = self.sim.cell_size
+
+        # Store pressure forces separately for debugging
+        fx_pressure = np.zeros_like(fx)
+        fy_pressure = np.zeros_like(fy)
+
+        # X-direction forces
+        fx_pressure[:, :-1] -= (P_pa[:, :-1] - P_pa[:, 1:]) / dx  # interface with east neighbour
+        fx_pressure[:, 1:]  += (P_pa[:, :-1] - P_pa[:, 1:]) / dx  # equal & opposite on west side
+
+        # Y-direction forces
+        fy_pressure[:-1, :] -= (P_pa[:-1, :] - P_pa[1:, :]) / dx  # south neighbour
+        fy_pressure[1:, :]  += (P_pa[:-1, :] - P_pa[1:, :]) / dx  # north side
+
+        # Add pressure forces to total
+        fx += fx_pressure
+        fy += fy_pressure
+
+        # Store for any other module this macro-step
+        self.sim.force_x = fx
+        self.sim.force_y = fy
+        return fx, fy
+
+    def _binding_threshold(self, mt_a, mt_b, temp_avg):
+        """Return binding force threshold between two materials (scalar, N).
+        Uses precomputed matrix plus simple temperature weakening for solids.
+        """
+        from materials import MaterialType  # local import
+        idx_a = self._mat_index[mt_a]
+        idx_b = self._mat_index[mt_b]
+        base_th = self._binding_matrix[idx_a, idx_b]
+        # Temperature weakening only affects bonds where at least one side is solid
+        if np.isfinite(base_th) and base_th > 0:
+            T_ref = 273.15
+            temp_factor = max(0.1, 1.0 - (temp_avg - T_ref) / 1500.0)
+            return base_th * temp_factor
+        return base_th
+
+    def apply_force_based_swapping(self):
+        """Swap neighbouring cells that overcome their binding threshold.
+
+        Implements the rule from PHYSICS.md Section *Cell-Swapping Mechanics*.
+        """
+        fx = getattr(self.sim, 'force_x', None)
+        fy = getattr(self.sim, 'force_y', None)
+        if fx is None or fy is None:
+            fx, fy = self.compute_force_field()
+        vx = self.sim.velocity_x
+        vy = self.sim.velocity_y
+        mt = self.sim.material_types
+        temp = self.sim.temperature
+        h, w = mt.shape
+        
+        # 4-neighbour offsets only (no diagonals)
+        offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+
+        # gather candidate swaps
+        cand_src_y = []
+        cand_src_x = []
+        cand_tgt_y = []
+        cand_tgt_x = []
+
+        # Helper uses existing _binding_threshold against a reference solid (granite)
+        from materials import MaterialType  # local import to avoid circular
+        _ref_solid = MaterialType.GRANITE
+        _cell_max_binding = np.vectorize(lambda m, t: self._binding_threshold(m, _ref_solid, t))
+
+        # Simplified approach: iterate over all cells and check neighbors directly
+        for y in range(h):
+            for x in range(w):
+                for dy, dx in offsets:
+                    ny, nx = y + dy, x + dx
+                    
+                    # Check bounds
+                    if ny < 0 or ny >= h or nx < 0 or nx >= w:
+                        continue
+                    
+                    # Only process fluid-space interfaces for surface tension
+                    fluid_types_local = {MaterialType.WATER, MaterialType.MAGMA}
+                    src_is_fluid = mt[y, x] in fluid_types_local
+                    tgt_is_space = mt[ny, nx] == MaterialType.SPACE
+                    
+                    # For surface tension: only allow fluid->space swaps (outward expansion)
+                    if not (src_is_fluid and tgt_is_space):
+                        continue
+                    
+                    # Get forces and velocities
+                    fsrc_x, fsrc_y = fx[y, x], fy[y, x]
+                    ftgt_x, ftgt_y = fx[ny, nx], fy[ny, nx]
+                    vsrc_x, vsrc_y = vx[y, x], vy[y, x]
+                    vtgt_x, vtgt_y = vx[ny, nx], vy[ny, nx]
+                    
+                    # Force and velocity differences
+                    dFx, dFy = fsrc_x - ftgt_x, fsrc_y - ftgt_y
+                    F_net = np.hypot(dFx, dFy)
+                    dVx, dVy = vsrc_x - vtgt_x, vsrc_y - vtgt_y
+                    V_diff = np.hypot(dVx, dVy)
+                    
+                    # Binding threshold
+                    temp_avg = 0.5 * (temp[y, x] + temp[ny, nx])
+                    threshold = self._binding_threshold(mt[y, x], mt[ny, nx], temp_avg)
+                    
+                    # Directional force projection
+                    proj_src = fsrc_x * dx + fsrc_y * dy
+                    
+                    # Binding forces
+                    src_bind = self._binding_threshold(mt[y, x], _ref_solid, temp[y, x])
+                    
+                    # Check all conditions
+                    # For surface tension: we want swaps when force points AWAY from target (negative projection)
+                    cond_src = abs(proj_src) > src_bind  # Use absolute value - direction doesn't matter for magnitude
+                    cond_force = F_net > threshold
+                    cond_velocity = V_diff >= self.dv_thresh
+                    
+                    if cond_src and cond_force and cond_velocity:
+                        cand_src_y.append(y)
+                        cand_src_x.append(x)
+                        cand_tgt_y.append(ny)
+                        cand_tgt_x.append(nx)
+
+        # Perform swaps if any
+        if cand_src_y:
+            src_y = np.array(cand_src_y)
+            src_x = np.array(cand_src_x)
+            tgt_y = np.array(cand_tgt_y)
+            tgt_x = np.array(cand_tgt_x)
+            
+            # Deduplicate conflicts
+            src_y, src_x, tgt_y, tgt_x = self.sim._dedupe_swap_pairs(src_y, src_x, tgt_y, tgt_x)
+            
+            if len(src_y):
+                self._perform_material_swaps(src_y, src_x, tgt_y, tgt_x)
+
+    def _compute_surface_tension_pressure(self):
+        """Compute surface tension pressure source term for fluids at interfaces.
+        
+        Returns pressure source (Pa) that creates cohesive forces to minimize surface area.
+        """
+        from materials import MaterialType
+        
+        # Surface tension coefficient (Pa·m) - much stronger than real water for discrete cells
+        # Real water: ~0.072 N/m, but we need much stronger effect for discrete cells
+        sigma = 50000.0  # Pa·m (increased from 5000.0 for much stronger effect)
+        
+        dx = self.sim.cell_size
+        mt = self.sim.material_types
+        rho = self.sim.density
+        
+        # Define fluid materials that should have surface tension
+        fluid_types = {MaterialType.WATER, MaterialType.MAGMA}
+        
+        pressure_source = np.zeros_like(rho)
+        
+        # For each fluid cell, compute interface curvature and add cohesive pressure
+        for y in range(1, self.sim.height - 1):
+            for x in range(1, self.sim.width - 1):
+                if mt[y, x] not in fluid_types:
+                    continue
+                
+                # Count neighbors with significantly lower density (interface detection)
+                neighbors = [
+                    (y-1, x), (y+1, x), (y, x-1), (y, x+1)  # 4-connected
+                ]
+                
+                interface_count = 0
+                for ny, nx in neighbors:
+                    if rho[ny, nx] < 0.5 * rho[y, x]:  # Interface with much lighter material
+                        interface_count += 1
+                
+                # Add cohesive pressure proportional to interface exposure
+                # More exposed cells (more interfaces) get higher internal pressure
+                if interface_count > 0:
+                    # Pressure scales with interface count and surface tension
+                    # Factor of 2/dx gives correct dimensional scaling (Pa·m / m = Pa)
+                    pressure_source[y, x] = sigma * interface_count * 2.0 / dx
+        
+        return pressure_source

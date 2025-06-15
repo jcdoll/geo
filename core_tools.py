@@ -114,6 +114,11 @@ class CoreToolsMixin:
                     ny, nx = y + dy, x + dx
                     if 0 <= ny < self.height and 0 <= nx < self.width:
                         self.material_types[ny, nx] = MaterialType.SPACE
+                        # Reset temperature to cosmic background for new vacuum
+                        if hasattr(self, 'space_temperature'):
+                            self.temperature[ny, nx] = self.space_temperature
+                        else:
+                            self.temperature[ny, nx] = 2.7
         self._properties_dirty = True
 
     def add_material_blob(self, x: int, y: int, radius: int, material_type):
