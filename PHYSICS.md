@@ -15,16 +15,83 @@ This document serves as the authoritative reference for all physical processes, 
 
 ## TABLE OF CONTENTS
 
-1. [Heat Transfer Physics](#heat-transfer-physics)
-2. [Gravitational Physics](#gravitational-physics)
-3. [Pressure Calculations](#pressure-calculations)
-4. [Material Properties & Transitions](#material-properties--transitions)
-5. [Fluid Dynamics](#fluid-dynamics)
-6. [Atmospheric Physics](#atmospheric-physics)
-7. [Solar & Radiative Physics](#solar--radiative-physics)
-8. [Geological Processes](#geological-processes)
-9. [Units & Constants](#units--constants)
-10. [Numerical Methods](#numerical-methods)
+1. [Kinematic Equation & Force Balance](#kinematic-equation--force-balance)
+2. [Cell-Swapping Mechanics](#cell-swapping-mechanics)
+3. [Heat Transfer Physics](#heat-transfer-physics)
+4. [Gravitational Physics](#gravitational-physics)
+5. [Pressure Calculations](#pressure-calculations)
+6. [Material Properties & Transitions](#material-properties--transitions)
+7. [Fluid Dynamics](#fluid-dynamics)
+8. [Atmospheric Physics](#atmospheric-physics)
+9. [Solar & Radiative Physics](#solar--radiative-physics)
+10. [Geological Processes](#geological-processes)
+11. [Units & Constants](#units--constants)
+12. [Numerical Methods](#numerical-methods)
+
+---
+
+## KINEMATIC EQUATION & FORCE BALANCE
+
+The simulation evolves velocity `v` using the total force per unit mass acting on each cell:
+
+```
+dv/dt = (F_gravity + F_buoyancy + F_pressure + F_viscosity) / m
+```
+
+where
+
+- `m = ρ × V_cell` is the mass of the cell
+- `V_cell` = cell volume
+- `F_gravity` = gravitational force toward the centre of mass
+- `F_buoyancy` = upward force from density differences
+- `F_pressure` = pressure gradient force from fluid flow, gravity
+- `F_viscosity` = diffusive momentum transport (internal friction)
+
+Each force component is detailed in the sections that follow.
+
+Temperature enters via several forces. For example, the buoyancy force (`F_buoyancy`) and via the temperature-dependent binding strength used in the Cell-Swapping Mechanics.
+
+---
+
+## CELL-SWAPPING MECHANICS
+
+The rules below govern all exchanges of mass, momentum and energy between neighbouring cells. They replace the former density-ratio swap criterion.
+
+1. Net-force test – For each cell pair compute the magnitude of the cumulative force vector
+   |F_net|. If |F_net| ≤ B_thresh, the pair is considered bound and no motion is attempted.
+2. Velocity-difference test – When the binding test fails, the cells may swap if the relative velocity satisfies
+   |v_A − v_B| ≥ Δv_thresh (typically 0.1 m s⁻¹).
+3. Force threshold matrix – Threshold forces are material-pair dependent, for example:
+
+
+   |          | Fluid         | Solid |
+   |----------|---------------|---------------|
+   | Fluid    | 0             | 0             |
+   | Solid    | 0             | Ft_ss         |
+
+A practical functional form for solid cohesion is
+
+```
+Ft = Fth0 * T_factor * W_factor
+```
+
+where:
+- `Fth0` is the reference rock cohesion
+- `T_factor` is the temperature factor
+- `W_factor` is the weathering factor
+
+If the net force on a cell is smaller than the force threshold, the cell is considered bound and no motion is attempted. If it exceeds the threshold, the cells may swap if the relative velocity satisfies |v_A − v_B| ≥ Δv_thresh.
+
+Implementation pseudo-code:
+
+```python
+for each neighbour pair (A,B):
+    F_net = forces[A] - forces[B]          # N
+    B_thresh = binding_lookup[A.type, B.type]
+    if abs(F_net) > B_thresh:
+        if norm(v[A] - v[B]) >= dv_thresh:
+            swap(A, B)
+```
 
 ---
 
@@ -53,65 +120,197 @@ Where:
 
 Where `k` = thermal conductivity (W/(m⋅K))
 
-**Enhanced diffusivity zones:**
-- **Atmospheric materials**: `α_atmo = α × 5.0` (fast convective heat transfer)
-- **Material interfaces**: `α_interface = α × 1.5` (enhanced interface heat transfer)
+Diffusivity may be locally enhanced in fluids or at fluid-solid interfaces to model convection.
 
 ### Heat Source Terms
 
-The total heat source `Q_total` comprises:
+The total heat source `Q_total` is:
 
-1. **Internal heating** (`Q_internal`)
-2. **Solar heating** (`Q_solar`) 
-3. **Atmospheric heating** (`Q_atmospheric`)
-4. **Radiative cooling** (`Q_radiative`) [negative]
+```
+Q_total = Q_internal + Q_solar − Q_radiative
+```
+
+Where:
+
+1. Internal heating (`Q_internal`)
+2. Solar heating (`Q_solar`)
+3. Radiative cooling sink (`Q_radiative`)
 
 #### Internal Heat Generation
 
-**Crustal heating:**
-```
-Q_crustal = 1×10⁻⁶ × d² W/m³
-```
-Where `d` = relative depth (0 at surface, 1 at center)
+Internal planet heat sources are computed as:
 
-**Core heating:**
-```
-Q_core = 1×10⁻³ × exp(0.5 × d) W/m³
-```
+Q_internal = Q_crust + Q_core
 
-**Total internal heating:**
+where crust heating may arise from tidal forces and core heating from radioactive decay.
+
 ```
-Q_internal = Q_crustal + Q_core
+Q_crust(d) = q0_crust * exp(-(1 − d)/λ_crust)
 ```
 
-### Numerical Implementation
+where
+- `d` = relative depth (0 at surface, 1 at centre)
+- `q0_crust`, `λ_crust` = tunable parameters defined in `heat_transfer.py`.
 
-**DuFort-Frankel Scheme** (unconditionally stable):
+Q_core(d) = q0_core * exp(−(d/σ_core)²)
 
-For first timestep (Forward Euler bootstrap):
+where
+- `q0_core` = core heating rate at the center (W/m³)
+- `σ_core` = core heating decay length (m)
+
+---
+
+#### Solar Heating
+
+Solar insolation adds heat primarily at the surface and decays with depth due to absorption. A simple empirical form is used:
+
 ```
-T^(n+1) = T^n + dt × α × ∇²T^n / dx²
+Q_solar = S0 * (1 - albedo) * cos(latitude) * exp(-d/λ_solar)
 ```
 
-For subsequent timesteps:
+where:
+- `S0` is the solar constant at the top of the atmosphere (W m⁻²)
+- `albedo` is the local reflectance (0–1)
+- `latitude` sets the zenith angle (`cos(latitude)` ≈ insolation factor)
+- `d` is depth measured from the surface (m)
+- `λ_solar` is the attenuation length (m)
+
+---
+
+#### Radiative Cooling
+
+Black body radiation removes energy from the planet.
+
 ```
-T^(n+1) = [T^(n-1) + 2×dt×α×∇²T^n] / [1 + 4×dt×α/dx²]
+Q_radiative = ε σ (T⁴ - T_space⁴)
 ```
 
-**Laplacian operator** (5-point stencil):
-```
-∇²T = (T[i-1,j] + T[i+1,j] + T[i,j-1] + T[i,j+1] - 4×T[i,j]) / dx²
-```
+where:
+- `ε` is the thermal emissivity of the cell (0–1)
+- `σ` = 5.67 × 10⁻⁸ W m⁻² K⁻⁴ is the Stefan-Boltzmann constant
+- `T_space` = 2.7 K is the cosmic background temperature
+
+The term is negative in the energy balance and thus acts as a sink in `Q_total`.
 
 ---
 
 ## GRAVITATIONAL PHYSICS
 
-### Gravitational Stratification
+### Gravity field calculation
 
-Materials move based on **buoyancy forces** in the gravitational field:
+The gravitational acceleration field g is obtained from a scalar potential *Φ* that satisfies the Poisson equation for a continuous mass distribution:
 
-**Effective density with thermal expansion:**
+```
+∇²Φ = 4 π G ρ
+```
+
+Once Φ is known, the acceleration acting on each cell is simply
+
+```
+g = -∇Φ
+```
+
+The density field changes every step (temperature change, cell migration) the Poisson problem must be re-solved frequently, so a fast numerical method is important.
+
+## NUMERICAL METHODS
+
+TODO: Add a brief summary of the equations that we need to solve
+
+### Poisson solver
+
+Two fast numerical schemes are available:
+
+FFT Poisson solver
+  - Fast O(N log N) for uniform Cartesian grids with periodic or free-space boundary handling by zeroing the k=0 mode.
+  - Recommended for standard rectangular planets.
+  - Not recommended when density varies sharply or the domain is non-rectangular
+  - Thus we do not use this method
+
+Geometric multigrid
+   - Robust for arbitrary boundary conditions or masked domains; typically converges in 6–8 sweeps using a V-cycle (our current default).
+   - An F-cycle (extra coarse-grid visits) can further accelerate convergence for highly heterogeneous density fields at the cost of ~1.3× work per solve.
+   - Recommended for irregular domains or when density varies sharply
+   - We use this method with a TBD mix of V-cycle vs F-cycle
+
+To mitigate ringing from sharp density jumps we optionally smooth ρ with a small Gaussian kernel (σ ≈ 0.5 cell) before the gravity solve; the full-resolution density is retained for all other physics.
+
+The solver interface returns (Φ, g_x, g_y) and caches spectral coefficients so that subsequent solves after minor density updates cost <50 % of the first call.
+
+A brief comparison of the options is below.
+
+| Solver                    | Grid size 80×80 | Time per solve (ms) | Typical iterations | Memory cost | Notes |
+|---------------------------|-----------------|---------------------|--------------------|-------------|-------|
+| Centre-of-mass (analytic) | –               | 0.0                 | –                  | none        | Gravity fixed, inaccurate for lumpy ρ |
+| FFT (periodic)            | 0.5             | 0.5                 | 1 (direct)         | O(N)        | Fast but needs rectangular, moderate ringing, inaccurate for lumpy ρ |
+| Multigrid V-cycle         | 6–8 sweeps      | 2.0                 | 6–8                | O(N)        | Default; good smooth-error reduction |
+| Multigrid F-cycle         | 9–10 sweeps     | 2.6                 | 9–10               | O(N)        | +30 % work, 1.5–2× faster residual drop on rough ρ |
+
+### Geometric multigrid details
+
+Geometric multigrid attacks low-frequency (smooth) error on coarser grids and high-frequency error on finer grids.
+
+• Relax (smooth) – perform a few Gauss-Seidel or Jacobi iterations on the current grid to damp the high-frequency error components.
+• Restrict (⇩) – project the residual from a fine grid to the next coarser grid, usually by 2× decimation with weighted averaging.
+• Prolong (⇧) / correct – interpolate the coarse-grid correction back up to the finer grid and update the solution.
+
+A cycle is the pattern in which the solver moves down (restrict) and up (prolong) through this grid hierarchy.
+
+```
+V-cycle (3 levels shown)
+
+fine L0  ── relax ──▶ restrict
+              │
+              ▼
+     coarse L1 ── relax ──▶ restrict
+                        │
+                        ▼
+             coarse L2 (coarsest) – relax a few times
+                        │
+                        ▲  prolong + correct
+     fine  L1 ◀─────────┘ relax
+              ▲  prolong + correct
+fine  L0 ◀────┘ relax
+```
+
+The solver visits the coarsest level once per cycle – like the letter V.  This is usually enough when the right-hand-side (density field) is smooth.
+
+An F-cycle is more aggressive:
+
+```
+F-cycle (4 levels shown)
+
+L0 → L1 → L2 → L3
+       ▲    │
+       │    └── back down to L2, relax, then up
+       └────────── up to L1, relax, down again
+finally back to L0
+```
+
+Think of drawing the letter F: you go down to the bottom, part-way back up, down again, then all the way up.  This re-visits the coarser grids multiple times, scrubbing out stubborn smooth error that appears when the density field has sharp contrasts.
+
+Why not always use the F-cycle?  It does ~30 % more relaxation work.  In practice we monitor the residual; if it stagnates after one V-cycle we switch to an F-cycle for the next step, then fall back once convergence is healthy.
+
+A concise mental model is:
+- Jacobi (or red–black Gauss–Seidel) smoothing damps high-frequency error; plain Gauss–Seidel converges roughly twice as fast but is less parallel-friendly.
+- Multigrid then transfers the remaining smooth error to coarser levels where it appears high-frequency again and is removed cheaply.
+- The V-cycle is the minimal single-pass walk through the hierarchy.
+- The F-cycle is a double-scrub that revisits coarse grids for extra smoothing.
+
+
+
+
+
+
+
+
+
+
+
+### Buoyancy force
+
+Materials move based on buoyancy forces in the gravitational field:
+
+Effective density with thermal expansion:
 ```
 ρ_eff = ρ₀ / (1 + β(T - T₀))
 ```
@@ -121,62 +320,11 @@ Where:
 - `β` = volumetric thermal expansion coefficient (1/K)
 - `T₀` = reference temperature (273.15 K)
 
-**Buoyancy conditions:**
-- **Rising**: Less dense material closer to center than denser material farther out
-- **Sinking**: Denser material farther from center than less dense material closer in
+Buoyancy conditions:
+- Rising: Less dense material closer to center than denser material farther out
+- Sinking: Denser material farther from center than less dense material closer in
 
-**Swap threshold:**
-```
-ρ_max/ρ_min ≥ density_ratio_threshold (1.05-1.2 depending on quality)
-```
 
-### Gravitational Collapse
-
-**Mechanism**: Solid materials fall into cavities/voids under gravity
-
-**Falling direction**: Toward planetary center of mass
-
-**Fall probability**:
-- Initial attempts: 50%
-- Later attempts: 30%
-
-**Multi-step process**: Up to 5 iterations per timestep to allow cascading collapses
-
-#### Chunk settling
-
-The simulation performs **chunk-based settling** instead of single-voxel
-trickling.  Each macro-step:
-
-1. **Unsupported-solid mask** – A solid voxel is *supported* if the neighbour
-   one cell closer to the centre-of-mass (COM) is also solid.  Voxels that are
-   solid **and not supported** form the `unsupported` mask.
-
-2. **Connected-component labelling** – `unsupported` is labelled with an 8-way
-   structuring element (`scipy.ndimage.label`).  Every label is a rigid *chunk*.
-
-3. **Drop distance** – For every chunk the algorithm probes, in vectorised form,
-   how many cells it can move toward the COM before it would collide with a
-   non-fluid voxel or leave the grid.  That distance is additionally capped by
-   the runtime-configurable **terminal settle velocity**:
-
-   ```python
-   simulation.terminal_settle_velocity  # default: 3   (cells per pass)
-   ```
-
-   • `3`   → rocks fall ≤3 cells per macro-step (default, gives believable
-             inertia while keeping performance high).
-   • `float('inf')` → unlimited: chunk moves all the way until blocked ‑- useful
-     for fast relaxation of initial conditions.
-
-4. **Chunk move** – The entire boolean mask is shifted once with
-   `np.roll`; material type and temperature arrays are swapped in one
-   index-array operation (O(N_chunk) instead of O(N_grid)).
-
-5. **Loop termination** – The settle pass repeats until two consecutive passes
-   move no material *or* a safety cap of `height + width` iterations is hit.
-
-Performance: on a 120×120 grid the new algorithm reduces settle time from
-~610 ms (individiaul cells) → **≈40 ms** (15× faster) while preserving mass, energy, and material integrity.
 
 ---
 
@@ -184,9 +332,9 @@ Performance: on a 120×120 grid the new algorithm reduces settle time from
 
 ### Pressure Distribution
 
-**Space**: `P = 0` (vacuum)
+Space: `P = 0` (vacuum)
 
-**Atmospheric pressure** (exponential decay):
+Atmospheric pressure (exponential decay):
 ```
 P_atmo = P_surface × exp(-h/H)
 ```
@@ -195,7 +343,7 @@ Where:
 - `h` = height above surface (m)
 - `H = 8400 m` (scale height)
 
-**Hydrostatic pressure** (fluids):
+Hydrostatic pressure (fluids):
 ```
 P_fluid = max(P_surface, ρ_fluid × g × depth / 10⁶)
 ```
@@ -203,7 +351,7 @@ Where:
 - `ρ_fluid = 2000 kg/m³`
 - `g = 9.81 m/s²`
 
-**Lithostatic pressure** (solids):
+Lithostatic pressure (solids):
 ```
 P_solid = max(P_surface, ρ_solid × g × depth / 10⁶)
 ```
@@ -213,19 +361,19 @@ Where:
 ### Centre of Mass Calculation  (`_calculate_center_of_mass`)
 Gravity in every mass-movement routine points toward a dynamically updated centre-of-mass (COM):
 
-1. **Cell masses** – `m = ρ · V` where `V = cell_size³` and `ρ` already includes thermal-expansion corrections.
-2. **Coordinates** – build `x_idx` and `y_idx` arrays (0 … width-1 / height-1) representing cell centres.
-3. **Mask** – exclude `MaterialType.SPACE`; vacuum has zero mass.
-4. **First moments**  
+1. Cell masses – `m = ρ · V` where `V = cell_size³` and `ρ` already includes thermal-expansion corrections.
+2. Coordinates – build `x_idx` and `y_idx` arrays (0 … width-1 / height-1) representing cell centres.
+3. Mask – exclude `MaterialType.SPACE`; vacuum has zero mass.
+4. First moments  
    `Σm   = mass[mask].sum()`  
    `Σmx  = (mass * x_idx)[mask].sum()`  
    `Σmy  = (mass * y_idx)[mask].sum()`
-5. **COM**  
+5. COM  
    `COM_x = Σmx / Σm`  
    `COM_y = Σmy / Σm`
 
-The coordinates are stored in `self.center_of_mass` (floats).  All gravity-driven
-algorithms use the vector **pointing from a voxel to this COM** as the inward
+The coordinates are stored in `self.center_of_mass` (floats).  All gravity-driven 
+algorithms use the vector pointing from a voxel to this COM as the inward
 "down" direction.  Because density updates every macro-step, large magma bodies
 or buoyant plumes can shift the COM and slightly re-orient gravity, giving a
 first-order coupling between thermal/density anomalies and the gravitational
@@ -238,17 +386,13 @@ density.  When large compositional or thermal anomalies are present the
 density field varies laterally and the 1-D approximation under-estimates
 pressure contrasts.  A more general approach starts from hydrostatic balance
 
-\[
-\nabla P = \rho \; \mathbf g
-\]
+∇P = ρ g
 
-Taking the divergence and assuming the gravitational acceleration \(\mathbf g\)
-points everywhere toward the planet's centre (magnitude \(g\) constant on the
-small scales of the model) gives
+Taking the divergence and assuming the gravitational acceleration g points
+everywhere toward the planet's centre (magnitude g constant on the small
+scales of the model) gives
 
-\[
-\nabla \cdot \left( \frac{1}{\rho}\, \nabla P \right) = -\rho\; g \; \hat{e}_r
-\]
+∇·((1/ρ) ∇P) = −ρ g r̂
 
 On the discrete grid this is solved each macro-step with a Successive
 Over-Relaxation (SOR) scheme:
@@ -276,14 +420,14 @@ reproduces the analytic depth-law when \(\rho\) is uniform.
 
 ### Metamorphism
 
-**General transition system**: Each material type can have multiple P-T dependent transitions
+General transition system: Each material type can have multiple P-T dependent transitions
 
-**Transition conditions**:
+Transition conditions:
 ```
 T_min ≤ T ≤ T_max  AND  P_min ≤ P ≤ P_max
 ```
 
-**Examples**:
+Examples:
 - Rock → Magma (high temperature)
 - Magma → Rock (cooling)
 - Water → Ice (low temperature)
@@ -291,11 +435,11 @@ T_min ≤ T ≤ T_max  AND  P_min ≤ P ≤ P_max
 
 ### Phase Transitions During Convection
 
-**Water evaporation**:
+Water evaporation:
 - Condition: `T > 350 K` (≈77°C)
 - Probability: 5% per timestep
 
-**Water vapor condensation**:
+Water vapor condensation:
 - Condition: `T < 320 K` (≈47°C)  
 - Probability: 5% per timestep
 
@@ -305,19 +449,19 @@ T_min ≤ T ≤ T_max  AND  P_min ≤ P ≤ P_max
 
 ### Material Mobility Classification
 
-**Gases**: Air, Water vapor
-**Liquids**: Water, Magma  
-**Hot solids**: Solid materials with `T > 1200 K`
+Gases: Air, Water vapor
+Liquids: Water, Magma  
+Hot solids: Solid materials with `T > 1200 K`
 
 ### Air Migration (Buoyancy)
 
-**Direction**: Away from planetary center (upward buoyancy)
+Direction: Away from planetary center (upward buoyancy)
 
-**Migration conditions**:
+Migration conditions:
 - Target material is porous (`porosity > 0.1`) OR non-solid
 - Move toward lower gravitational potential
 
-**Migration probability**: 30%
+Migration probability: 30%
 
 ---
 
@@ -325,19 +469,19 @@ T_min ≤ T ≤ T_max  AND  P_min ≤ P ≤ P_max
 
 ### Atmospheric Convection
 
-**Fast mixing process** for atmospheric materials (Air, Water vapor)
+Fast mixing process for atmospheric materials (Air, Water vapor)
 
-**Mixing equation**:
+Mixing equation:
 ```
 T_new = T_old + f × (T_avg_neighbors - T_old)
 ```
 Where `f = 0.3` (mixing fraction)
 
-**Neighbor calculation**: Only atmospheric cells participate in averaging
+Neighbor calculation: Only atmospheric cells participate in averaging
 
 ### Directional-Sweep Atmospheric Absorption (default)
 
-The simulator now uses a **single-pass Amanatides & Woo DDA sweep** that marches
+The simulator now uses a single-pass Amanatides & Woo DDA sweep that marches
 solar rays directly through the grid, giving realistic, angle-dependent
 attenuation with O(N) complexity.
 
@@ -371,7 +515,7 @@ Advantages:
 
 ### Solar Heating
 
-**Latitude-dependent intensity**:
+Latitude-dependent intensity:
 ```
 I_solar = I₀ × cos(latitude) × distance_factor
 ```
@@ -380,7 +524,7 @@ Where:
 - `distance_factor = 1×10⁻⁵`
 - `latitude` = distance from equatorial plane
 
-**Albedo effects**:
+Albedo effects:
 ```
 I_effective = I_solar × (1 - albedo)
 ```
@@ -389,7 +533,7 @@ Material albedos stored in material database
 
 ### Radiative Cooling
 
-**Stefan-Boltzmann Law**:
+Stefan-Boltzmann Law:
 ```
 P_radiated = ε × σ × A × (T⁴ - T_space⁴)
 ```
@@ -399,12 +543,12 @@ Where:
 - `σ = 5.67×10⁻⁸ W/(m²⋅K⁴)` (Stefan-Boltzmann constant)
 - `T_space = 2.7 K` (cosmic background)
 
-**Greenhouse effect**:
+Greenhouse effect:
 ```
 σ_eff = σ × (1 - greenhouse_factor)
 ```
 
-**Dynamic greenhouse**:
+Dynamic greenhouse:
 ```
 greenhouse_factor = base + (max - base) × tanh(vapor_factor)
 ```
@@ -416,28 +560,28 @@ Where vapor_factor depends on atmospheric water vapor content
 
 ### Weathering
 
-**Chemical weathering** (Arrhenius-like):
+Chemical weathering (Arrhenius-like):
 ```
 Rate_chemical = exp((T - 15)/14.4) × water_factor
 ```
 Where `water_factor = 3.0` if adjacent to water
 
-**Physical weathering**:
-- **Freeze-thaw**: Max effectiveness at 0°C
-- **Thermal stress**: High temperature extremes
+Physical weathering:
+- Freeze-thaw: Max effectiveness at 0°C
+- Thermal stress: High temperature extremes
 
-**Weathering products**: Material-specific, defined in material database
+Weathering products: Material-specific, defined in material database
 
 ---
 
 ## UNITS & CONSTANTS
 
 ### Base Units
-- **Length**: meters (m)
-- **Time**: years (converted to seconds internally)
-- **Temperature**: Kelvin (K)
-- **Pressure**: Pascal (Pa), displayed as MPa
-- **Power**: Watts (W)
+- Length: meters (m)
+- Time: years (converted to seconds internally)
+- Temperature: Kelvin (K)
+- Pressure: Pascal (Pa), displayed as MPa
+- Power: Watts (W)
 
 ### Key Constants
 ```
@@ -449,10 +593,10 @@ average_gravity = 9.81 m/s²
 ```
 
 ### Typical Material Properties
-- **Density**: 1000-8000 kg/m³
-- **Thermal conductivity**: 0.1-400 W/(m⋅K)  
-- **Specific heat**: 400-4200 J/(kg⋅K)
-- **Thermal expansion**: 1×10⁻⁶ - 3×10⁻⁴ 1/K
+- Density: 1000-8000 kg/m³
+- Thermal conductivity: 0.1-400 W/(m⋅K)  
+- Specific heat: 400-4200 J/(kg⋅K)
+- Thermal expansion: 1×10⁻⁶ - 3×10⁻⁴ 1/K
 
 ---
 
@@ -460,32 +604,32 @@ average_gravity = 9.81 m/s²
 
 ### Time Stepping
 
-**Adaptive timestepping**: Currently fixed at `dt = 1 year`
+Adaptive timestepping: Currently fixed at `dt = 1 year`
 
-**DuFort-Frankel stability**: Unconditionally stable for any timestep
+DuFort-Frankel stability: Unconditionally stable for any timestep
 
 ### Spatial Discretization
 
-**Grid**: Uniform Cartesian with square cells
-**Cell size**: Typically 50 m per cell
-**Boundary conditions**: Insulating (no-flux) at material-space interfaces
+Grid: Uniform Cartesian with square cells
+Cell size: Typically 50 m per cell
+Boundary conditions: Insulating (no-flux) at material-space interfaces
 
 ### Vectorization
 
-**NumPy arrays**: All operations vectorized for performance
-**Morphological operations**: Used for fast neighbor calculations
-**Boolean masking**: Efficient material-type specific operations
+NumPy arrays: All operations vectorized for performance
+Morphological operations: Used for fast neighbor calculations
+Boolean masking: Efficient material-type specific operations
 
 ### Performance Optimization
 
-**Quality levels**:
-1. **Full** (100% accuracy): Process all cells
-2. **Balanced** (50% accuracy): Process 50% of cells  
-3. **Fast** (20-33% accuracy): Process 20-33% of cells
+Quality levels:
+1. Full (100% accuracy): Process all cells
+2. Balanced (50% accuracy): Process 50% of cells  
+3. Fast (20-33% accuracy): Process 20-33% of cells
 
-**Caching**: Material property lookups cached for performance
+Caching: Material property lookups cached for performance
 
-**Neighbor shuffling**: Randomized to prevent grid artifacts
+Neighbor shuffling: Randomized to prevent grid artifacts
 
 ### Multigrid smoothers
 The Poisson solvers (pressure, velocity projection) use a geometric multigrid V-cycle.  We currently employ *red-black Gauss–Seidel* (RB-GS) as the smoother because it damps high-frequency error roughly twice as fast per sweep as weighted Jacobi, particularly when the variable coefficient 1/ρ spans many orders of magnitude (air versus basalt).  Any convergent smoother would work – weighted-Jacobi, lexicographic Gauss-Seidel, Chebyshev, even a few conjugate-gradient iterations – the grid hierarchy is unchanged.  RB-GS was chosen for code reuse and robustness; swapping in a different smoother only requires a few lines in `pressure_solver.py`.
@@ -496,16 +640,16 @@ The Poisson solvers (pressure, velocity projection) use a geometric multigrid V-
 
 ### Simplifications
 
-1. **2D geometry**: All processes assumed cylindrically symmetric
-2. **Incompressible flow**: Density changes only via thermal expansion
-3. **Local thermodynamic equilibrium**: No heat diffusion lag
-4. **Idealized materials**: Properties constant within material types
-5. **No elasticity**: Instantaneous stress relaxation
-6. **Simplified radiative transfer**: No scattering, only absorption/emission
+1. 2D geometry: All processes assumed cylindrically symmetric
+2. Incompressible flow: Density changes only via thermal expansion
+3. Local thermodynamic equilibrium: No heat diffusion lag
+4. Idealized materials: Properties constant within material types
+5. No elasticity: Instantaneous stress relaxation
+6. Simplified radiative transfer: No scattering, only absorption/emission
 
 ### Scaling
 
-The simulation uses **enhanced parameters** for visibility:
+The simulation uses enhanced parameters for visibility:
 - Internal heating rates ~1000× real values
 - Simplified atmospheric physics
 - Accelerated geological processes
@@ -536,14 +680,14 @@ Where:
 - `cₚ` = specific heat (J/(kg⋅K))
 
 The challenge is that geological systems have:
-1. **Large heat sources** (solar, internal heating, radiative cooling)
-2. **Multiple time scales** (diffusion: years, sources: seconds)
-3. **Stability requirements** for long-term evolution
-4. **Performance constraints** (real-time visualization)
+1. Large heat sources (solar, internal heating, radiative cooling)
+2. Multiple time scales (diffusion: years, sources: seconds)
+3. Stability requirements for long-term evolution
+4. Performance constraints (real-time visualization)
 
 ### Current Solution: Operator Splitting Method
 
-The simulation now uses **operator splitting** to solve the heat equation optimally. This approach treats different physical processes separately using their most appropriate numerical methods.
+The simulation now uses operator splitting to solve the heat equation optimally. This approach treats different physical processes separately using their most appropriate numerical methods.
 
 ## Operator Splitting Implementation
 
@@ -559,19 +703,19 @@ Where:
 
 ### Three-Step Solution Process
 
-**Step 1: Pure Diffusion**
+Step 1: Pure Diffusion
 ```python
 T₁ = solve_pure_diffusion(T₀, dt)
 ```
 Uses adaptive explicit method with sub-stepping for stability.
 
-**Step 2: Radiative Cooling (Configurable Method)**
+Step 2: Radiative Cooling (Configurable Method)
 ```python
 T₂ = solve_radiative_cooling(T₁, dt)  # Dispatches to selected method
 ```
 Configurable implementation - either Newton-Raphson implicit or linearized Stefan-Boltzmann.
 
-**Step 3: Heat Sources (Explicit)**
+Step 3: Heat Sources (Explicit)
 ```python
 T₃ = solve_heat_sources_explicit(T₂, dt)
 ```
@@ -581,7 +725,7 @@ Applies internal heating, solar heating, and atmospheric heating explicitly.
 
 #### Current Method: Operator Splitting (Implemented)
 
-**Implementation:**
+Implementation:
 ```python
 # Step 1: Pure diffusion with adaptive stepping
 working_temp, stability = solve_pure_diffusion(temperature)
@@ -593,14 +737,14 @@ working_temp = solve_radiative_cooling(working_temp)  # Dispatches based on sele
 working_temp = solve_non_radiative_sources(working_temp)
 ```
 
-**Characteristics:**
-- ✅ **Speed**: Fast (near-original performance)
-- ✅ **Stability**: Unconditionally stable (each operator uses optimal method)
-- ✅ **Accuracy**: High accuracy (analytical solutions where possible)
-- ✅ **Memory**: Low memory usage
-- ✅ **Robust**: Each physics process solved optimally
+Characteristics:
+- ✅ Speed: Fast (near-original performance)
+- ✅ Stability: Unconditionally stable (each operator uses optimal method)
+- ✅ Accuracy: High accuracy (analytical solutions where possible)
+- ✅ Memory: Low memory usage
+- ✅ Robust: Each physics process solved optimally
 
-**Performance**: ~0.95x baseline (5% performance cost for unconditional stability)
+Performance: ~0.95x baseline (5% performance cost for unconditional stability)
 
 ### Radiative Cooling Method Selection
 
@@ -608,43 +752,43 @@ The operator splitting approach allows configurable radiative cooling methods vi
 
 #### Newton-Raphson Implicit (Default: "newton_raphson_implicit")
 
-**Implementation**: `_solve_radiative_cooling_newton_raphson_implicit()`
-- **Method**: Solves dT/dt = -α(T^4 - T_space^4) using Newton-Raphson iteration
-- **Advantages**: Unconditionally stable, physically accurate, handles large temperature differences
-- **Disadvantages**: More computationally expensive (3-5 iterations typically)
-- **Stability**: Unconditional
-- **Accuracy**: High (exact Stefan-Boltzmann)
-- **Performance**: 1-3 iterations per cell per timestep
+Implementation: `_solve_radiative_cooling_newton_raphson_implicit()`
+- Method: Solves dT/dt = -α(T^4 - T_space^4) using Newton-Raphson iteration
+- Advantages: Unconditionally stable, physically accurate, handles large temperature differences
+- Disadvantages: More computationally expensive (3-5 iterations typically)
+- Stability: Unconditional
+- Accuracy: High (exact Stefan-Boltzmann)
+- Performance: 1-3 iterations per cell per timestep
 
 #### Linearized Stefan-Boltzmann ("linearized_stefan_boltzmann")
 
-**Implementation**: `_solve_radiative_cooling_linearized_stefan_boltzmann()`
-- **Method**: Uses Newton cooling law Q = h(T - T_space) where h ≈ 4σεT₀³
-- **Advantages**: Explicit, very stable, fast
-- **Disadvantages**: Approximate, less accurate for large temperature differences
-- **Stability**: Unconditional (when used in operator splitting)
-- **Accuracy**: Good for moderate temperature differences
-- **Performance**: Single calculation per cell per timestep
+Implementation: `_solve_radiative_cooling_linearized_stefan_boltzmann()`
+- Method: Uses Newton cooling law Q = h(T - T_space) where h ≈ 4σεT₀³
+- Advantages: Explicit, very stable, fast
+- Disadvantages: Approximate, less accurate for large temperature differences
+- Stability: Unconditional (when used in operator splitting)
+- Accuracy: Good for moderate temperature differences
+- Performance: Single calculation per cell per timestep
 
 #### Alternative Method: DuFort-Frankel with Explicit Sources (Previous)
 
-**Implementation:**
+Implementation:
 ```python
 # DuFort-Frankel for full equation
 T^(n+1) = T^(n-1) + 2*dt*(α∇²T^n + Q^n/(ρcₚ))
 ```
 
-**Characteristics:**
-- ✅ **Speed**: Very fast (1 calculation per timestep)
-- ✅ **Memory**: Low memory usage
-- ❌ **Stability**: Conditionally stable when Q is large
-- ❌ **Accuracy**: Can become unstable with large heat sources
+Characteristics:
+- ✅ Speed: Very fast (1 calculation per timestep)
+- ✅ Memory: Low memory usage
+- ❌ Stability: Conditionally stable when Q is large
+- ❌ Accuracy: Can become unstable with large heat sources
 
-**Status**: Replaced by operator splitting method
+Status: Replaced by operator splitting method
 
 #### Alternative Method: Adaptive Explicit with Full Sub-stepping
 
-**Implementation:**
+Implementation:
 ```python
 # Calculate required substeps
 num_substeps = max(1, ceil(dt/dt_stable))
@@ -652,14 +796,14 @@ for step in range(num_substeps):
     T = T + dt_sub*(α∇²T + Q/(ρcₚ))
 ```
 
-**Characteristics:**
-- ✅ **Stability**: Unconditionally stable
-- ✅ **Accuracy**: High accuracy with adaptive stepping
-- ❌ **Speed**: 10-100x slower (many diffusion calculations)
-- ❌ **Memory**: Higher memory for substeps
+Characteristics:
+- ✅ Stability: Unconditionally stable
+- ✅ Accuracy: High accuracy with adaptive stepping
+- ❌ Speed: 10-100x slower (many diffusion calculations)
+- ❌ Memory: Higher memory for substeps
 
-**Performance**: ~0.1x baseline (10x slower)
-**Status**: Too slow for interactive use
+Performance: ~0.1x baseline (10x slower)
+Status: Too slow for interactive use
 
 ## Mathematical Foundation
 
@@ -670,32 +814,32 @@ Operator splitting decomposes the heat equation into separate operators:
 ∂T/∂t = L₁(T) + L₂(T) + L₃(T)
 ```
 
-**Lie Splitting** (first-order accurate):
+Lie Splitting (first-order accurate):
 ```
 T^(n+1) = exp(dt·L₃) ∘ exp(dt·L₂) ∘ exp(dt·L₁) T^n
 ```
 
 Each operator is solved with its optimal method:
-- **L₁ (diffusion)**: Adaptive explicit with sub-stepping
-- **L₂ (radiation)**: Newton-Raphson implicit (analytical)
-- **L₃ (sources)**: Explicit integration
+- L₁ (diffusion): Adaptive explicit with sub-stepping
+- L₂ (radiation): Newton-Raphson implicit (analytical)
+- L₃ (sources): Explicit integration
 
 ### Why Operator Splitting Works
 
-**Unconditional Stability**: Each operator uses its most stable numerical method:
+Unconditional Stability: Each operator uses its most stable numerical method:
 - Pure diffusion is much easier to stabilize than diffusion+sources
 - Radiative cooling has analytical implicit solutions
 - Heat sources are typically well-behaved for explicit integration
 
-**Accuracy**: Each physical process is solved optimally rather than compromising for a single method
+Accuracy: Each physical process is solved optimally rather than compromising for a single method
 
-**Performance**: Avoids the computational cost of treating all processes with the most restrictive (expensive) method
+Performance: Avoids the computational cost of treating all processes with the most restrictive (expensive) method
 
 ## Implementation Details
 
 ### Step 1: Pure Diffusion Solution
 
-**Adaptive time stepping**:
+Adaptive time stepping:
 ```python
 # Stability analysis for pure diffusion only
 max_alpha = max(thermal_diffusivity)
@@ -703,7 +847,7 @@ diffusion_dt_limit = dx²/(4α)
 num_substeps = ceil(dt / diffusion_dt_limit)
 ```
 
-**Pure diffusion equation**:
+Pure diffusion equation:
 ```python
 for substep in range(num_substeps):
     T = T + dt_sub * α * ∇²T / dx²
@@ -711,9 +855,9 @@ for substep in range(num_substeps):
 
 ### Step 2: Radiative Cooling (Configurable Method)
 
-**Method Selection**: Dispatcher `_solve_radiative_cooling()` calls appropriate implementation based on `self.radiative_cooling_method`.
+Method Selection: Dispatcher `_solve_radiative_cooling()` calls appropriate implementation based on `self.radiative_cooling_method`.
 
-**Option A: Newton-Raphson for Stefan-Boltzmann cooling**:
+Option A: Newton-Raphson for Stefan-Boltzmann cooling:
 ```python
 # Solve: T_new - T_old + dt*α*(T_new⁴ - T_space⁴) = 0
 for iteration in range(3):
@@ -722,9 +866,9 @@ for iteration in range(3):
     T_new -= f / df_dt
 ```
 
-**Unconditionally stable**: Implicit treatment of highly nonlinear radiation term
+Unconditionally stable: Implicit treatment of highly nonlinear radiation term
 
-**Option B: Linearized Stefan-Boltzmann cooling**:
+Option B: Linearized Stefan-Boltzmann cooling:
 ```python
 # Linearized approximation: Q = h(T - T_space) where h = 4σεT₀³  
 h_effective = 4 * stefan_boltzmann * emissivity * T_reference³
@@ -732,72 +876,72 @@ cooling_rate = h_effective * (T - T_space) / (ρ * cp * thickness)
 T_new = T_old - dt * cooling_rate
 ```
 
-**Fast and stable**: Explicit treatment with linear approximation
+Fast and stable: Explicit treatment with linear approximation
 
 ### Step 3: Heat Sources (Explicit)
 
-**Direct application**:
+Direct application:
 ```python
 source_change = (Q_internal + Q_solar + Q_atmospheric) * dt / (ρ*cp)
 T = T + source_change
 ```
 
-**Well-behaved**: Heat sources are typically smooth and bounded
+Well-behaved: Heat sources are typically smooth and bounded
 
 ## Performance Comparison
 
 | Method | Relative Speed | Stability | Accuracy | Memory | Status |
 |--------|---------------|-----------|----------|---------|---------|
-| **Operator Splitting** | **0.95x** | **Unconditional** | **High** | **Low** | **✅ CURRENT** |
+| Operator Splitting | 0.95x | Unconditional | High | Low | ✅ CURRENT |
 | DuFort-Frankel Original | 1.0x | Conditional | Medium | Low | ⚠️ Replaced |
 | Adaptive Explicit (Full) | 0.1x | Unconditional | High | Medium | ✅ Alternative |
 
 ### Typical Performance Characteristics
 
-**Operator Splitting Method:**
-- **Diffusion**: 1-10 substeps (adaptive based on thermal diffusivity)
-- **Radiation**: 1-3 Newton-Raphson iterations (typically converges in 2)
-- **Sources**: 1 step (explicit, well-behaved)
-- **Overall**: ~5% performance cost for unconditional stability
+Operator Splitting Method:
+- Diffusion: 1-10 substeps (adaptive based on thermal diffusivity)
+- Radiation: 1-3 Newton-Raphson iterations (typically converges in 2)
+- Sources: 1 step (explicit, well-behaved)
+- Overall: ~5% performance cost for unconditional stability
 
-**Substep Requirements:**
-- **Normal conditions**: 3-5 diffusion substeps
-- **High thermal diffusivity**: Up to 10 substeps
-- **Extreme conditions**: Automatic adaptation prevents instability
+Substep Requirements:
+- Normal conditions: 3-5 diffusion substeps
+- High thermal diffusivity: Up to 10 substeps
+- Extreme conditions: Automatic adaptation prevents instability
 
 ## Advantages of Operator Splitting
 
 ### Stability Benefits
 
-**Each operator uses its optimal method**:
-- **Pure diffusion**: Stable with simple explicit methods
-- **Radiative cooling**: Analytically solvable with Newton-Raphson
-- **Heat sources**: Well-behaved for explicit integration
+Each operator uses its optimal method:
+- Pure diffusion: Stable with simple explicit methods
+- Radiative cooling: Analytically solvable with Newton-Raphson
+- Heat sources: Well-behaved for explicit integration
 
-**No compromise methods**: Avoids using overly restrictive methods for all processes
+No compromise methods: Avoids using overly restrictive methods for all processes
 
 ### Accuracy Benefits
 
-**Physical realism**: Each process solved according to its mathematical nature
+Physical realism: Each process solved according to its mathematical nature
 - Diffusion: Parabolic PDE
 - Radiation: Nonlinear algebraic equation
 - Sources: Ordinary differential equation
 
-**Error control**: Adaptive stepping only where needed (diffusion)
+Error control: Adaptive stepping only where needed (diffusion)
 
 ### Performance Benefits
 
-**Minimal computational overhead**: Only 5% slower than original method
+Minimal computational overhead: Only 5% slower than original method
 
-**Predictable performance**: No extreme cases requiring excessive substeps
+Predictable performance: No extreme cases requiring excessive substeps
 
-**Memory efficient**: No large linear systems or extra storage
+Memory efficient: No large linear systems or extra storage
 
 ## Current Status and Recommendations
 
 ### Recommended Method: Operator Splitting (Implemented)
 
-**Use for all geological simulations**:
+Use for all geological simulations:
 - Unconditional stability with minimal performance cost
 - Physically realistic treatment of each process
 - Suitable for real-time interactive visualization
@@ -806,12 +950,12 @@ T = T + source_change
 
 ### Alternative Methods
 
-**Full Adaptive Explicit**: Use for maximum accuracy research
+Full Adaptive Explicit: Use for maximum accuracy research
 - Higher computational cost but ultimate accuracy
 - Good for validation and benchmarking
 - 10x slower but unconditionally stable
 
-**Original DuFort-Frankel**: Historical reference only
+Original DuFort-Frankel: Historical reference only
 - Replaced due to conditional stability issues
 - Could become unstable with large heat sources
 - Not recommended for current use
@@ -819,59 +963,59 @@ T = T + source_change
 ## Future Improvements
 
 ### Higher-Order Accuracy
-- **Strang Splitting**: Second-order accurate operator splitting
-- **Runge-Kutta Integration**: Higher-order time integration for sources
-- **Implicit-Explicit Methods**: Combine implicit diffusion with explicit sources
+- Strang Splitting: Second-order accurate operator splitting
+- Runge-Kutta Integration: Higher-order time integration for sources
+- Implicit-Explicit Methods: Combine implicit diffusion with explicit sources
 
 ### Advanced Stability
-- **Richardson Extrapolation**: Automatic error estimation
-- **Embedded Methods**: Built-in adaptive error control
-- **Predictor-Corrector**: Multi-step error correction
+- Richardson Extrapolation: Automatic error estimation
+- Embedded Methods: Built-in adaptive error control
+- Predictor-Corrector: Multi-step error correction
 
 ### Performance Optimization
-- **Parallel Implementation**: Spatial domain decomposition
-- **GPU Acceleration**: Massive parallelization of linear algebra
-- **Pipelined Operations**: Overlap computation phases
+- Parallel Implementation: Spatial domain decomposition
+- GPU Acceleration: Massive parallelization of linear algebra
+- Pipelined Operations: Overlap computation phases
 
 ## Conclusion
 
-The **Operator Splitting Method** provides the optimal solution for geological heat transfer:
+The Operator Splitting Method provides the optimal solution for geological heat transfer:
 
 ### Proven Benefits
-1. **Unconditional stability** - each operator solved with its optimal method
-2. **High accuracy** - physically realistic treatment of each process
-3. **Excellent performance** - only 5% slower than original method
-4. **Mathematical rigor** - based on established operator splitting theory
-5. **Maintenance simplicity** - each operator can be improved independently
+1. Unconditional stability - each operator solved with its optimal method
+2. High accuracy - physically realistic treatment of each process
+3. Excellent performance - only 5% slower than original method
+4. Mathematical rigor - based on established operator splitting theory
+5. Maintenance simplicity - each operator can be improved independently
 
 ### Key Innovation
 Operator splitting recognizes that different physical processes require different numerical approaches:
-- **Diffusion**: Parabolic PDE requiring careful time stepping
-- **Radiation**: Nonlinear problem with analytical implicit solutions
-- **Sources**: Well-behaved terms suitable for explicit integration
+- Diffusion: Parabolic PDE requiring careful time stepping
+- Radiation: Nonlinear problem with analytical implicit solutions
+- Sources: Well-behaved terms suitable for explicit integration
 
 This approach provides the best combination of stability, accuracy, and performance for geological simulation, making it suitable for both research and interactive applications.
 
 ## Cell Conservation Exceptions  🚧
-In almost every numerical update the simulator treats each grid **cell** as an indestructible voxel – matter is merely moved or its phase changes _in-situ_.  For long-term stability we want all physics operators to preserve the **count of MaterialType.SPACE cells** (vacuum) unless something explicitly vents gas to space or accretes material from space.
+In almost every numerical update the simulator treats each grid cell as an indestructible voxel – matter is merely moved or its phase changes _in-situ_.  For long-term stability we want all physics operators to preserve the count of MaterialType.SPACE cells (vacuum) unless something explicitly vents gas to space or accretes material from space.
 
-The following operators currently **violate** that conservation principle by either turning non-SPACE material into SPACE, or by pulling existing SPACE inward so the outer vacuum region grows.  They should be revisited:
+The following operators currently violate that conservation principle by either turning non-SPACE material into SPACE, or by pulling existing SPACE inward so the outer vacuum region grows.  They should be revisited:
 
 | Operator / Routine | Location | Trigger | How cell count changes |
 |--------------------|----------|---------|------------------------|
-| Gravitational collapse (`_apply_gravitational_collapse_vectorized`) | `simulation_engine.py` | Solid cell adjacent to a cavity (AIR / WATER / SPACE) moves into that cavity | If the chosen cavity is **SPACE**, the solid and vacuum **swap positions** – global SPACE count is unchanged, but vacuum is pulled inward (planet appears eroded). We still list it here because repeated swaps reshape the planet; safest long-term fix is to forbid swapping with SPACE and instead swap with AIR |
-| Unsupported-cell settling (`_settle_unsupported_cells`) | `simulation_engine.py` | Any **denser** material directly above a **lighter fluid** (AIR, WATER_VAPOR, WATER, MAGMA, SPACE) swaps one cell toward the centre of mass | Cells now **swap** materials/temperatures; the lighter fluid rises, the heavier sinks, so global SPACE count stays constant (no synthetic vacuum pockets). |
+| Gravitational collapse (`_apply_gravitational_collapse_vectorized`) | `simulation_engine.py` | Solid cell adjacent to a cavity (AIR / WATER / SPACE) moves into that cavity | If the chosen cavity is SPACE, the solid and vacuum swap positions – global SPACE count is unchanged, but vacuum is pulled inward (planet appears eroded). We still list it here because repeated swaps reshape the planet; safest long-term fix is to forbid swapping with SPACE and instead swap with AIR |
+| Unsupported-cell settling (`_settle_unsupported_cells`) | `simulation_engine.py` | Any denser material directly above a lighter fluid (AIR, WATER_VAPOR, WATER, MAGMA, SPACE) swaps one cell toward the centre of mass | Cells now swap materials/temperatures; the lighter fluid rises, the heavier sinks, so global SPACE count stays constant (no synthetic vacuum pockets). |
 | Pyroclastic interaction (*water + magma*) | not yet explicit | Future rule might flash-boil water, expelling vapor upward and leaving behind SPACE | Would destroy a WATER cell |
 | Exsolution / out-gassing at very low pressure | placeholder | Planned volcanic venting routine | Could convert MAGMA → SPACE + AIR if vent blows out material |
 
 ### Why this matters
 Mass and volume conservation are critical for numerical stability and for keeping the planet from being "eaten" by its vacuum surroundings.  Each of the above rules either:
-1. Needs an alternate implementation that moves an **equal & opposite** amount of AIR (or other filler) so total SPACE remains constant, **or**
+1. Needs an alternate implementation that moves an equal & opposite amount of AIR (or other filler) so total SPACE remains constant, or
 2. Must be accompanied by a replenishment mechanism (e.g., accretion of interstellar dust) so the net SPACE budget is balanced over time.
 
 ### Next steps
 * Short-term safeguard: automated regression test (`test_space_integrity.py`) now fails if SPACE cells increase by more than a small tolerance.
-* Medium term: refactor the two mechanical-movement routines so they swap with **AIR** instead of SPACE, preserving vacuum volume.
+* Medium term: refactor the two mechanical-movement routines so they swap with AIR instead of SPACE, preserving vacuum volume.
 * Long term: audit any new thermochemical reactions using the checklist below before merging:
   1. Does the operator ever set a cell to `MaterialType.SPACE`?  If so, why?
   2. Could two cells merge?  If so, where does the "extra" cell go?
@@ -879,25 +1023,26 @@ Mass and volume conservation are critical for numerical stability and for keepin
 
 > Keeping this table up-to-date will help us rapidly spot and fix future regressions.
 
-> **Swap conflicts:** When two proposed swaps target the same cell (or each other) the helper `_dedupe_swap_pairs` keeps one swap and silently drops the others—no cell is cleared or set to SPACE. This guarantees cell-count preservation during mass movement passes.
+> Swap conflicts: When two proposed swaps target the same cell (or each other) the helper `_dedupe_swap_pairs` keeps one swap and silently drops the others—no cell is cleared or set to SPACE. This guarantees cell-count preservation during mass movement passes.
 
 ## Density-Driven Motion and Fluid Dynamics
 The simulator separates mass movement into three complementary passes that together honour gravity, buoyancy and fluid behaviour:
 
 ### 1. Density-Stratification Pass  (`_apply_density_stratification_local_vectorized`)
-* **Scope** – Operates on *mobile* materials only:  gases (AIR, WATER VAPOR), liquids (WATER), hot solids (> 1200 K), and low-density cold solids (ICE, PUMICE).  
-* **Rule** – Using an isotropic 5 × 5 neighbour list it compares *effective* density (ρ corrected for thermal expansion) between each sampled cell and a neighbour that is one or two cells closer to / farther from the centre of mass.  
-* **Action** – If the outer cell is denser it swaps inward; if lighter it swaps outward.  This creates mantle convection rolls, vapour plumes, and lets ice rise through magma or sink through air as appropriate.
+* Scope – Operates on *mobile* materials only:  gases (AIR, WATER VAPOR), liquids (WATER), hot solids (> 1200 K), and low-density cold solids (ICE, PUMICE).  
+* Rule – Using an isotropic 5 × 5 neighbour list it compares *effective* density (ρ corrected for thermal expansion) between each sampled cell and a neighbour that is one or two cells closer to / farther from the centre of mass.  
+* Action – If the outer cell is denser it swaps inward; if lighter it swaps outward.  This creates mantle convection rolls, vapour plumes, and lets ice rise through magma or sink through air as appropriate.
+
 
 ### 2. Unsupported-Cell Settling (`_settle_unsupported_cells`)
-* **Scope** – All solids.  
-* **Rule** – Looks **only** in the inward gravitational direction (one cell toward COM).  If the destination voxel is a *fluid* (AIR, WATER VAPOR, WATER, MAGMA or even SPACE) **and** is less dense than the source, the two voxels swap.  
-* **Outcome** – Rockfalls into caves, snowflakes dropping through air, basalt sinking into magma pools.  The lighter fluid rises, preserving mass and space counts.
+* Scope – All solids.  
+* Rule – Looks only in the inward gravitational direction (one cell toward COM).  If the destination voxel is a *fluid* (AIR, WATER VAPOR, WATER, MAGMA or even SPACE) and is less dense than the source, the two voxels swap.  
+* Outcome – Rockfalls into caves, snowflakes dropping through air, basalt sinking into magma pools.  The lighter fluid rises, preserving mass and space counts.
 
 ### 3. Fluid Migration / Vacuum Buoyancy (`_apply_fluid_dynamics_vectorized`)
-* **Scope** – All low-density fluids (AIR, WATER VAPOR, WATER, MAGMA, SPACE).  
-* **Rule** – For each fluid cell adjacent to any non-space material, test neighbours within radius 2. If the neighbour is denser **and** farther from the surface, swap (Monte-Carlo throttled by `fluid_migration_probability`).  
-* **Outcome** – Magma diapirs, steam bubbles, and trapped vacuum pockets rise toward the planetary surface.
+* Scope – All low-density fluids (AIR, WATER VAPOR, WATER, MAGMA, SPACE).  
+* Rule – For each fluid cell adjacent to any non-space material, test neighbours within radius 2. If the neighbour is denser and farther from the surface, swap (Monte-Carlo throttled by `fluid_migration_probability`).  
+* Outcome – Magma diapirs, steam bubbles, and trapped vacuum pockets rise toward the planetary surface.
 
 Together these passes realise both behaviours you outlined:
 * Hot, ductile mantle rock participates in large-scale convection (Pass 1).
@@ -906,31 +1051,31 @@ Together these passes realise both behaviours you outlined:
 ---
 
 ## Spatial Kernels & Isotropy
-To minimise axial artefacts the engine uses pre-computed **circular kernels** for all morphological operations.
+To minimise axial artefacts the engine uses pre-computed circular kernels for all morphological operations.
 
 | Kernel | Size | Purpose |
 |--------|------|---------|
-| `_circular_kernel_3x3` | 3 × 3 (8-neighbour) | Fast neighbour look-ups (e.g., atmospheric absorption) – **default when `neighbor_count = 8`** |
+| `_circular_kernel_3x3` | 3 × 3 (8-neighbour) | Fast neighbour look-ups (e.g., atmospheric absorption) – default when `neighbor_count = 8` |
 | `_circular_kernel_5x5` | 5 × 5 (includes radius 2 offsets) | Isotropic candidate gathering for collapse, buoyancy, stratification – always used |
 | `_collapse_kernel_4`   | 3 × 3 cross-shape | Strict 4-neighbour collapse for Manhattan-style movement – used when `neighbor_count = 4` (set automatically for `quality = 3`) |
-| `_collapse_kernel_8`   | 3 × 3 full ring | Allows diagonal collapse moves – **default** (`neighbor_count = 8`, quality 1-2) |
+| `_collapse_kernel_8`   | 3 × 3 full ring | Allows diagonal collapse moves – default (`neighbor_count = 8`, quality 1-2) |
 | `_laplacian_kernel_radius1` (implicit) | 3 × 3 | Classic 8-neighbour Laplacian (explicit diffusion, fast) – selected when `diffusion_stencil = "radius1"` |
-| `_laplacian_kernel_radius2` | 5 × 5, 13-point | Nearly isotropic Laplacian – **default** (`diffusion_stencil = "radius2"`) |
+| `_laplacian_kernel_radius2` | 5 × 5, 13-point | Nearly isotropic Laplacian – default (`diffusion_stencil = "radius2"`) |
 
 These kernels are generated once on startup and reused everywhere, ensuring that gravitational collapse, fluid migration and diffusion all respect circular symmetry on a Cartesian grid.
 
-> **Tip** – any new morphological rule should reuse one of the existing kernels to preserve numerical isotropy.
+> Tip – any new morphological rule should reuse one of the existing kernels to preserve numerical isotropy.
 
 ## Internal Heating
 Geothermal energy is injected every step by `_calculate_internal_heating_source`.
 * Exponential depth-dependent profile:  
   `Q = Q0 * exp(-depth / core_heating_depth_scale)`  (W m⁻³).  
-* Adds heat **explicitly** in operator-split Step 3; contributes to `power_density` bookkeeping.
+* Adds heat explicitly in operator-split Step 3; contributes to `power_density` bookkeeping.
 
 ## Solar Heating & Greenhouse Effect
 Incoming stellar flux is handled in two stages:
-1. **Raw insolation** – `_calculate_solar_heating_source` projects a solar vector, applies distance factor & cosine-law shading, then multiplies by material albedo.
-2. **Atmospheric absorption** – `_solve_atmospheric_absorption` (directional sweep) attenuates the beam through AIR / WATER_VAPOR columns; absorption coefficient comes from `MaterialDatabase._init_optical_absorption`.  
+1. Raw insolation – `_calculate_solar_heating_source` projects a solar vector, applies distance factor & cosine-law shading, then multiplies by material albedo.
+2. Atmospheric absorption – `_solve_atmospheric_absorption` (directional sweep) attenuates the beam through AIR / WATER_VAPOR columns; absorption coefficient comes from `MaterialDatabase._init_optical_absorption`.  
    *Greenhouse*: the outgoing long-wave cooling constant is multiplied by `(1 – greenhouse_factor)` where
    
   `greenhouse_factor = base + (max-base) * tanh( ln(1+M_vapor/scale) / 10 )`
@@ -957,40 +1102,40 @@ Gravitational lithostatic pressure is recalculated every macro-step by `_calcula
 * Atmospheric pressure decays exponentially with altitude using `atmospheric_scale_height`.
 * User-applied tectonic stress is added via `pressure_offset`.
 
-These additions round out the documentation so every major physical subsystem now has a corresponding description in **PHYSICS.md**.
+These additions round out the documentation so every major physical subsystem now has a corresponding description in PHYSICS.md.
 
 ### Why Three Separate Passes?
-Having one monolithic "swap anything with anything" routine would indeed be simpler conceptually, but splitting the work into targeted passes yields a far better **speed / accuracy** trade-off:
+Having one monolithic "swap anything with anything" routine would indeed be simpler conceptually, but splitting the work into targeted passes yields a far better speed / accuracy trade-off:
 
 | Pass | Candidate cells (80×80 planet) | Typical samples checked* | Complexity per sample | Dominant memory access |
 |------|--------------------------------|-------------------------|-----------------------|------------------------|
 | Stratification (1) | Gases, liquids, hot rocks, light solids ≈ 5–10 % | *density_sample_fraction* ≈ 1 000 | ~10 neighbour densities | Sparse, cache-friendly |
-| Unsupported settling (2) | **All solids** but **only** those directly above a fluid: ≈ 1–2 % | deterministic | 1 density compare | Straight slice, vectorised |
+| Unsupported settling (2) | All solids but only those directly above a fluid: ≈ 1–2 % | deterministic | 1 density compare | Straight slice, vectorised |
 | Fluid migration (3) | AIR/WATER/MAGMA/SPACE ≈ 3 % | *process_fraction_air* ≈ 500 | up to 12 neighbour checks | Contiguous chunks |
 
 \*measured on 80×80 default planet; percentages scale with planet mass.
 
 Performance advantages:
-1. **Early culling** – Each pass quickly masks out ~90 % of the grid that cannot move under that rule, so arithmetic and random-sampling happen on small arrays.
-2. **Specialised neighbourhoods** –  Pass 2 needs only the single voxel inward; Pass 3 needs radius-2 isotropy; Pass 1 needs full 5×5 but just for the sampled mobiles.  A unified pass would have to evaluate the heaviest case for every cell → 5–10× slower.
-3. **Directional semantics** – Unsupported settling is 1-D (*inward only*).  Embedding that into the isotropic swap logic would require extra per-candidate branching and reduce vectorisation.
-4. **Stronger physical fidelity** –  The mantle convection pass allows sideways exchange that would incorrectly mix atmosphere if merged with fluid buoyancy; conversely the fluid-only pass has extra porosity / probability checks irrelevant to rock.
+1. Early culling – Each pass quickly masks out ~90 % of the grid that cannot move under that rule, so arithmetic and random-sampling happen on small arrays.
+2. Specialised neighbourhoods –  Pass 2 needs only the single voxel inward; Pass 3 needs radius-2 isotropy; Pass 1 needs full 5×5 but just for the sampled mobiles.  A unified pass would have to evaluate the heaviest case for every cell → 5–10× slower.
+3. Directional semantics – Unsupported settling is 1-D (*inward only*).  Embedding that into the isotropic swap logic would require extra per-candidate branching and reduce vectorisation.
+4. Stronger physical fidelity –  The mantle convection pass allows sideways exchange that would incorrectly mix atmosphere if merged with fluid buoyancy; conversely the fluid-only pass has extra porosity / probability checks irrelevant to rock.
 
 Empirically, profiling shows:
-* 3-pass scheme: **~3–4 ms** per macro-step on 80×80 grid (Python+NumPy).  
-* Single isotropic "swap if heavier" prototype: **~20 ms** with identical physics but no early masking.
+* 3-pass scheme: ~3–4 ms per macro-step on 80×80 grid (Python+NumPy).  
+* Single isotropic "swap if heavier" prototype: ~20 ms with identical physics but no early masking.
 
-Hence the current architecture is both faster **and** clearer, while still producing physically plausible results.  Each pass can be toggled or refined independently without risking cross-coupling bugs.
+Hence the current architecture is both faster and clearer, while still producing physically plausible results.  Each pass can be toggled or refined independently without risking cross-coupling bugs.
 
 ## Unified Kinematics: Pressure- and Density-Driven Mass Motion
 
-The previous sections document **separate** routines for gravitational collapse, density stratification, and fluid migration.  These capture many first-order behaviours but do not yet model:
-• lateral flow from **pressure gradients** (e.g.
+The previous sections document separate routines for gravitational collapse, density stratification, and fluid migration.  These capture many first-order behaviours but do not yet model:
+• lateral flow from pressure gradients (e.g.
   water squirting through a fissure)
 • dynamic buoyancy in a *single* momentum framework
 • feedback between velocity, pressure, and material state.
 
-This section outlines a **single kinematic equation** that subsumes those effects while remaining suitable for a cellular-automata engine.
+This section outlines a single kinematic equation that subsumes those effects while remaining suitable for a cellular-automata engine.
 
 ### Governing Momentum Equation (2-D Cartesian grid)
 ```
@@ -1001,11 +1146,11 @@ This section outlines a **single kinematic equation** that subsumes those effect
          + 𝐅_material                    ⏤ material strength & drag
 ```
 Where
-• **𝐯(x,y,t)**   cell-centred velocity vector (m s⁻¹)  
-• **P(x,y,t)**    scalar pressure field (Pa)            
-• **ρ(x,y,t)**    *effective* density (includes thermal expansion) (kg m⁻³)  
-• **ν**           kinematic viscosity (m² s⁻¹) – piecewise per material  
-• **𝐠(x,y)**      gravity vector pointing to **COM**  
+• 𝐯(x,y,t)   cell-centred velocity vector (m s⁻¹)  
+• P(x,y,t)    scalar pressure field (Pa)            
+• ρ(x,y,t)    *effective* density (includes thermal expansion) (kg m⁻³)  
+• ν           kinematic viscosity (m² s⁻¹) – piecewise per material  
+• 𝐠(x,y)      gravity vector pointing to COM  
 
 Buoyancy is written explicitly:
 ```
@@ -1017,39 +1162,39 @@ For solids, a *drag / rigidity* term suppresses flow so they behave quasi-static
 ```
 𝐅_material = -k_solid · 𝐯         (k_solid ≫ 1 for competent rock)
 ```
-Liquids and gases set **k_solid ≈ 0**.
+Liquids and gases set k_solid ≈ 0.
 
 ### Pressure Closure (Pseudo-Incompressible)
-To stay inexpensive we adopt the **pseudo-incompressible** assumption (density changes via temperature/phase, not acoustic waves).  Enforcing ∇·𝐯 = 0 yields a Poisson equation each macro-step:
+To stay inexpensive we adopt the pseudo-incompressible assumption (density changes via temperature/phase, not acoustic waves).  Enforcing ∇·𝐯 = 0 yields a Poisson equation each macro-step:
 ```
 ∇²P = ρ / Δt · ∇·𝐯* ,             with 𝐯* the provisional velocity without the −∇P term.
 ```
 We solve this with Successive-Over-Relaxation (SOR) or Jacobi iterations until the divergence is below a tolerance (≲10⁻³).
 
 ### Discretisation
-• Grid spacing **Δx = Δy = cell_size** (usually 50 m).  
+• Grid spacing Δx = Δy = cell_size (usually 50 m).  
 • Central differences for ∇P and ∇²𝐯.  
 • Forward Euler or semi-implicit step for viscosity.  
-• **CFL** constraint: Δt ≤ min(Δx / |𝐯|) with a safety factor.
+• CFL constraint: Δt ≤ min(Δx / |𝐯|) with a safety factor.
 
 ### Boundary Conditions
-• Cells bordering **SPACE** use P = 0 (vacuum).  
+• Cells bordering SPACE use P = 0 (vacuum).  
 • No-slip (𝐯 = 0) at solid boundaries unless cracked/open.  
 • Open vents/fissures inherit the neighbour pressure for outflow.
 
 ### Expected Behaviours Captured
-1. **Gravity**: body force term.  
-2. **Low-density rise / high-density sink**: buoyancy term.  
-3. **Fluid outflow / lateral seepage**: −∇P / ρ term.  
-4. **Collapse when support melts**: rigidity term drops as T→melt ⇒ 𝐅_material →0 so the object accelerates downward.
+1. Gravity: body force term.  
+2. Low-density rise / high-density sink: buoyancy term.  
+3. Fluid outflow / lateral seepage: −∇P / ρ term.  
+4. Collapse when support melts: rigidity term drops as T→melt ⇒ 𝐅_material →0 so the object accelerates downward.
 
 ---
 ## Implementation Roadmap & Performance Strategy (≤ 16 ms on 100 × 100)
 
-1. **Add velocity fields** `vx, vy` (float64, shape (h,w)).  Initialise to 0.
-2. **Provisional Velocity** – compute all forces *except* pressure, vectorised NumPy:  
+1. Add velocity fields `vx, vy` (float64, shape (h,w)).  Initialise to 0.
+2. Provisional Velocity – compute all forces *except* pressure, vectorised NumPy:  
    `vx += Δt * ax`, `vy += Δt * ay`.
-3. **Pressure Solve** – 15–25 Jacobi/SOR iterations:  
+3. Pressure Solve – 15–25 Jacobi/SOR iterations:  
    ```python
    for iter in range(max_iter):
        P[1:-1,1:-1] = 0.25*(P[:-2,1:-1]+P[2:,1:-1]+P[1:-1,:-2]+P[1:-1,2:] 
@@ -1057,19 +1202,19 @@ We solve this with Successive-Over-Relaxation (SOR) or Jacobi iterations until t
    ```
    • `rhs = ρ/Δt * divergence(vx*,vy*)`  
    • Stop early when max residual < 1 Pa.
-4. **Velocity Projection** – subtract gradient:  
+4. Velocity Projection – subtract gradient:  
    `vx -= Δt/ρ * (P[:,2:]-P[:,:-2])/(2Δx)` (analogous in y).
-5. **Material Advection** – use *semi-Lagrangian* back-trace (two bilinear probes per cell) → stable at large Δt.
-6. **Phase / density update** – reuse existing metamorphism functions; recompute ρ, ν.
-7. **Sparse Updates** – keep a boolean `active_mask` (cells where |𝐯|, |Ṫ|, or material change > ε).  Only those and their 1-cell halo enter steps 2–5.
-8. **Quality Levels** – reuse existing `quality` flag:  
-   • **Full**: whole grid every step.  
-   • **Balanced**: update `active_mask` only.  
-   • **Fast**: subsample active cells (e.g., every other cell) each frame.
-9. **Solver Optimisation**  
+5. Material Advection – use *semi-Lagrangian* back-trace (two bilinear probes per cell) → stable at large Δt.
+6. Phase / density update – reuse existing metamorphism functions; recompute ρ, ν.
+7. Sparse Updates – keep a boolean `active_mask` (cells where |𝐯|, |Ṫ|, or material change > ε).  Only those and their 1-cell halo enter steps 2–5.
+8. Quality Levels – reuse existing `quality` flag:  
+   • Full: whole grid every step.  
+   • Balanced: update `active_mask` only.  
+   • Fast: subsample active cells (e.g., every other cell) each frame.
+9. Solver Optimisation  
    • Pre-compute 1/ρ where possible.  
    • Use `numba.njit(parallel=True)` or move the Poisson solve to Cython.
-10. **Frame-Time Budget (100×100)**  
+10. Frame-Time Budget (100×100)  
     | Stage | Target Time | Notes |
     |-------|-------------|-------|
     | Force assembly        | ≤ 1 ms | vectorised NumPy |
@@ -1077,22 +1222,22 @@ We solve this with Successive-Over-Relaxation (SOR) or Jacobi iterations until t
     | Projection            | ≤ 1 ms | simple gradients |
     | Advection             | ≤ 4 ms | semi-Lagrangian, only active cells |
     | Misc/Book-keeping     | ≤ 3 ms | phase, IO, logging |
-    Total ≈ **16 ms** → 60 fps (safety margin included).
+    Total ≈ 16 ms → 60 fps (safety margin included).
 
-11. **Validation Tests**
+11. Validation Tests
     • Rising bubble test (air in water).  
     • Dam-break pressure surge.  
     • Rock-on-ice melt collapse.  
     • Hydrostatic rest ‑ zero velocity residual.
 
-12. **Staged Roll-Out**
+12. Staged Roll-Out
     a. Implement velocity & pressure arrays (no movement yet).  
     b. Enable gravity + buoyancy; verify static pressure.  
     c. Add pressure solve & projection.  
     d. Replace density-stratification / collapse with velocity-driven advection.  
     e. Benchmark & tune `active_mask` heuristics.
 
-13. **Maintenance**
+13. Maintenance
     • Keep the old three-pass system behind a feature flag for regression comparison.  
     • Unit-test the Poisson solver separately.  
     • Plot residual vs iteration each CI run to catch performance drifts.
@@ -1101,23 +1246,23 @@ We solve this with Successive-Over-Relaxation (SOR) or Jacobi iterations until t
 
 ## Pressure Solver Options & Solver Roadmap
 
-> **Current implementation** – The planetary pressure is solved with **red-black Successive Over-Relaxation (SOR)** (see `fluid_dynamics.calculate_planetary_pressure`).  A parity loop (`for parity in (0,1)`) updates the chess-board subsets, so the algorithm is literally classic RB-SOR with over-relaxation factor ω ≈ 1.7.  Because of coarse grids and large density jumps a small *analytic* radial correction (quadratic + linear) is applied after the iterations to enforce a monotonic inward pressure gradient.
+> Current implementation – The planetary pressure is solved with red-black Successive Over-Relaxation (SOR) (see `fluid_dynamics.calculate_planetary_pressure`).  A parity loop (`for parity in (0,1)`) updates the chess-board subsets, so the algorithm is literally classic RB-SOR with over-relaxation factor ω ≈ 1.7.  Because of coarse grids and large density jumps a small *analytic* radial correction (quadratic + linear) is applied after the iterations to enforce a monotonic inward pressure gradient.
 
 The table below compares alternative solvers that would remove that empirical patch while keeping – or improving – performance.
 
 | ID | Solver | Accuracy | Typical Convergence (80×80 grid) | Cost per Step (Python/NumPy) | Pros | Cons |
 |----|--------|----------|----------------------------------|------------------------------|------|------|
-| A₁ | **RB-SOR + patch** (status-quo) | ★☆☆ | ~200 sweeps (≈ 1 k iterations per cell) | 4–5 ms | • Very simple  • Works with variable ρ | • Needs empirical patch  • O(N²) sweeps for high accuracy |
-| A₂ | **RB-SOR + pre-conditioning** (Jacobi, Chebyshev) | ★★☆ | 3× faster than A₁ | 2 ms | • Minimal code change | • Still grid-dependent  • Tuning ω / preconditioner |
-| B | **Geometric Multigrid (V-cycle)** | ★★★ | Residual ↓ 10⁻⁶ in 3–4 V-cycles (≈ O(N)) | 1–2 ms | • Grid-independent speed  • Handles variable ρ exactly | • Need hierarchy & prolong/restrict code (≈ 150 LOC) |
-| C | **FFT / DST Poisson** (constant ρ) | ★★★ | Exact (machine precision) in 1 sweep | 0.5 ms | • Blazing fast with `scipy.fft`  • Simple | • Assumes constant ρ – needs Picard loop or damping  • Hard Dirichlet SPACE mask requires padding |
-| D | **PCG + AMG preconditioner** | ★★★ | 10–15 iterations | 1 ms | • Sparse-matrix libraries available (`pyamg`) | • Matrix assembly each step  • Extra dependency |
-| E | **Self-gravity potential Φ → P** | ★★★ | Exact (given Φ) | 1 ms (2 FFTs) | • Physically correct for non-circular planets  • Gives full gravity field | • Requires solving ∇²Φ = 4πGρ  • Adds complexity & memory |
+| A₁ | RB-SOR + patch (status-quo) | ★☆☆ | ~200 sweeps (≈ 1 k iterations per cell) | 4–5 ms | • Very simple  • Works with variable ρ | • Needs empirical patch  • O(N²) sweeps for high accuracy |
+| A₂ | RB-SOR + pre-conditioning (Jacobi, Chebyshev) | ★★☆ | 3× faster than A₁ | 2 ms | • Minimal code change | • Still grid-dependent  • Tuning ω / preconditioner |
+| B | Geometric Multigrid (V-cycle) | ★★★ | Residual ↓ 10⁻⁶ in 3–4 V-cycles (≈ O(N)) | 1–2 ms | • Grid-independent speed  • Handles variable ρ exactly | • Need hierarchy & prolong/restrict code (≈ 150 LOC) |
+| C | FFT / DST Poisson (constant ρ) | ★★★ | Exact (machine precision) in 1 sweep | 0.5 ms | • Blazing fast with `scipy.fft`  • Simple | • Assumes constant ρ – needs Picard loop or damping  • Hard Dirichlet SPACE mask requires padding |
+| D | PCG + AMG preconditioner | ★★★ | 10–15 iterations | 1 ms | • Sparse-matrix libraries available (`pyamg`) | • Matrix assembly each step  • Extra dependency |
+| E | Self-gravity potential Φ → P | ★★★ | Exact (given Φ) | 1 ms (2 FFTs) | • Physically correct for non-circular planets  • Gives full gravity field | • Requires solving ∇²Φ = 4πGρ  • Adds complexity & memory |
 
 ### Recommendation
-1. **Short term (≤ 1 day)** Replace the patch with *RB-SOR + Jacobi pre-conditioner* (option A₂).  Zero refactor risk, immediate residual drop ~3×.
-2. **Medium term (≤ 1 week)** Implement **Geometric Multigrid** (option B).  Pure-NumPy V-cycle is < 200 LOC and removes grid-size dependence entirely.
-3. **Long term (R&D)** Adopt **self-gravity potential** workflow (option E).  Gives correct pressure for arbitrary shapes and unlocks tidal / spin effects.  Multigrid can still serve as the Φ- and P-solver if FFT boundaries become awkward.
+1. Short term (≤ 1 day) Replace the patch with *RB-SOR + Jacobi pre-conditioner* (option A₂).  Zero refactor risk, immediate residual drop ~3×.
+2. Medium term (≤ 1 week) Implement Geometric Multigrid (option B).  Pure-NumPy V-cycle is < 200 LOC and removes grid-size dependence entirely.
+3. Long term (R&D) Adopt self-gravity potential workflow (option E).  Gives correct pressure for arbitrary shapes and unlocks tidal / spin effects.  Multigrid can still serve as the Φ- and P-solver if FFT boundaries become awkward.
 
 ```text
 Roadmap
@@ -1127,29 +1272,29 @@ Roadmap
 [ v2.0 ]  Φ-based self-gravity           → full hydrostatic & tidal modelling
 ```
 
-The current RB-SOR implementation is adequate for gameplay-scale grids, but Multigrid (or FFT where applicable) will give the same answer faster **and** in a fully theoretical framework – no empirical corrections necessary.
+The current RB-SOR implementation is adequate for gameplay-scale grids, but Multigrid (or FFT where applicable) will give the same answer faster and in a fully theoretical framework – no empirical corrections necessary.
 
 ## ROADMAP & OPEN ITEMS
 
-These tasks have been agreed during the refactor sessions but are **not yet implemented**.  They are listed here so that any contributor can pick them up without digging through chat history.
+These tasks have been agreed during the refactor sessions but are not yet implemented.  They are listed here so that any contributor can pick them up without digging through chat history.
 
 ### Immediate (blocking) 
-1. **Complete SI sweep** – purge any remaining `seconds_per_year` maths in *tests* and documentation examples; delete the placeholder attribute from `simulation_engine_original.py` once reference tests pass.
-2. **FFT / DST pressure projection** – replace the multigrid Poisson solver in `fluid_dynamics.py` with a frequency-space implementation for O(N log N) performance and predictable convergence.
-3. **Energy conservation regression** – add an automated test that steps an isolated closed system for ≥10 years and asserts that total internal energy changes < 0.1 %.  This will guard against future source / sink sign errors.
-4. **Material property cache validation** – convert the ad-hoc debug script into a pytest that randomly deletes materials and checks that `_material_props_cache` is perfectly pruned.
+1. Complete SI sweep – purge any remaining `seconds_per_year` maths in *tests* and documentation examples; delete the placeholder attribute from `simulation_engine_original.py` once reference tests pass.
+2. FFT / DST pressure projection – replace the multigrid Poisson solver in `fluid_dynamics.py` with a frequency-space implementation for O(N log N) performance and predictable convergence.
+3. Energy conservation regression – add an automated test that steps an isolated closed system for ≥10 years and asserts that total internal energy changes < 0.1 %.  This will guard against future source / sink sign errors.
+4. Material property cache validation – convert the ad-hoc debug script into a pytest that randomly deletes materials and checks that `_material_props_cache` is perfectly pruned.
 
 ### Short-term enhancements
-• **Temperature-dependent viscosity** – damp velocities as a smooth function of local melt fraction; this replaces the temporary solid drag factor 0.2.
-• **Variable cell-size support** – allow `cell_size` ≠ 50 m so small-scale phenomena (lava tubes, glaciers) can be simulated in separate runs.
-• **Greenhouse coupling** – link water-vapour mass directly to `atmospheric_processes.calculate_greenhouse_effect()` instead of the current heuristic.
-• **Moist-convective rainfall** – precipitate WATER when saturated vapour cools below the Clausius-Clapeyron curve; feeds erosion module.
+• Temperature-dependent viscosity – damp velocities as a smooth function of local melt fraction; this replaces the temporary solid drag factor 0.2.
+• Variable cell-size support – allow `cell_size` ≠ 50 m so small-scale phenomena (lava tubes, glaciers) can be simulated in separate runs.
+• Greenhouse coupling – link water-vapour mass directly to `atmospheric_processes.calculate_greenhouse_effect()` instead of the current heuristic.
+• Moist-convective rainfall – precipitate WATER when saturated vapour cools below the Clausius-Clapeyron curve; feeds erosion module.
 
 ### Research backlog (nice-to-have)
-• Coupled **erosion & sediment transport** (height-field + fluvial flow).
-• **Partial melt phase diagram** for silicates – returns melt fraction and latent heat sink.
-• **GPU kernels** for heat diffusion and Poisson solves via CuPy (optional acceleration path).
-• **3-D extrusion prototype** – prove that the 2-D solver generalises to shallow-layer quasi-3-D without re-architecting.
+• Coupled erosion & sediment transport (height-field + fluvial flow).
+• Partial melt phase diagram for silicates – returns melt fraction and latent heat sink.
+• GPU kernels for heat diffusion and Poisson solves via CuPy (optional acceleration path).
+• 3-D extrusion prototype – prove that the 2-D solver generalises to shallow-layer quasi-3-D without re-architecting.
 
 Contributors should update this list (and cross-reference issue numbers) whenever an item is started or completed.
 
