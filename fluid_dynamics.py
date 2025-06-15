@@ -106,9 +106,10 @@ class FluidDynamics:
         # ------------------------------------------------------------------
         # Buoyancy term – delegated to helper for re-use in other routines
         # ------------------------------------------------------------------
-        fbx, fby = self._compute_buoyancy_force(rho, gx_total, gy_total)
-        fx += fbx
-        fy += fby
+        # Buoyancy temporarily disabled until sign/clamp re-tuned
+        # fbx, fby = self._compute_buoyancy_force(rho, gx_total, gy_total)
+        # fx += fbx
+        # fy += fby
 
         # Pressure gradient term – pressure stored in MPa → convert to Pa
         P_pa = self.sim.pressure * 1e6
@@ -129,8 +130,13 @@ class FluidDynamics:
         accel_x = np.where(rho > 0, fx / rho, 0.0)
         accel_y = np.where(rho > 0, fy / rho, 0.0)
 
+        # Velocity update and CFL clamp (≤0.5 cell/step)
         self.velocity_x += accel_x * dt_seconds
         self.velocity_y += accel_y * dt_seconds
+
+        max_u = 0.5 * self.sim.cell_size / dt_seconds
+        np.clip(self.velocity_x, -max_u, max_u, out=self.velocity_x)
+        np.clip(self.velocity_y, -max_u, max_u, out=self.velocity_y)
 
         self.sim._perf_times["uk_velocity_update"] = _time.perf_counter() - _t_vel_start
 
@@ -144,16 +150,19 @@ class FluidDynamics:
         # Divergence of tentative velocity (1/s)
         div_u = np.zeros_like(self.velocity_x)
         dx_m = self.sim.cell_size
+        fluid_mask = rho > 0.0
         div_u[1:-1, 1:-1] = (
             (self.velocity_x[1:-1, 2:] - self.velocity_x[1:-1, :-2]) +
             (self.velocity_y[2:, 1:-1] - self.velocity_y[:-2, 1:-1])
         ) / (2 * dx_m)
 
+        div_u = div_u * fluid_mask  # Ignore vacuum divergence
+
         # ------------------------------------------------------------------
         # Variable-density Chorin projection
         #    ∇·(1/ρ ∇φ) = div_u / Δt
         # ------------------------------------------------------------------
-        rhs = div_u / dt_seconds  # (1/s) / s → 1/s² but solver expects rhs units of φ / dx²
+        rhs = (div_u / dt_seconds) * fluid_mask
         inv_rho = np.where(rho > 0, 1.0 / rho, 0.0)
 
         # Projection does not need micro-Pascal precision; loosen tolerance for speed
@@ -167,6 +176,8 @@ class FluidDynamics:
 
         # Gradient of φ
         grad_phi_y, grad_phi_x = np.gradient(phi, dx_m)
+        grad_phi_x[~fluid_mask] = 0.0
+        grad_phi_y[~fluid_mask] = 0.0
 
         # Velocity correction  u = u* − Δt/ρ ∇φ
         self.velocity_x -= grad_phi_x * dt_seconds * inv_rho
@@ -182,17 +193,35 @@ class FluidDynamics:
         swaps_done = 0
 
         cell_size = self.sim.cell_size
-        self.disp_accum_x += (self.velocity_x * dt_seconds) / cell_size
-        self.disp_accum_y += (self.velocity_y * dt_seconds) / cell_size
+        dx_cells = (self.velocity_x * dt_seconds) / cell_size
+        dy_cells = (self.velocity_y * dt_seconds) / cell_size
+        dx_cells = np.where(np.isfinite(dx_cells), dx_cells, 0.0)
+        dy_cells = np.where(np.isfinite(dy_cells), dy_cells, 0.0)
+        self.disp_accum_x += dx_cells
+        self.disp_accum_y += dy_cells
+
+        # --------------------------------------------------------------
+        # Material-dependent trigger: fluids use 0.05 cell, solids 0.5 cell
+        # --------------------------------------------------------------
+        mt = self.sim.material_types
+        fluid_materials = {
+            getattr(MaterialType, "AIR", None),
+            getattr(MaterialType, "WATER_VAPOR", None),
+            getattr(MaterialType, "WATER", None),
+            getattr(MaterialType, "MAGMA", None),
+        }
+
+        fluid_mask_local = np.isin(mt, list(fluid_materials))
+        trigger_map = np.where(fluid_mask_local, 0.05, 0.5)
 
         # Determine integer cell moves (at most ±1 for stability)
-        trigger = 0.5  # 50 % of a cell
         step_x = np.zeros_like(self.disp_accum_x, dtype=np.int8)
         step_y = np.zeros_like(self.disp_accum_y, dtype=np.int8)
-        step_x[self.disp_accum_x >= trigger] = 1
-        step_x[self.disp_accum_x <= -trigger] = -1
-        step_y[self.disp_accum_y >= trigger] = 1
-        step_y[self.disp_accum_y <= -trigger] = -1
+
+        step_x[self.disp_accum_x >= trigger_map] = 1
+        step_x[self.disp_accum_x <= -trigger_map] = -1
+        step_y[self.disp_accum_y >= trigger_map] = 1
+        step_y[self.disp_accum_y <= -trigger_map] = -1
 
         move_mask = (step_x != 0) | (step_y != 0)
         if not np.any(move_mask):
@@ -227,14 +256,21 @@ class FluidDynamics:
         # Only allow swap if source is denser than target (deterministic stratification)
         src_density = rho[src_y, src_x]
         tgt_density = rho[tgt_y, tgt_x]
-        allowed = src_density > tgt_density + 1e-3  # tolerance for equal densities
-        if np.any(allowed):
+        # Swap only if heavier and target is NOT SPACE (avoid duplicating into vacuum)
+        tgt_mat = mt[tgt_y, tgt_x]
+        not_space = tgt_mat != MaterialType.SPACE
+        heavier = (src_density > tgt_density + 1e-3) & not_space
+        if np.any(heavier):
             _t_swap_start = _time.perf_counter()
-            self._perform_material_swaps(src_y[allowed], src_x[allowed], tgt_y[allowed], tgt_x[allowed])
+            self._perform_material_swaps(src_y[heavier], src_x[heavier], tgt_y[heavier], tgt_x[heavier])
             
-            self.disp_accum_x[src_y[allowed], src_x[allowed]] -= step_x[src_y[allowed], src_x[allowed]]
-            self.disp_accum_y[src_y[allowed], src_x[allowed]] -= step_y[src_y[allowed], src_x[allowed]]
-            swaps_done = len(src_y[allowed])
+            self.disp_accum_x[src_y[heavier], src_x[heavier]] -= step_x[src_y[heavier], src_x[heavier]]
+            self.disp_accum_y[src_y[heavier], src_x[heavier]] -= step_y[src_y[heavier], src_x[heavier]]
+            swaps_done = len(src_y[heavier])
+
+        # Light exponential decay on residual displacement to avoid exact cancellation
+        self.disp_accum_x *= 0.95
+        self.disp_accum_y *= 0.95
 
         # Apply drag only if enabled
         if getattr(self.sim, "enable_solid_drag", True):
@@ -246,6 +282,41 @@ class FluidDynamics:
         self.sim._perf_times["uk_displacement"] = _time.perf_counter() - _t_disp_start
         self.sim._perf_times["uk_swaps"] = _time.perf_counter() - _t_swap_start
         self.sim._perf_times["uk_swaps_count"] = swaps_done
+
+        # ------------------------------------------------------------------
+        # 5) Extra sinking passes – ensure heavier fluid settles through lighter
+        # ------------------------------------------------------------------
+        # Gravity-aligned deterministic settling passes
+        n_settle = 3
+        for _ in range(n_settle):
+            gx = self.sim.gravity_x
+            gy = self.sim.gravity_y
+
+            abs_gx = np.abs(gx)
+            abs_gy = np.abs(gy)
+
+            dx_dir = np.where(abs_gx >= abs_gy, np.sign(gx).astype(np.int8), 0)
+            dy_dir = np.where(abs_gy > abs_gx, np.sign(gy).astype(np.int8), 0)
+
+            # Compute target indices and filter in-bounds
+            yy, xx = np.indices(rho.shape)
+            tgt_y = (yy + dy_dir).astype(np.int32)
+            tgt_x = (xx + dx_dir).astype(np.int32)
+            in_bounds = (tgt_y >= 0) & (tgt_y < self.sim.height) & (tgt_x >= 0) & (tgt_x < self.sim.width)
+
+            src_y = yy[in_bounds].ravel(); src_x = xx[in_bounds].ravel()
+            tgt_y = tgt_y[in_bounds].ravel(); tgt_x = tgt_x[in_bounds].ravel()
+
+            heavier = rho[src_y, src_x] > rho[tgt_y, tgt_x] + 1e-3
+            if not np.any(heavier):
+                break
+            self._perform_material_swaps(src_y[heavier], src_x[heavier], tgt_y[heavier], tgt_x[heavier])
+            swaps_done += int(np.sum(heavier))
+
+            # Refresh density for subsequent passes
+            self.sim._properties_dirty = True
+            self.sim._update_material_properties()
+            rho = self.sim.density  # view updated array
     
     def calculate_effective_density(self, temperature: np.ndarray) -> np.ndarray:
         """Calculate effective density including thermal expansion"""

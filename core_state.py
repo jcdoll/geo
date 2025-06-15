@@ -104,7 +104,7 @@ class CoreState:
         self.core_heating_depth_scale = 0.5
         self.surface_pressure = 0.1  # MPa
         self.atmospheric_scale_height = 8400  # m
-        self.average_gravity = 9.81 # m/s^2 for external sources
+        self.average_gravity = (0, 0) # m/s^2 for external sources
         self.average_solid_density = 3000
         self.average_fluid_density = 2000
         self.solar_constant = 50
@@ -181,7 +181,7 @@ class CoreState:
         # Poisson solve so that laboratory-scale scenarios still experience a
         # meaningful buoyancy force even when the radial self-gravity is nearly
         # zero.
-        self.external_gravity: tuple[float, float] = (0.0, self.average_gravity)
+        self.external_gravity: tuple[float, float] = self.average_gravity
 
         # Toggle for applying empirical solid drag in unified kinematics
         self.enable_solid_drag: bool = True
