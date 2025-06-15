@@ -18,45 +18,27 @@ class HeatTransfer:
         """Initialize with reference to main simulation"""
         self.sim = simulation
     
-    def solve_heat_diffusion(self) -> tuple[np.ndarray, float]:
-        """
-        Solve heat diffusion using operator splitting method.
+    def solve_heat_diffusion(self):
+        """Apply operator splitting to solve heat equation with sources."""
         
-        Returns:
-            tuple: (new_temperature, stability_factor)
-        """
-        non_space_mask = (self.sim.material_types != MaterialType.SPACE)
-
-        if not np.any(non_space_mask):
-            return self.sim.temperature, 1.0
-
-        # Start with current temperature
-        working_temp = self.sim.temperature.copy()
-
-        # Step 1: Solve pure diffusion (no sources)
-        working_temp, diffusion_stability = self._solve_pure_diffusion(working_temp, non_space_mask)
-
-        # Step 2: Solve radiative cooling using selected method (dispatcher)
-        working_temp = self._solve_radiative_cooling(working_temp, non_space_mask)
-
-        # Step 3: Solve other heat sources explicitly (internal, solar, atmospheric)
+        # Get mask of non-space cells
+        non_space_mask = self.sim.material_types != MaterialType.SPACE
+        
+        # Step 1: Pure diffusion (if enabled)
+        if self.sim.enable_heat_diffusion:
+            working_temp, stability = self._solve_pure_diffusion(self.sim.temperature, non_space_mask)
+        else:
+            working_temp = self.sim.temperature.copy()
+            stability = 1.0
+        
+        # Step 2: Radiative cooling (if enabled)
+        if self.sim.enable_radiative_cooling:
+            working_temp = self._solve_radiative_cooling(working_temp, non_space_mask)
+        
+        # Step 3: Non-radiative heat sources (if enabled)
         working_temp = self._solve_non_radiative_sources(working_temp, non_space_mask)
-
-        # Overall stability factor is dominated by diffusion (radiation and sources are stable)
-        overall_stability = diffusion_stability
-
-        # Store debugging info
-        self.sim._actual_substeps = getattr(self.sim, '_diffusion_substeps', 1)
-        self.sim._actual_effective_dt = self.sim.dt * overall_stability
-
-        # Debug info
-        avg_temp_before = np.mean(self.sim.temperature[non_space_mask]) - 273.15 if np.any(non_space_mask) else 0.0
-        avg_temp_after = np.mean(working_temp[non_space_mask]) - 273.15 if np.any(non_space_mask) else 0.0
-        if self.sim.logging_enabled:
-            self.sim.logger.debug(
-                f"Diffusion sub-steps: {self.sim._actual_substeps}, ΔT planet avg: {avg_temp_before:6.1f}→{avg_temp_after:6.1f} °C")
-
-        return working_temp, overall_stability
+        
+        return working_temp, stability
     
     def _solve_pure_diffusion(self, temperature: np.ndarray, non_space_mask: np.ndarray) -> tuple[np.ndarray, float]:
         """Solve pure diffusion (no sources) for maximum stability"""
@@ -370,17 +352,26 @@ class HeatTransfer:
         return working_temp
     
     def _solve_non_radiative_sources(self, temperature: np.ndarray, non_space_mask: np.ndarray) -> np.ndarray:
-        """Apply all non-radiative heat sources"""
+        """Apply non-radiative heat sources to temperature field."""
         working_temp = temperature.copy()
         
-        # Calculate heat sources
-        internal_source = self._calculate_internal_heating_source(non_space_mask)
-        solar_source = self._calculate_solar_heating_source(non_space_mask)
+        # Calculate source terms only if enabled
+        internal_source = self._calculate_internal_heating_source(non_space_mask) if self.sim.enable_internal_heating else 0.0
+        solar_source = self._calculate_solar_heating_source(non_space_mask) if self.sim.enable_solar_heating else 0.0
         atmospheric_source = self._calculate_atmospheric_heating_source(non_space_mask)
         
-        # Apply sources
+        # Total volumetric power density (W/m³)
         total_source = internal_source + solar_source + atmospheric_source
-        working_temp += total_source * self.sim.dt
+        
+        # Temperature change: dT/dt = Q / (ρ * cp)
+        # dT = Q * dt / (ρ * cp)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            source_change = (total_source * self.sim.dt / 
+                           (self.sim.density * self.sim.specific_heat))
+            source_change[~non_space_mask] = 0.0
+            source_change = np.nan_to_num(source_change, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        working_temp += source_change
         
         return working_temp
     

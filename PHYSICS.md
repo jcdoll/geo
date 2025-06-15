@@ -1269,6 +1269,137 @@ Empirically, profiling shows:
 
 Hence the current architecture is both faster and clearer, while still producing physically plausible results.  Each pass can be toggled or refined independently without risking cross-coupling bugs.
 
+## Motion Physics Improvements and Recommendations
+
+### Current Limitations Analysis
+
+The existing cell-swapping approach has fundamental limitations that prevent realistic fluid dynamics and rigid body behavior:
+
+1. **Rate-Limited Individual Swaps**: Current implementation achieves only ~3 swaps per timestep, insufficient for phenomena like surface tension-driven shape changes (e.g., water line collapsing to a circle).
+
+2. **No Momentum Conservation**: Cells swap positions without transferring momentum, preventing realistic collision responses and buoyancy oscillations.
+
+3. **Lack of Coherent Motion**: Individual cells move independently without concept of connected groups, preventing rigid body behavior for ice, rock, or other solid structures.
+
+4. **Sequential Processing**: Cell-by-cell evaluation creates artificial ordering dependencies and limits parallelism.
+
+### Recommended Solutions
+
+#### 1. Multi-Cell Group Operations
+
+Identify and move coherent groups of cells as units:
+
+```python
+# Identify connected components for rigid materials
+groups = connected_component_labeling(material_types)
+
+# Move entire groups based on net forces
+for group_id in unique_groups:
+    group_mask = (groups == group_id)
+    net_force = sum(forces[group_mask])
+    group_velocity += net_force / group_mass * dt
+    move_group_coherently(group_mask, group_velocity)
+```
+
+Benefits:
+- Preserves rigid body shapes during motion
+- Allows proper momentum transfer between bodies
+- Enables realistic iceberg/floating object behavior
+
+#### 2. Bulk Interface Processing
+
+Process entire fluid-vacuum interfaces simultaneously:
+
+```python
+# Find ALL interface cells at once
+interface_cells = fluid_mask & has_vacuum_neighbor
+curvature = calculate_local_curvature(interface_cells)
+
+# Move many cells simultaneously based on curvature
+cells_to_move = interface_cells & (curvature > threshold)
+bulk_contract_interface(cells_to_move)
+```
+
+Benefits:
+- Increases swap rate from ~3 to 50-100+ per timestep
+- Enables rapid surface tension effects
+- More physically accurate interface evolution
+
+#### 3. Velocity Field Integration
+
+Add continuous velocity fields alongside discrete cell states:
+
+```python
+# Continuous fields
+velocity_x = np.zeros((height, width))
+velocity_y = np.zeros((height, width))
+
+# Update velocities based on forces
+velocity += force / density * dt
+
+# Use velocities for transport decisions
+if |velocity| > binding_threshold:
+    transport_material()
+```
+
+Benefits:
+- Natural momentum conservation
+- Smooth acceleration/deceleration
+- Foundation for full fluid dynamics
+
+#### 4. Momentum-Conserving Collisions
+
+Every material exchange must conserve linear momentum:
+
+```python
+# Before swap
+p1 = m1 * v1
+p2 = m2 * v2
+p_total = p1 + p2
+
+# After swap (positions exchanged, velocities adjusted)
+v1_new = (p_total - m2*v2_old) / m1
+v2_new = (p_total - m1*v1_old) / m2
+```
+
+### Implementation Strategy
+
+#### Phase 1: Enhanced Surface Tension
+- Implement bulk interface processing
+- Allow multiple simultaneous swaps per timestep
+- Target: 50-100 swaps per timestep for surface tension
+
+#### Phase 2: Velocity Fields
+- Add velocity_x, velocity_y arrays
+- Update velocities based on force fields
+- Use velocity thresholds for swap decisions
+
+#### Phase 3: Group Dynamics
+- Implement connected component labeling
+- Move rigid bodies as coherent units
+- Add inter-group momentum transfer
+
+#### Phase 4: Full Unified Kinematics
+- Semi-Lagrangian advection
+- Pressure projection for incompressibility
+- Complete momentum conservation
+
+### Key Physics Principles
+
+1. **Conservation Laws**: Every operation must conserve mass, momentum, and energy
+2. **Collective Behavior**: Connected cells should move together when appropriate
+3. **Parallel Processing**: Operations on independent cells should happen simultaneously
+4. **Force Integration**: Forces accumulate into velocities, velocities drive motion
+5. **Binding Thresholds**: Materials resist motion until forces exceed thresholds
+
+### Expected Improvements
+
+- Surface tension: Water lines collapse to circles in <50 timesteps (vs never)
+- Rigid bodies: Ice maintains shape while floating and bobbing
+- Collisions: Proper momentum transfer and response
+- Performance: Bulk operations more efficient than individual swaps
+- Stability: Conservation laws prevent energy/mass drift
+
 ## Unified Kinematics: Pressure- and Density-Driven Mass Motion
 
 The previous sections document separate routines for gravitational collapse, density stratification, and fluid migration.  These capture many first-order behaviours but do not yet model:

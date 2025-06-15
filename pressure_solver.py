@@ -38,10 +38,34 @@ def _gauss_seidel_rb(phi: np.ndarray, rhs: np.ndarray, dx: float, iterations: in
 def _restrict(res: np.ndarray) -> np.ndarray:
     """Return coarse residual with shape (⌈ny/2⌉, ⌈nx/2⌉)."""
     ny, nx = res.shape
-    nyc, nxc = ny // 2, nx // 2  # even sizes guaranteed by padding
-    return 0.25 * (
-        res[0:ny:2, 0:nx:2] + res[1:ny:2, 0:nx:2] + res[0:ny:2, 1:nx:2] + res[1:ny:2, 1:nx:2]
+    
+    # Ensure even dimensions to avoid slicing issues
+    ny_even = ny if ny % 2 == 0 else ny - 1
+    nx_even = nx if nx % 2 == 0 else nx - 1
+    
+    # Restrict only the even-sized portion
+    restricted = 0.25 * (
+        res[0:ny_even:2, 0:nx_even:2] + 
+        res[1:ny_even:2, 0:nx_even:2] + 
+        res[0:ny_even:2, 1:nx_even:2] + 
+        res[1:ny_even:2, 1:nx_even:2]
     )
+    
+    # Handle odd edges if necessary
+    nyc = (ny + 1) // 2
+    nxc = (nx + 1) // 2
+    result = np.zeros((nyc, nxc), dtype=res.dtype)
+    result[:restricted.shape[0], :restricted.shape[1]] = restricted
+    
+    # If original had odd dimension, handle the last row/column
+    if ny % 2 == 1:
+        result[-1, :restricted.shape[1]] = 0.5 * (res[-1, 0:nx_even:2] + res[-1, 1:nx_even:2])
+    if nx % 2 == 1:
+        result[:restricted.shape[0], -1] = 0.5 * (res[0:ny_even:2, -1] + res[1:ny_even:2, -1])
+    if ny % 2 == 1 and nx % 2 == 1:
+        result[-1, -1] = res[-1, -1]
+    
+    return result
 
 # --- Bilinear prolongation supporting odd sizes -----------------------------
 def _prolong(coarse: np.ndarray, shape: Tuple[int, int]) -> np.ndarray:
@@ -254,7 +278,35 @@ def _gauss_seidel_rb_var(phi: np.ndarray, rhs: np.ndarray, k: np.ndarray, dx: fl
 
 def _restrict_var(arr: np.ndarray) -> np.ndarray:
     """Full-weighting restriction for variable grids (even padding already handled)."""
-    return 0.25 * (arr[0::2, 0::2] + arr[1::2, 0::2] + arr[0::2, 1::2] + arr[1::2, 1::2])
+    ny, nx = arr.shape
+    
+    # Ensure even dimensions to avoid slicing issues
+    ny_even = ny if ny % 2 == 0 else ny - 1
+    nx_even = nx if nx % 2 == 0 else nx - 1
+    
+    # Restrict only the even-sized portion
+    restricted = 0.25 * (
+        arr[0:ny_even:2, 0:nx_even:2] + 
+        arr[1:ny_even:2, 0:nx_even:2] + 
+        arr[0:ny_even:2, 1:nx_even:2] + 
+        arr[1:ny_even:2, 1:nx_even:2]
+    )
+    
+    # Handle odd edges if necessary
+    nyc = (ny + 1) // 2
+    nxc = (nx + 1) // 2
+    result = np.zeros((nyc, nxc), dtype=arr.dtype)
+    result[:restricted.shape[0], :restricted.shape[1]] = restricted
+    
+    # If original had odd dimension, handle the last row/column
+    if ny % 2 == 1:
+        result[-1, :restricted.shape[1]] = 0.5 * (arr[-1, 0:nx_even:2] + arr[-1, 1:nx_even:2])
+    if nx % 2 == 1:
+        result[:restricted.shape[0], -1] = 0.5 * (arr[0:ny_even:2, -1] + arr[1:ny_even:2, -1])
+    if ny % 2 == 1 and nx % 2 == 1:
+        result[-1, -1] = arr[-1, -1]
+    
+    return result
 
 
 def _v_cycle_var(phi: np.ndarray, rhs: np.ndarray, k: np.ndarray, dx: float, level: int, max_level: int):

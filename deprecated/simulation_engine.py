@@ -4,7 +4,7 @@ This is a refactored version that delegates to specialized modules.
 """
 
 # Import the original simulation engine and extend it with modular components
-from simulation_engine_original import GeologySimulation as OriginalGeologySimulation
+from .simulation_engine_original import GeologySimulation as OriginalGeologySimulation
 from heat_transfer import HeatTransfer
 from fluid_dynamics import FluidDynamics
 from atmospheric_processes import AtmosphericProcesses
@@ -39,6 +39,7 @@ class GeologySimulation(OriginalGeologySimulation):
         
         # Unified kinematics toggle
         self.use_unified_kinematics = True  # Default to new unified kinematics
+        self.enable_unified_kinematics = True  # Alias for compatibility
 
         # --------------------------------------------------------------
         # Self-gravity support (mirrors CoreState implementation)
@@ -51,7 +52,7 @@ class GeologySimulation(OriginalGeologySimulation):
             self.gravity_y = _np.zeros((h, w), dtype=_np.float64)
 
         def _calc_self_gravity(G=None):
-            from .gravity_solver import solve_potential, potential_to_gravity, G_SI
+            from ..gravity_solver import solve_potential, potential_to_gravity, G_SI
             if G is None:
                 G = G_SI
             phi = solve_potential(self.density, self.cell_size, G=G)

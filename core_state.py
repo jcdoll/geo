@@ -185,6 +185,14 @@ class CoreState:
 
         # Toggle for applying empirical solid drag in unified kinematics
         self.enable_solid_drag: bool = True
+        
+        # ------------------------------------------------------------------
+        # Heat transfer control flags
+        # ------------------------------------------------------------------
+        self.enable_internal_heating: bool = True
+        self.enable_solar_heating: bool = True  
+        self.enable_radiative_cooling: bool = True
+        self.enable_heat_diffusion: bool = True
 
     # ------------------------------------------------------------------
     #  Performance presets (copied from legacy engine)

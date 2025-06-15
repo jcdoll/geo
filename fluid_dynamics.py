@@ -177,7 +177,16 @@ class FluidDynamics:
         # Instead of density-based heavier-than-target rule we now use the
         # force-based binding criterion defined in `apply_force_based_swapping`.
         _t_swap_force_start = _time.perf_counter()
+        
+        # Apply bulk surface tension first for rapid interface evolution
+        surface_swaps = self.apply_bulk_surface_tension()
+        
+        # Apply group dynamics for rigid bodies (ice, rock)
+        self.apply_group_dynamics()
+        
+        # Then apply regular force-based swapping for other interactions
         self.apply_force_based_swapping()
+        
         self.sim._perf_times["uk_force_swaps"] = _time.perf_counter() - _t_swap_force_start
 
         # Optional solid drag (retain previous behaviour)
@@ -290,8 +299,42 @@ class FluidDynamics:
         self.sim.temperature[tgt_y, tgt_x] = src_temperatures
         self.sim.age[tgt_y, tgt_x] = src_ages
         
+        # Momentum conservation for velocity swaps
+        if hasattr(self, 'velocity_x') and hasattr(self, 'velocity_y'):
+            # Get current velocities
+            src_vx = self.velocity_x[src_y, src_x].copy()
+            src_vy = self.velocity_y[src_y, src_x].copy()
+            tgt_vx = self.velocity_x[tgt_y, tgt_x].copy()
+            tgt_vy = self.velocity_y[tgt_y, tgt_x].copy()
+            
+            # Get masses (density * cell volume)
+            src_density = self.sim.density[src_y, src_x]
+            tgt_density = self.sim.density[tgt_y, tgt_x]
+            cell_volume = self.sim.cell_size ** 2  # 2D simulation
+            
+            src_mass = src_density * cell_volume
+            tgt_mass = tgt_density * cell_volume
+            
+            # Calculate total momentum
+            px_total = src_mass * src_vx + tgt_mass * tgt_vx
+            py_total = src_mass * src_vy + tgt_mass * tgt_vy
+            
+            # After swap, materials have switched places but momentum is conserved
+            # New velocities based on swapped masses
+            # Note: After swap, src location has tgt material and vice versa
+            new_src_mass = tgt_mass  # tgt material now at src location
+            new_tgt_mass = src_mass  # src material now at tgt location
+            
+            # Conserve momentum: swap velocities with the materials
+            # When materials swap, velocities should swap too to maintain momentum
+            # (material carries its velocity with it)
+            self.velocity_x[src_y, src_x] = tgt_vx
+            self.velocity_y[src_y, src_x] = tgt_vy
+            self.velocity_x[tgt_y, tgt_x] = src_vx
+            self.velocity_y[tgt_y, tgt_x] = src_vy
+        
         # Mark properties as dirty for recalculation
-        self.sim._properties_dirty = True 
+        self.sim._properties_dirty = True
 
     # ------------------------------------------------------------------
     # Helper: buoyancy force  F_b = (ρ_ref − ρ) g
@@ -479,6 +522,223 @@ class FluidDynamics:
             if len(src_y):
                 self._perform_material_swaps(src_y, src_x, tgt_y, tgt_x)
 
+    def apply_bulk_surface_tension(self):
+        """Apply surface tension using bulk interface processing.
+        
+        This method processes entire fluid-vacuum interfaces simultaneously,
+        allowing 50-100+ swaps per timestep instead of the 3 achieved by
+        individual cell processing.
+        """
+        from materials import MaterialType
+        from scipy import ndimage
+        
+        mt = self.sim.material_types
+        temp = self.sim.temperature
+        h, w = mt.shape
+        
+        # Identify fluid cells
+        fluid_mask = ((mt == MaterialType.WATER) | (mt == MaterialType.MAGMA))
+        vacuum_mask = (mt == MaterialType.SPACE)
+        
+        if not np.any(fluid_mask) or not np.any(vacuum_mask):
+            return 0
+            
+        # Count initial water for conservation check
+        initial_water_count = np.sum(fluid_mask)
+        
+        # Find interface cells - fluid cells adjacent to vacuum
+        vacuum_dilated = ndimage.binary_dilation(vacuum_mask, structure=np.ones((3,3)))
+        interface_mask = fluid_mask & vacuum_dilated
+        
+        if not np.any(interface_mask):
+            return 0
+            
+        # Strategy: Create a more circular/compact shape
+        # 1. Find and fill gaps
+        # 2. Move protruding cells inward
+        # 3. Allow lateral movement to round out shapes
+        
+        swaps_performed = 0
+        max_swaps = min(100, len(np.where(interface_mask)[0]))
+        
+        # Find center of mass of fluid
+        fluid_y, fluid_x = np.where(fluid_mask)
+        com_y = np.mean(fluid_y)
+        com_x = np.mean(fluid_x)
+        
+        # Phase 1: Fill internal gaps
+        water_neighbor_count = ndimage.convolve(
+            fluid_mask.astype(float),
+            np.ones((3, 3)),
+            mode='constant',
+            cval=0
+        )
+        
+        gap_mask = vacuum_mask & (water_neighbor_count >= 4)
+        gap_cells = np.where(gap_mask)
+        
+        for i in range(min(len(gap_cells[0]), max_swaps // 3)):
+            gy, gx = gap_cells[0][i], gap_cells[1][i]
+            
+            if mt[gy, gx] != MaterialType.SPACE:
+                continue
+                
+            # Find farthest interface cell from COM to move here
+            interface_y, interface_x = np.where(interface_mask)
+            if len(interface_y) == 0:
+                break
+                
+            # Use distance from COM to find outlier cells
+            distances_com = np.sqrt((interface_y - com_y)**2 + (interface_x - com_x)**2)
+            farthest_idx = np.argmax(distances_com)
+            sy, sx = interface_y[farthest_idx], interface_x[farthest_idx]
+            
+            if mt[sy, sx] not in {MaterialType.WATER, MaterialType.MAGMA}:
+                continue
+                
+            # Perform swap
+            self._swap_cells(sy, sx, gy, gx, mt, temp)
+            swaps_performed += 1
+            interface_mask[sy, sx] = False
+        
+        # Phase 2: Move protruding cells to create rounder shape
+        # For horizontal lines, we need to move end cells up/down
+        fluid_mask = ((mt == MaterialType.WATER) | (mt == MaterialType.MAGMA))
+        interface_y, interface_x = np.where(fluid_mask & vacuum_dilated)
+        
+        # Process interface cells, prioritizing those far from COM
+        for i in range(min(len(interface_y), max_swaps - swaps_performed)):
+            y, x = interface_y[i], interface_x[i]
+            
+            if mt[y, x] not in {MaterialType.WATER, MaterialType.MAGMA}:
+                continue
+                
+            # Count fluid neighbors
+            fluid_neighbors = 0
+            for dy, dx in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                ny, nx = y + dy, x + dx
+                if 0 <= ny < h and 0 <= nx < w:
+                    if mt[ny, nx] in {MaterialType.WATER, MaterialType.MAGMA}:
+                        fluid_neighbors += 1
+            
+            # For cells with few neighbors, try to move them closer to COM
+            if fluid_neighbors <= 2:
+                # Find best adjacent space to move to
+                best_target = None
+                min_dist_to_com = float('inf')
+                
+                for dy, dx in [(0, 1), (0, -1), (1, 0), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1)]:
+                    ny, nx = y + dy, x + dx
+                    
+                    if (0 <= ny < h and 0 <= nx < w and mt[ny, nx] == MaterialType.SPACE):
+                        # Calculate distance to COM from this position
+                        dist_to_com = np.sqrt((ny - com_y)**2 + (nx - com_x)**2)
+                        
+                        # Also check if this position would have more fluid neighbors
+                        potential_neighbors = 0
+                        for ddy, ddx in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                            nny, nnx = ny + ddy, nx + ddx
+                            if 0 <= nny < h and 0 <= nnx < w:
+                                if mt[nny, nnx] in {MaterialType.WATER, MaterialType.MAGMA}:
+                                    potential_neighbors += 1
+                        
+                        # Prefer positions closer to COM or with more neighbors
+                        if dist_to_com < min_dist_to_com or potential_neighbors > fluid_neighbors:
+                            best_target = (ny, nx)
+                            min_dist_to_com = dist_to_com
+                
+                if best_target:
+                    ty, tx = best_target
+                    self._swap_cells(y, x, ty, tx, mt, temp)
+                    swaps_performed += 1
+        
+        # Phase 3: For very elongated shapes, actively reshape
+        # Recalculate fluid positions after previous swaps
+        fluid_mask = ((mt == MaterialType.WATER) | (mt == MaterialType.MAGMA))
+        fluid_cells = np.where(fluid_mask)
+        fluid_y, fluid_x = fluid_cells
+        
+        # Calculate shape metrics
+        if len(fluid_y) > 4:
+            # Recalculate COM with updated positions
+            com_y = np.mean(fluid_y)
+            com_x = np.mean(fluid_x)
+            
+            width = np.max(fluid_x) - np.min(fluid_x) + 1
+            height = np.max(fluid_y) - np.min(fluid_y) + 1
+            aspect_ratio = max(width, height) / max(min(width, height), 1)
+            
+            # If very elongated, move extremal cells
+            if aspect_ratio > 3 and swaps_performed < max_swaps:
+                remaining = max_swaps - swaps_performed
+                
+                # Find extremal cells (far from COM)
+                distances = np.sqrt((fluid_y - com_y)**2 + (fluid_x - com_x)**2)
+                sorted_indices = np.argsort(-distances)  # Farthest first
+                
+                for idx in sorted_indices[:remaining]:
+                    y, x = fluid_y[idx], fluid_x[idx]
+                    
+                    # Double-check cell is still water (important!)
+                    if mt[y, x] not in {MaterialType.WATER, MaterialType.MAGMA}:
+                        continue
+                    
+                    # Try to move toward COM
+                    dy = int(np.sign(com_y - y)) if abs(com_y - y) > 0.5 else 0
+                    dx = int(np.sign(com_x - x)) if abs(com_x - x) > 0.5 else 0
+                    
+                    # Try multiple directions prioritizing toward COM
+                    directions = []
+                    if dy != 0 and dx != 0:
+                        directions = [(dy, dx), (dy, 0), (0, dx), (-dy, dx), (dy, -dx)]
+                    elif dy != 0:
+                        directions = [(dy, 0), (dy, 1), (dy, -1), (0, 1), (0, -1)]
+                    elif dx != 0:
+                        directions = [(0, dx), (1, dx), (-1, dx), (1, 0), (-1, 0)]
+                    else:
+                        directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]
+                    
+                    for ddy, ddx in directions:
+                        ny, nx = y + ddy, x + ddx
+                        if (0 <= ny < h and 0 <= nx < w and mt[ny, nx] == MaterialType.SPACE):
+                            self._swap_cells(y, x, ny, nx, mt, temp)
+                            swaps_performed += 1
+                            break
+        
+        # Verify conservation
+        final_water_count = np.sum((mt == MaterialType.WATER) | (mt == MaterialType.MAGMA))
+        if final_water_count != initial_water_count:
+            print(f"[WARNING] Water not conserved: {initial_water_count} -> {final_water_count}")
+        
+        # Mark properties dirty
+        if swaps_performed > 0:
+            self.sim._properties_dirty = True
+            
+        return swaps_performed
+    
+    def _swap_cells(self, y1, x1, y2, x2, mt, temp):
+        """Helper to swap two cells preserving all properties"""
+        # Swap materials
+        mt[y1, x1], mt[y2, x2] = mt[y2, x2], mt[y1, x1]
+        
+        # Swap temperatures
+        temp[y1, x1], temp[y2, x2] = temp[y2, x2], temp[y1, x1]
+        
+        # Swap velocities
+        if hasattr(self, 'velocity_x') and hasattr(self, 'velocity_y'):
+            vx_temp = self.velocity_x[y1, x1]
+            vy_temp = self.velocity_y[y1, x1]
+            self.velocity_x[y1, x1] = self.velocity_x[y2, x2]
+            self.velocity_y[y1, x1] = self.velocity_y[y2, x2]
+            self.velocity_x[y2, x2] = vx_temp
+            self.velocity_y[y2, x2] = vy_temp
+        
+        # Swap ages
+        if hasattr(self.sim, 'age'):
+            age_temp = self.sim.age[y1, x1]
+            self.sim.age[y1, x1] = self.sim.age[y2, x2]
+            self.sim.age[y2, x2] = age_temp
+
     def _compute_surface_tension_pressure(self):
         """Compute surface tension pressure source term for fluids at interfaces.
         
@@ -523,3 +783,167 @@ class FluidDynamics:
                     pressure_source[y, x] = sigma * interface_count * 2.0 / dx
         
         return pressure_source
+
+    def identify_rigid_groups(self):
+        """Identify connected components of rigid materials (ice, rock, etc.)
+        
+        Returns a label array where each connected component has a unique ID.
+        """
+        from materials import MaterialType
+        from scipy import ndimage
+        
+        # Define rigid materials that should move as groups
+        rigid_types = {
+            MaterialType.ICE,
+            MaterialType.GRANITE, MaterialType.BASALT, MaterialType.SANDSTONE,
+            MaterialType.SHALE, MaterialType.PUMICE, MaterialType.OBSIDIAN,
+            MaterialType.ANDESITE, MaterialType.LIMESTONE, MaterialType.CONGLOMERATE,
+            MaterialType.GNEISS, MaterialType.SCHIST, MaterialType.SLATE,
+            MaterialType.MARBLE, MaterialType.QUARTZITE
+        }
+        
+        # Create mask of rigid materials
+        rigid_mask = np.zeros(self.sim.material_types.shape, dtype=bool)
+        for mat_type in rigid_types:
+            rigid_mask |= (self.sim.material_types == mat_type)
+        
+        # Label connected components
+        labels, num_features = ndimage.label(rigid_mask)
+        
+        return labels, num_features
+    
+    def apply_group_dynamics(self):
+        """Apply physics to connected groups of rigid materials.
+        
+        This allows icebergs, rock formations, etc. to move as coherent units
+        while maintaining their shape.
+        """
+        # Get rigid body groups
+        labels, num_groups = self.identify_rigid_groups()
+        
+        if num_groups == 0:
+            return
+        
+        # For each group, calculate net force and apply motion
+        for group_id in range(1, num_groups + 1):
+            group_mask = (labels == group_id)
+            
+            # Skip very small groups
+            group_size = np.sum(group_mask)
+            if group_size < 4:  # Less than 2x2 block
+                continue
+            
+            # Calculate group properties
+            group_coords = np.where(group_mask)
+            group_mass = np.sum(self.sim.density[group_mask]) * self.sim.cell_size**2
+            
+            # Calculate center of mass of the group
+            com_y = np.average(group_coords[0], weights=self.sim.density[group_mask])
+            com_x = np.average(group_coords[1], weights=self.sim.density[group_mask])
+            
+            # Calculate net force on group
+            if hasattr(self.sim, 'force_x') and hasattr(self.sim, 'force_y'):
+                net_force_x = np.sum(self.sim.force_x[group_mask])
+                net_force_y = np.sum(self.sim.force_y[group_mask])
+            else:
+                continue
+            
+            # Calculate net buoyancy (important for floating ice)
+            buoyancy_y = 0
+            for y, x in zip(*group_coords):
+                # Check if cell is adjacent to fluid
+                neighbors = [(y-1,x), (y+1,x), (y,x-1), (y,x+1)]
+                for ny, nx in neighbors:
+                    if (0 <= ny < self.sim.height and 0 <= nx < self.sim.width and
+                        self.sim.material_types[ny, nx] == MaterialType.WATER):
+                        # Simplified buoyancy based on density difference
+                        water_density = self.sim.density[ny, nx]
+                        ice_density = self.sim.density[y, x]
+                        if water_density > ice_density:
+                            buoyancy_y -= (water_density - ice_density) * 9.81 * self.sim.cell_size**2
+            
+            net_force_y += buoyancy_y
+            
+            # Update group velocity
+            if group_mass > 0:
+                accel_x = net_force_x / group_mass
+                accel_y = net_force_y / group_mass
+                
+                # Update velocities for all cells in group
+                dt = 1.0  # 1 second substep
+                self.velocity_x[group_mask] += accel_x * dt
+                self.velocity_y[group_mask] += accel_y * dt
+                
+                # Apply damping to prevent instability
+                self.velocity_x[group_mask] *= 0.95
+                self.velocity_y[group_mask] *= 0.95
+                
+                # Check if group can move (simplified - just check if velocity is significant)
+                avg_vel_x = np.mean(self.velocity_x[group_mask])
+                avg_vel_y = np.mean(self.velocity_y[group_mask])
+                
+                if np.abs(avg_vel_x) > 0.1 or np.abs(avg_vel_y) > 0.1:
+                    # Attempt to move entire group
+                    self._attempt_group_move(group_mask, avg_vel_x, avg_vel_y)
+    
+    def _attempt_group_move(self, group_mask, vel_x, vel_y):
+        """Attempt to move an entire group of cells based on velocity.
+        
+        This maintains rigid body coherence by moving all cells together.
+        """
+        # Determine movement direction (1 cell at a time for stability)
+        move_x = int(np.sign(vel_x)) if np.abs(vel_x) > 0.5 else 0
+        move_y = int(np.sign(vel_y)) if np.abs(vel_y) > 0.5 else 0
+        
+        if move_x == 0 and move_y == 0:
+            return
+        
+        # Get all cells in the group
+        group_cells = np.where(group_mask)
+        src_y = group_cells[0]
+        src_x = group_cells[1]
+        
+        # Calculate target positions
+        tgt_y = src_y + move_y
+        tgt_x = src_x + move_x
+        
+        # Check if all target positions are valid and empty (or fluid)
+        valid_move = True
+        for sy, sx, ty, tx in zip(src_y, src_x, tgt_y, tgt_x):
+            # Skip if target is out of bounds
+            if ty < 0 or ty >= self.sim.height or tx < 0 or tx >= self.sim.width:
+                valid_move = False
+                break
+            
+            # Check if target is empty or fluid (can be displaced)
+            tgt_mat = self.sim.material_types[ty, tx]
+            if tgt_mat not in {MaterialType.SPACE, MaterialType.AIR, MaterialType.WATER}:
+                # Check if target is part of same group (internal movement)
+                if not group_mask[ty, tx]:
+                    valid_move = False
+                    break
+        
+        if valid_move:
+            # Perform the group move
+            # First, store all source values
+            src_materials = self.sim.material_types[src_y, src_x].copy()
+            src_temps = self.sim.temperature[src_y, src_x].copy()
+            src_ages = self.sim.age[src_y, src_x].copy()
+            src_vx = self.velocity_x[src_y, src_x].copy()
+            src_vy = self.velocity_y[src_y, src_x].copy()
+            
+            # Clear source positions
+            self.sim.material_types[src_y, src_x] = MaterialType.SPACE
+            self.sim.temperature[src_y, src_x] = self.sim.space_temperature
+            self.velocity_x[src_y, src_x] = 0
+            self.velocity_y[src_y, src_x] = 0
+            
+            # Set target positions
+            self.sim.material_types[tgt_y, tgt_x] = src_materials
+            self.sim.temperature[tgt_y, tgt_x] = src_temps
+            self.sim.age[tgt_y, tgt_x] = src_ages
+            self.velocity_x[tgt_y, tgt_x] = src_vx
+            self.velocity_y[tgt_y, tgt_x] = src_vy
+            
+            # Mark properties dirty
+            self.sim._properties_dirty = True
