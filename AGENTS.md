@@ -12,13 +12,13 @@
 
 ## 2. Rules
 
-| #   | AI *may* do                                                                  | AI *must NOT* do                                   |
-|-----|------------------------------------------------------------------------------|----------------------------------------------------|
-| R-0 | Ask for clarification when unsure about the project.                         | ❌ Make changes without understanding the context.  |
-| R-1 | Edit source files (`*.py`) and documentation when asked.                     | ❌ Delete or rewrite tests unless explicitly asked. |
-| R-2 | Add `AIDEV-NOTE`, `AIDEV-TODO`, or `AIDEV-QUESTION` comments around complex code. | ❌ Remove existing `AIDEV-` comments.              |
-| R-3 | Run `pytest` before committing code.                                         | ❌ Ignore failing tests.                            |
-| R-4 | Follow PEP8 style (black, 120‑char lines, double quotes).                    | ❌ Reformat code to a different style.             |
+| #   | AI *may* do                                                                       | AI *must NOT* do                                     |
+|-----|-----------------------------------------------------------------------------------|------------------------------------------------------|
+| R-0 | Ask for clarification when unsure about the project.                              | ❌ Make changes without understanding the context.   |
+| R-1 | Edit source files (`*.py`) and documentation when asked.                          | ❌ Delete or rewrite tests unless explicitly asked.  |
+| R-2 | Add `AIDEV-NOTE`, `AIDEV-TODO`, or `AIDEV-QUESTION` comments around complex code. | ❌ Remove existing `AIDEV-` comments.                |
+| R-3 | Run `pytest` before committing code.                                              | ❌ Ignore failing tests.                             |
+| R-4 | Follow PEP8 style (black, 120‑char lines, double quotes).                         | ❌ Reformat code to a different style.               |
 
 ---
 
