@@ -178,13 +178,13 @@ class FluidDynamics:
         # force-based binding criterion defined in `apply_force_based_swapping`.
         _t_swap_force_start = _time.perf_counter()
         
-        # Apply bulk surface tension first for rapid interface evolution
-        surface_swaps = self.apply_bulk_surface_tension()
+        # Apply physics-based surface tension through local cohesive forces
+        surface_swaps = self.apply_physics_based_surface_tension()
         
         # Apply group dynamics for rigid bodies (ice, rock)
         self.apply_group_dynamics()
         
-        # Then apply regular force-based swapping for other interactions
+        # Then apply general force-based swapping for all material interactions
         self.apply_force_based_swapping()
         
         self.sim._perf_times["uk_force_swaps"] = _time.perf_counter() - _t_swap_force_start
@@ -201,6 +201,9 @@ class FluidDynamics:
         # 5) Extra sinking passes – ensure heavier fluid settles through lighter
         # ------------------------------------------------------------------
         # Gravity-aligned deterministic settling passes
+        # Modified to respect surface tension forces
+        from materials import MaterialType
+        
         n_settle = 3
         for _ in range(n_settle):
             gx = self.sim.gravity_x
@@ -221,14 +224,37 @@ class FluidDynamics:
             src_y = yy[in_bounds].ravel(); src_x = xx[in_bounds].ravel()
             tgt_y = tgt_y[in_bounds].ravel(); tgt_x = tgt_x[in_bounds].ravel()
 
-            # Only perform swap if target is NOT SPACE and source is heavier
+            # Check density difference AND force conditions
             mt_src_flat = self.sim.material_types[src_y, src_x]
             mt_tgt_flat = self.sim.material_types[tgt_y, tgt_x]
-            heavier = (rho[src_y, src_x] > rho[tgt_y, tgt_x] + 1e-3)
-            if not np.any(heavier):
+            
+            # Skip if target is space - let surface tension handle fluid-space interfaces
+            not_to_space = mt_tgt_flat != MaterialType.SPACE
+            
+            # For fluid cells, be more restrictive about settling
+            # to avoid undoing surface tension work
+            fluid_types = {MaterialType.WATER, MaterialType.MAGMA}
+            is_fluid_src = np.array([m in fluid_types for m in mt_src_flat])
+            
+            # Only settle if density difference is significant
+            # For fluids, require larger density difference to overcome surface tension
+            density_threshold = np.where(is_fluid_src, 100.0, 1e-3)  # kg/m³
+            heavier = (rho[src_y, src_x] > rho[tgt_y, tgt_x] + density_threshold)
+            
+            # Combined condition: not to space, and significantly heavier
+            valid_swaps = heavier & not_to_space
+            
+            if not np.any(valid_swaps):
                 break
-            self._perform_material_swaps(src_y[heavier], src_x[heavier], tgt_y[heavier], tgt_x[heavier])
-            swaps_done += int(np.sum(heavier))
+                
+            # Perform swaps
+            valid_src_y = src_y[valid_swaps]
+            valid_src_x = src_x[valid_swaps]
+            valid_tgt_y = tgt_y[valid_swaps]
+            valid_tgt_x = tgt_x[valid_swaps]
+            
+            self._perform_material_swaps(valid_src_y, valid_src_x, valid_tgt_y, valid_tgt_x)
+            swaps_done += int(np.sum(valid_swaps))
 
             # Refresh density for subsequent passes
             self.sim._properties_dirty = True
@@ -454,25 +480,19 @@ class FluidDynamics:
         # Helper uses existing _binding_threshold against a reference solid (granite)
         from materials import MaterialType  # local import to avoid circular
         _ref_solid = MaterialType.GRANITE
-        _cell_max_binding = np.vectorize(lambda m, t: self._binding_threshold(m, _ref_solid, t))
 
-        # Simplified approach: iterate over all cells and check neighbors directly
+        # Iterate over all cells and check neighbors
         for y in range(h):
             for x in range(w):
+                # Skip space cells as sources
+                if mt[y, x] == MaterialType.SPACE:
+                    continue
+                    
                 for dy, dx in offsets:
                     ny, nx = y + dy, x + dx
                     
                     # Check bounds
                     if ny < 0 or ny >= h or nx < 0 or nx >= w:
-                        continue
-                    
-                    # Only process fluid-space interfaces for surface tension
-                    fluid_types_local = {MaterialType.WATER, MaterialType.MAGMA}
-                    src_is_fluid = mt[y, x] in fluid_types_local
-                    tgt_is_space = mt[ny, nx] == MaterialType.SPACE
-                    
-                    # For surface tension: only allow fluid->space swaps (outward expansion)
-                    if not (src_is_fluid and tgt_is_space):
                         continue
                     
                     # Get forces and velocities
@@ -487,23 +507,31 @@ class FluidDynamics:
                     dVx, dVy = vsrc_x - vtgt_x, vsrc_y - vtgt_y
                     V_diff = np.hypot(dVx, dVy)
                     
-                    # Binding threshold
+                    # Binding threshold between the two materials
                     temp_avg = 0.5 * (temp[y, x] + temp[ny, nx])
                     threshold = self._binding_threshold(mt[y, x], mt[ny, nx], temp_avg)
+                    
+                    # For solid materials, check if source can overcome its own binding
+                    # For fluid materials, binding is typically 0
+                    src_bind = self._binding_threshold(mt[y, x], _ref_solid, temp[y, x])
                     
                     # Directional force projection
                     proj_src = fsrc_x * dx + fsrc_y * dy
                     
-                    # Binding forces
-                    src_bind = self._binding_threshold(mt[y, x], _ref_solid, temp[y, x])
-                    
-                    # Check all conditions
-                    # For surface tension: we want swaps when force points AWAY from target (negative projection)
-                    cond_src = abs(proj_src) > src_bind  # Use absolute value - direction doesn't matter for magnitude
+                    # Check conditions for swapping:
+                    # 1. Net force must overcome material binding threshold
+                    # 2. Velocity difference must be significant
+                    # 3. For solids, source must overcome its own binding
                     cond_force = F_net > threshold
                     cond_velocity = V_diff >= self.dv_thresh
                     
-                    if cond_src and cond_force and cond_velocity:
+                    # For solids, also check if force can overcome binding
+                    if src_bind > 0:  # Solid material
+                        cond_src = abs(proj_src) > src_bind
+                    else:  # Fluid material
+                        cond_src = True
+                    
+                    if cond_force and cond_velocity and cond_src:
                         cand_src_y.append(y)
                         cand_src_x.append(x)
                         cand_tgt_y.append(ny)
@@ -522,12 +550,11 @@ class FluidDynamics:
             if len(src_y):
                 self._perform_material_swaps(src_y, src_x, tgt_y, tgt_x)
 
-    def apply_bulk_surface_tension(self):
-        """Apply surface tension using bulk interface processing.
+    def apply_physics_based_surface_tension(self):
+        """Apply surface tension through local cohesive forces between fluid cells.
         
-        This method processes entire fluid-vacuum interfaces simultaneously,
-        allowing 50-100+ swaps per timestep instead of the 3 achieved by
-        individual cell processing.
+        This hybrid approach uses physics-based cohesive forces but processes
+        multiple cells per timestep to achieve visible effects in discrete simulations.
         """
         from materials import MaterialType
         from scipy import ndimage
@@ -537,252 +564,144 @@ class FluidDynamics:
         h, w = mt.shape
         
         # Identify fluid cells
-        fluid_mask = ((mt == MaterialType.WATER) | (mt == MaterialType.MAGMA))
-        vacuum_mask = (mt == MaterialType.SPACE)
+        fluid_types = {MaterialType.WATER, MaterialType.MAGMA}
+        fluid_mask = np.zeros((h, w), dtype=bool)
+        for ftype in fluid_types:
+            fluid_mask |= (mt == ftype)
         
-        if not np.any(fluid_mask) or not np.any(vacuum_mask):
+        if not np.any(fluid_mask):
             return 0
             
-        # Count initial water for conservation check
-        initial_water_count = np.sum(fluid_mask)
+        # Surface tension coefficient - strong for discrete cells
+        sigma_base = 50000.0  # Pa·m (from PHYSICS.md)
+        cell_size = self.sim.cell_size
         
-        # Find interface cells - fluid cells adjacent to vacuum
-        vacuum_dilated = ndimage.binary_dilation(vacuum_mask, structure=np.ones((3,3)))
-        interface_mask = fluid_mask & vacuum_dilated
-        
-        if not np.any(interface_mask):
-            return 0
-            
-        # Strategy: Create a more circular/compact shape
-        # 1. Find and fill gaps
-        # 2. Move protruding cells inward
-        # 3. Allow lateral movement to round out shapes
-        
+        # For each fluid cell at an interface, calculate cohesive forces
         swaps_performed = 0
-        max_swaps = min(100, len(np.where(interface_mask)[0]))
+        max_swaps_per_pass = 50
+        num_passes = 3  # Multiple passes for faster evolution
         
-        # Find center of mass of fluid
-        fluid_y, fluid_x = np.where(fluid_mask)
-        com_y = np.mean(fluid_y)
-        com_x = np.mean(fluid_x)
-        
-        # Phase 1: Fill internal gaps
-        water_neighbor_count = ndimage.convolve(
-            fluid_mask.astype(float),
-            np.ones((3, 3)),
-            mode='constant',
-            cval=0
-        )
-        
-        gap_mask = vacuum_mask & (water_neighbor_count >= 4)
-        gap_cells = np.where(gap_mask)
-        
-        for i in range(min(len(gap_cells[0]), max_swaps // 3)):
-            gy, gx = gap_cells[0][i], gap_cells[1][i]
+        for pass_num in range(num_passes):
+            # Find interface cells fresh each pass
+            non_fluid_mask = ~fluid_mask
+            struct = np.ones((3, 3), dtype=bool)
+            non_fluid_dilated = ndimage.binary_dilation(non_fluid_mask, structure=struct)
+            interface_mask = fluid_mask & non_fluid_dilated
             
-            if mt[gy, gx] != MaterialType.SPACE:
-                continue
-                
-            # Find farthest interface cell from COM to move here
-            interface_y, interface_x = np.where(interface_mask)
-            if len(interface_y) == 0:
+            interface_cells = np.where(interface_mask)
+            if len(interface_cells[0]) == 0:
                 break
                 
-            # Use distance from COM to find outlier cells
-            distances_com = np.sqrt((interface_y - com_y)**2 + (interface_x - com_x)**2)
-            farthest_idx = np.argmax(distances_com)
-            sy, sx = interface_y[farthest_idx], interface_x[farthest_idx]
+            # Calculate curvature for all interface cells
+            interface_data = []
             
-            if mt[sy, sx] not in {MaterialType.WATER, MaterialType.MAGMA}:
-                continue
+            for i in range(len(interface_cells[0])):
+                y, x = interface_cells[0][i], interface_cells[1][i]
                 
-            # Perform swap
-            self._swap_cells(sy, sx, gy, gx, mt, temp)
-            swaps_performed += 1
-            interface_mask[sy, sx] = False
-        
-        # Phase 2: Move protruding cells to create rounder shape
-        # For horizontal lines, we need to move end cells up/down
-        fluid_mask = ((mt == MaterialType.WATER) | (mt == MaterialType.MAGMA))
-        interface_y, interface_x = np.where(fluid_mask & vacuum_dilated)
-        
-        # Process interface cells, prioritizing those far from COM
-        for i in range(min(len(interface_y), max_swaps - swaps_performed)):
-            y, x = interface_y[i], interface_x[i]
-            
-            if mt[y, x] not in {MaterialType.WATER, MaterialType.MAGMA}:
-                continue
+                # Count neighbors to determine curvature
+                fluid_count = 0
+                for dy in [-1, 0, 1]:
+                    for dx in [-1, 0, 1]:
+                        if dy == 0 and dx == 0:
+                            continue
+                        ny, nx = y + dy, x + dx
+                        if 0 <= ny < h and 0 <= nx < w:
+                            if mt[ny, nx] in fluid_types:
+                                fluid_count += 1
                 
-            # Count fluid neighbors
-            fluid_neighbors = 0
-            for dy, dx in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-                ny, nx = y + dy, x + dx
-                if 0 <= ny < h and 0 <= nx < w:
-                    if mt[ny, nx] in {MaterialType.WATER, MaterialType.MAGMA}:
-                        fluid_neighbors += 1
-            
-            # For cells with few neighbors, try to move them closer to COM
-            if fluid_neighbors <= 2:
-                # Find best adjacent space to move to
-                best_target = None
-                min_dist_to_com = float('inf')
+                # Curvature: fewer neighbors = higher curvature = stronger force
+                curvature = (8 - fluid_count) / 8.0
                 
-                for dy, dx in [(0, 1), (0, -1), (1, 0), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1)]:
-                    ny, nx = y + dy, x + dx
+                if curvature > 0:
+                    # Temperature adjustment
+                    T = temp[y, x]
+                    T_ref = 273.15
+                    temp_factor = max(0.1, 1.0 - (T - T_ref) / 1000.0)
                     
-                    if (0 <= ny < h and 0 <= nx < w and mt[ny, nx] == MaterialType.SPACE):
-                        # Calculate distance to COM from this position
-                        dist_to_com = np.sqrt((ny - com_y)**2 + (nx - com_x)**2)
+                    # Cohesive force magnitude
+                    force = sigma_base * temp_factor * curvature * cell_size / 1000.0  # Scale down
+                    
+                    interface_data.append({
+                        'y': y, 'x': x,
+                        'force': force,
+                        'curvature': curvature,
+                        'neighbors': fluid_count
+                    })
+            
+            # Sort by curvature (process highest curvature first)
+            interface_data.sort(key=lambda d: d['curvature'], reverse=True)
+            
+            # Process swaps for this pass
+            swaps_this_pass = 0
+            
+            for data in interface_data[:max_swaps_per_pass]:
+                y, x = data['y'], data['x']
+                
+                # Verify still fluid (might have been swapped)
+                if mt[y, x] not in fluid_types:
+                    continue
+                
+                # For high curvature cells, find best neighbor to swap with
+                # Prefer swapping toward other fluid cells to create compact shapes
+                best_swap = None
+                best_score = -float('inf')
+                
+                for dy in [-1, 0, 1]:
+                    for dx in [-1, 0, 1]:
+                        if dy == 0 and dx == 0:
+                            continue
+                            
+                        ny, nx = y + dy, x + dx
+                        if not (0 <= ny < h and 0 <= nx < w):
+                            continue
+                            
+                        # Only swap with space
+                        if mt[ny, nx] != MaterialType.SPACE:
+                            continue
                         
-                        # Also check if this position would have more fluid neighbors
-                        potential_neighbors = 0
-                        for ddy, ddx in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-                            nny, nnx = ny + ddy, nx + ddx
-                            if 0 <= nny < h and 0 <= nnx < w:
-                                if mt[nny, nnx] in {MaterialType.WATER, MaterialType.MAGMA}:
-                                    potential_neighbors += 1
+                        # Count how many fluid neighbors this space cell has
+                        # (excluding the source cell)
+                        space_fluid_neighbors = 0
+                        for ddy in [-1, 0, 1]:
+                            for ddx in [-1, 0, 1]:
+                                if ddy == 0 and ddx == 0:
+                                    continue
+                                nny, nnx = ny + ddy, nx + ddx
+                                if 0 <= nny < h and 0 <= nnx < w:
+                                    if mt[nny, nnx] in fluid_types and not (nny == y and nnx == x):
+                                        space_fluid_neighbors += 1
                         
-                        # Prefer positions closer to COM or with more neighbors
-                        if dist_to_com < min_dist_to_com or potential_neighbors > fluid_neighbors:
-                            best_target = (ny, nx)
-                            min_dist_to_com = dist_to_com
+                        # Score: prefer positions with more fluid neighbors
+                        # This creates more compact shapes
+                        score = space_fluid_neighbors - 0.1 * (abs(dy) + abs(dx))  # Slight preference for cardinal
+                        
+                        if score > best_score:
+                            best_score = score
+                            best_swap = (ny, nx)
                 
-                if best_target:
-                    ty, tx = best_target
-                    self._swap_cells(y, x, ty, tx, mt, temp)
-                    swaps_performed += 1
-        
-        # Phase 3: For very elongated shapes, actively reshape
-        # Recalculate fluid positions after previous swaps
-        fluid_mask = ((mt == MaterialType.WATER) | (mt == MaterialType.MAGMA))
-        fluid_cells = np.where(fluid_mask)
-        fluid_y, fluid_x = fluid_cells
-        
-        # Calculate shape metrics
-        if len(fluid_y) > 4:
-            # Recalculate COM with updated positions
-            com_y = np.mean(fluid_y)
-            com_x = np.mean(fluid_x)
+                # Perform swap if beneficial
+                if best_swap and data['curvature'] > 0.2:  # Only swap if significant curvature
+                    ty, tx = best_swap
+                    
+                    # Check force against minimal threshold
+                    if data['force'] > 1.0:  # Minimal force threshold
+                        self._swap_cells(y, x, ty, tx, mt, temp)
+                        swaps_this_pass += 1
+                        swaps_performed += 1
+                        
+                        # Update fluid mask for this swap
+                        fluid_mask[y, x] = False
+                        fluid_mask[ty, tx] = True
             
-            width = np.max(fluid_x) - np.min(fluid_x) + 1
-            height = np.max(fluid_y) - np.min(fluid_y) + 1
-            aspect_ratio = max(width, height) / max(min(width, height), 1)
-            
-            # If very elongated, move extremal cells
-            if aspect_ratio > 3 and swaps_performed < max_swaps:
-                remaining = max_swaps - swaps_performed
-                
-                # Find extremal cells (far from COM)
-                distances = np.sqrt((fluid_y - com_y)**2 + (fluid_x - com_x)**2)
-                sorted_indices = np.argsort(-distances)  # Farthest first
-                
-                for idx in sorted_indices[:remaining]:
-                    y, x = fluid_y[idx], fluid_x[idx]
-                    
-                    # Double-check cell is still water (important!)
-                    if mt[y, x] not in {MaterialType.WATER, MaterialType.MAGMA}:
-                        continue
-                    
-                    # Try to move toward COM
-                    dy = int(np.sign(com_y - y)) if abs(com_y - y) > 0.5 else 0
-                    dx = int(np.sign(com_x - x)) if abs(com_x - x) > 0.5 else 0
-                    
-                    # Try multiple directions prioritizing toward COM
-                    directions = []
-                    if dy != 0 and dx != 0:
-                        directions = [(dy, dx), (dy, 0), (0, dx), (-dy, dx), (dy, -dx)]
-                    elif dy != 0:
-                        directions = [(dy, 0), (dy, 1), (dy, -1), (0, 1), (0, -1)]
-                    elif dx != 0:
-                        directions = [(0, dx), (1, dx), (-1, dx), (1, 0), (-1, 0)]
-                    else:
-                        directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]
-                    
-                    for ddy, ddx in directions:
-                        ny, nx = y + ddy, x + ddx
-                        if (0 <= ny < h and 0 <= nx < w and mt[ny, nx] == MaterialType.SPACE):
-                            self._swap_cells(y, x, ny, nx, mt, temp)
-                            swaps_performed += 1
-                            break
+            # Break if no swaps in this pass
+            if swaps_this_pass == 0:
+                break
         
-        # Verify conservation
-        final_water_count = np.sum((mt == MaterialType.WATER) | (mt == MaterialType.MAGMA))
-        if final_water_count != initial_water_count:
-            print(f"[WARNING] Water not conserved: {initial_water_count} -> {final_water_count}")
-        
-        # Mark properties dirty
+        # Mark properties dirty if any swaps
         if swaps_performed > 0:
             self.sim._properties_dirty = True
             
         return swaps_performed
-    
-    def _swap_cells(self, y1, x1, y2, x2, mt, temp):
-        """Helper to swap two cells preserving all properties"""
-        # Swap materials
-        mt[y1, x1], mt[y2, x2] = mt[y2, x2], mt[y1, x1]
-        
-        # Swap temperatures
-        temp[y1, x1], temp[y2, x2] = temp[y2, x2], temp[y1, x1]
-        
-        # Swap velocities
-        if hasattr(self, 'velocity_x') and hasattr(self, 'velocity_y'):
-            vx_temp = self.velocity_x[y1, x1]
-            vy_temp = self.velocity_y[y1, x1]
-            self.velocity_x[y1, x1] = self.velocity_x[y2, x2]
-            self.velocity_y[y1, x1] = self.velocity_y[y2, x2]
-            self.velocity_x[y2, x2] = vx_temp
-            self.velocity_y[y2, x2] = vy_temp
-        
-        # Swap ages
-        if hasattr(self.sim, 'age'):
-            age_temp = self.sim.age[y1, x1]
-            self.sim.age[y1, x1] = self.sim.age[y2, x2]
-            self.sim.age[y2, x2] = age_temp
-
-    def _compute_surface_tension_pressure(self):
-        """Compute surface tension pressure source term for fluids at interfaces.
-        
-        Returns pressure source (Pa) that creates cohesive forces to minimize surface area.
-        """
-        from materials import MaterialType
-        
-        # Surface tension coefficient (Pa·m) - much stronger than real water for discrete cells
-        # Real water: ~0.072 N/m, but we need much stronger effect for discrete cells
-        sigma = 50000.0  # Pa·m (increased from 5000.0 for much stronger effect)
-        
-        dx = self.sim.cell_size
-        mt = self.sim.material_types
-        rho = self.sim.density
-        
-        # Define fluid materials that should have surface tension
-        fluid_types = {MaterialType.WATER, MaterialType.MAGMA}
-        
-        pressure_source = np.zeros_like(rho)
-        
-        # For each fluid cell, compute interface curvature and add cohesive pressure
-        for y in range(1, self.sim.height - 1):
-            for x in range(1, self.sim.width - 1):
-                if mt[y, x] not in fluid_types:
-                    continue
-                
-                # Count neighbors with significantly lower density (interface detection)
-                neighbors = [
-                    (y-1, x), (y+1, x), (y, x-1), (y, x+1)  # 4-connected
-                ]
-                
-                interface_count = 0
-                for ny, nx in neighbors:
-                    if rho[ny, nx] < 0.5 * rho[y, x]:  # Interface with much lighter material
-                        interface_count += 1
-                
-                # Add cohesive pressure proportional to interface exposure
-                # More exposed cells (more interfaces) get higher internal pressure
-                if interface_count > 0:
-                    # Pressure scales with interface count and surface tension
-                    # Factor of 2/dx gives correct dimensional scaling (Pa·m / m = Pa)
-                    pressure_source[y, x] = sigma * interface_count * 2.0 / dx
-        
-        return pressure_source
 
     def identify_rigid_groups(self):
         """Identify connected components of rigid materials (ice, rock, etc.)
@@ -947,3 +866,71 @@ class FluidDynamics:
             
             # Mark properties dirty
             self.sim._properties_dirty = True
+
+    def _swap_cells(self, y1, x1, y2, x2, mt, temp):
+        """Helper to swap two cells preserving all properties"""
+        # Swap materials
+        mt[y1, x1], mt[y2, x2] = mt[y2, x2], mt[y1, x1]
+        
+        # Swap temperatures
+        temp[y1, x1], temp[y2, x2] = temp[y2, x2], temp[y1, x1]
+        
+        # Swap velocities
+        if hasattr(self, 'velocity_x') and hasattr(self, 'velocity_y'):
+            vx_temp = self.velocity_x[y1, x1]
+            vy_temp = self.velocity_y[y1, x1]
+            self.velocity_x[y1, x1] = self.velocity_x[y2, x2]
+            self.velocity_y[y1, x1] = self.velocity_y[y2, x2]
+            self.velocity_x[y2, x2] = vx_temp
+            self.velocity_y[y2, x2] = vy_temp
+        
+        # Swap ages
+        if hasattr(self.sim, 'age'):
+            age_temp = self.sim.age[y1, x1]
+            self.sim.age[y1, x1] = self.sim.age[y2, x2]
+            self.sim.age[y2, x2] = age_temp
+
+    def _compute_surface_tension_pressure(self):
+        """Compute surface tension pressure source term for fluids at interfaces.
+        
+        Returns pressure source (Pa) that creates cohesive forces to minimize surface area.
+        """
+        from materials import MaterialType
+        
+        # Surface tension coefficient (Pa·m) - much stronger than real water for discrete cells
+        # Real water: ~0.072 N/m, but we need much stronger effect for discrete cells
+        sigma = 50000.0  # Pa·m (increased from 5000.0 for much stronger effect)
+        
+        dx = self.sim.cell_size
+        mt = self.sim.material_types
+        rho = self.sim.density
+        
+        # Define fluid materials that should have surface tension
+        fluid_types = {MaterialType.WATER, MaterialType.MAGMA}
+        
+        pressure_source = np.zeros_like(rho)
+        
+        # For each fluid cell, compute interface curvature and add cohesive pressure
+        for y in range(1, self.sim.height - 1):
+            for x in range(1, self.sim.width - 1):
+                if mt[y, x] not in fluid_types:
+                    continue
+                
+                # Count neighbors with significantly lower density (interface detection)
+                neighbors = [
+                    (y-1, x), (y+1, x), (y, x-1), (y, x+1)  # 4-connected
+                ]
+                
+                interface_count = 0
+                for ny, nx in neighbors:
+                    if rho[ny, nx] < 0.5 * rho[y, x]:  # Interface with much lighter material
+                        interface_count += 1
+                
+                # Add cohesive pressure proportional to interface exposure
+                # More exposed cells (more interfaces) get higher internal pressure
+                if interface_count > 0:
+                    # Pressure scales with interface count and surface tension
+                    # Factor of 2/dx gives correct dimensional scaling (Pa·m / m = Pa)
+                    pressure_source[y, x] = sigma * interface_count * 2.0 / dx
+        
+        return pressure_source
