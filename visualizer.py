@@ -10,10 +10,10 @@ from typing import Tuple, Optional
 
 # Handle both relative and absolute imports
 try:
-    from .geo_game import GeoGame as GeologySimulation
+    from .geo_game import GeoGame
     from .materials import MaterialType, MaterialDatabase
 except ImportError:
-    from geo_game import GeoGame as GeologySimulation
+    from geo_game import GeoGame
     from materials import MaterialType, MaterialDatabase
 import matplotlib
 matplotlib.use('Agg')  # Force non-interactive backend before importing pyplot
@@ -134,7 +134,7 @@ class GeologyVisualizer:
         }
         
         # Simulation state (start in INFO mode; press 'L' to toggle DEBUG)
-        self.simulation = GeologySimulation(sim_width, sim_height, log_level="INFO")
+        self.simulation = GeoGame(sim_width, sim_height, log_level="INFO")
         self.running = True
         self.paused = True  # Start paused
         self.display_mode = 'materials'  # 'materials', 'temperature', 'pressure'
@@ -1004,19 +1004,21 @@ class GeologyVisualizer:
         pygame.draw.rect(self.screen, (40, 40, 40), status_rect)
         pygame.draw.line(self.screen, self.colors['text'], (0, self.status_bar_height-1), (self.window_width, self.status_bar_height-1))
         
-        # Status text with performance info
+        # Status text with new format
         play_status = "PAUSED" if self.paused else f"PLAYING {self.speed_multiplier}x"
         
+        # Get step number (use time_step if available, otherwise fallback to history length)
+        step_num = getattr(self.simulation, 'time_step', stats.get('history_length', 0))
+        
         # Add performance info
-        perf_info = ""
+        sim_time = ""
         if self.step_times:
             avg_step_time = sum(self.step_times) / len(self.step_times)
-            perf_info = f" | Step: {avg_step_time:.1f}ms"
+            sim_time = f" | Sim: {avg_step_time:.1f}ms"
         
         time_str = self._format_time_smart(stats['time'])
-        status_text = (f"{play_status} | Time: {time_str} | Temp: {stats['avg_temperature']:.0f}°C "
-                       f"(max {stats['max_temperature']:.0f}°C) | Pressure: {stats['avg_pressure']:.1f} MPa | "
-                       f"Tool: {self.mouse_tool.title()} (R:{self.tool_radius}, I:{self.tool_intensity}){perf_info}")
+        status_text = (f"{play_status} | Step: {step_num} | t: {time_str} | "
+                       f"Tool: {self.mouse_tool.title()} (R:{self.tool_radius}, I:{self.tool_intensity}){sim_time}")
         
         text_surface = self.small_font.render(status_text, True, self.colors['text'])
         self.screen.blit(text_surface, (5, 5))
@@ -1265,7 +1267,14 @@ class GeologyVisualizer:
     
     def _draw_graphs_tab(self, x_offset: int, y_offset: int):
         """Draw compact graphs in the sidebar"""
-        time_series = self.simulation.time_series
+        # Get time series data - handle both old and new attribute names
+        if hasattr(self.simulation, 'time_series_data'):
+            time_series = self.simulation.time_series_data
+        elif hasattr(self.simulation, 'time_series'):
+            time_series = self.simulation.time_series
+        else:
+            # No time series data available
+            time_series = {'time': []}
         
         if not time_series['time'] or len(time_series['time']) < 2:
             # Not enough data yet

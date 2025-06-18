@@ -1,3 +1,7 @@
+# AIDEV-NOTE: This is the original simulation engine. It is deprecated and will be removed in the future.
+# AIDEV-NOTE: It is kept here for reference and to help us understand the changes that we have made.
+# AIDEV-NOTE: It is not used in the current implementation.
+
 """
 Modular geological simulation engine.
 This is a refactored version that delegates to specialized modules.

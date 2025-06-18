@@ -25,29 +25,18 @@ class FluidDynamics:
         # Expose velocity fields directly for UI compatibility (shared memory)
         self.velocity_x = self.sim.velocity_x
         self.velocity_y = self.sim.velocity_y
-        self.dv_thresh = 0.001  # m/s – velocity-difference threshold for swapping (reduced for surface tension)
-        self.solid_binding_force = 2e-4  # N – reference cohesion between solid voxels
-        # ------------------------------------------------------------------
-        # Pre-compute binding-threshold lookup table for fast vectorised access
-        # ------------------------------------------------------------------
-        mt_list = list(MaterialType)
-        n_mat = len(mt_list)
-        self._binding_matrix = np.zeros((n_mat, n_mat), dtype=np.float32)
+        self.dv_thresh = 0.01  # m/s – velocity-difference threshold for swapping (reduced for surface tension)
+        # Scale binding force appropriately for cell size (100m cells = 1e6 m³ volume)
+        # Rock cohesion ~1-10 MPa, so binding force should be ~1e6 to 1e7 N for 100m cell
+        self.solid_binding_force = 1e6  # N – reference cohesion between solid voxels (scaled for cell size)
+        self.velocity_clamp = False # Enable/disable velocity clamping (enable if instability)
 
-        # Map MaterialType to index for fast lookup
-        self._mat_index = {m: i for i, m in enumerate(mt_list)}
-
-        # Helper sets for readability
-        fluid_set = {MaterialType.AIR, MaterialType.WATER_VAPOR, MaterialType.WATER, MaterialType.MAGMA}
-        for i, a in enumerate(mt_list):
-            for j, b in enumerate(mt_list):
-                # Fluids set includes SPACE
-                if (a in fluid_set) and (b in fluid_set):
-                    self._binding_matrix[i, j] = 0.0
-                elif (a in fluid_set) ^ (b in fluid_set):  # fluid–solid (SPACE counts as fluid)
-                    self._binding_matrix[i, j] = 0.5 * self.solid_binding_force
-                else:  # solid–solid
-                    self._binding_matrix[i, j] = self.solid_binding_force
+        # Create binding matrix using material processes helper
+        try:
+            from .material_processes import MaterialProcesses
+        except ImportError:
+            from material_processes import MaterialProcesses
+        self._binding_matrix, self._mat_index = MaterialProcesses.create_binding_matrix(self.solid_binding_force)
     
     def calculate_planetary_pressure(self):
         """Multigrid solve for pressure using self-gravity field plus surface tension."""
@@ -93,37 +82,29 @@ class FluidDynamics:
             • Uses centre-of-mass as gravity direction (radial field).  A
               refined version could use the pre-computed `gravity_x/y`.
             • Operates in-place via vectorised NumPy masks; no RNG.
+
+        Density-driven swapping has been removed in favor of pure physics-based approach.
+        All material movement is now handled by:
+        1. Force-based swapping (apply_force_based_swapping) - handles pressure/gravity forces
+        2. Velocity-based swapping - ensures kinematic consistency  
+        3. Surface tension - handles fluid interface dynamics
+        This aligns with PHYSICS.md documentation which avoids simple heuristic swapping.
         """
 
         if not hasattr(self.sim, "_perf_times"):
             self.sim._perf_times = {}
         _t0 = _time.perf_counter()
 
-        # ------------------------------------------------------------------
-        # 1) Assemble net body-force field  f = ρ g  − ∇p  (N·m⁻³)
-        # ------------------------------------------------------------------
         rho = self.sim.density
 
+        # Assemble net body-force field
         _t_force_start = _time.perf_counter()
         fx, fy = self.compute_force_field()
         self.sim._perf_times["uk_force_assembly"] = _time.perf_counter() - _t_force_start
 
-        # ------------------------------------------------------------------
-        # 2) Velocity update  u ← u + (f/ρ) Δt
-        # ------------------------------------------------------------------
+        # Velocity update
         _t_vel_start = _time.perf_counter()
-        dt_seconds = dt  # dt already in seconds
-        accel_x = np.where(rho > 0, fx / rho, 0.0)
-        accel_y = np.where(rho > 0, fy / rho, 0.0)
-
-        # Velocity update and CFL clamp (≤0.5 cell/step)
-        self.velocity_x += accel_x * dt_seconds
-        self.velocity_y += accel_y * dt_seconds
-
-        max_u = 0.5 * self.sim.cell_size / dt_seconds
-        np.clip(self.velocity_x, -max_u, max_u, out=self.velocity_x)
-        np.clip(self.velocity_y, -max_u, max_u, out=self.velocity_y)
-
+        self.update_velocities(fx, fy, rho, dt)
         self.sim._perf_times["uk_velocity_update"] = _time.perf_counter() - _t_vel_start
 
         # ------------------------------------------------------------------
@@ -148,7 +129,7 @@ class FluidDynamics:
         # Variable-density Chorin projection
         #    ∇·(1/ρ ∇φ) = div_u / Δt
         # ------------------------------------------------------------------
-        rhs = (div_u / dt_seconds) * fluid_mask
+        rhs = (div_u / dt) * fluid_mask
         inv_rho = np.where(rho > 0, 1.0 / rho, 0.0)
 
         # Projection does not need micro-Pascal precision; loosen tolerance for speed
@@ -166,8 +147,8 @@ class FluidDynamics:
         grad_phi_y[~fluid_mask] = 0.0
 
         # Velocity correction  u = u* − Δt/ρ ∇φ
-        self.velocity_x -= grad_phi_x * dt_seconds * inv_rho
-        self.velocity_y -= grad_phi_y * dt_seconds * inv_rho
+        self.velocity_x -= grad_phi_x * dt * inv_rho
+        self.velocity_y -= grad_phi_y * dt * inv_rho
 
         self.sim._perf_times["uk_projection"] = _time.perf_counter() - _t_proj_start
 
@@ -195,110 +176,70 @@ class FluidDynamics:
             self.velocity_x[solid_mask] *= 0.2
             self.velocity_y[solid_mask] *= 0.2
 
-        swaps_done = 0  # track additional swaps in sinking passes
-
-        # ------------------------------------------------------------------
-        # 5) Extra sinking passes – ensure heavier fluid settles through lighter
-        # ------------------------------------------------------------------
-        # Gravity-aligned deterministic settling passes
-        # Modified to respect surface tension forces
-        from materials import MaterialType
+    # Velocity integration dispatch method
+    def update_velocities(self, fx: np.ndarray, fy: np.ndarray, rho: np.ndarray, dt: float):
+        """Update velocities using selected integration method.
         
-        n_settle = 3
-        for _ in range(n_settle):
-            gx = self.sim.gravity_x
-            gy = self.sim.gravity_y
-
-            abs_gx = np.abs(gx)
-            abs_gy = np.abs(gy)
-
-            dx_dir = np.where(abs_gx >= abs_gy, np.sign(gx).astype(np.int8), 0)
-            dy_dir = np.where(abs_gy > abs_gx, np.sign(gy).astype(np.int8), 0)
-
-            # Compute target indices and filter in-bounds
-            yy, xx = np.indices(rho.shape)
-            tgt_y = (yy + dy_dir).astype(np.int32)
-            tgt_x = (xx + dx_dir).astype(np.int32)
-            in_bounds = (tgt_y >= 0) & (tgt_y < self.sim.height) & (tgt_x >= 0) & (tgt_x < self.sim.width)
-
-            src_y = yy[in_bounds].ravel(); src_x = xx[in_bounds].ravel()
-            tgt_y = tgt_y[in_bounds].ravel(); tgt_x = tgt_x[in_bounds].ravel()
-
-            # Check density difference AND force conditions
-            mt_src_flat = self.sim.material_types[src_y, src_x]
-            mt_tgt_flat = self.sim.material_types[tgt_y, tgt_x]
+        Available methods:
+        - 'explicit_euler': Simple first-order explicit integration (default)
+        - Future: 'rk4', 'verlet', 'semi_implicit_euler', etc.
+        
+        To add a new method:
+        1. Add method name to the dispatch table below
+        2. Implement _update_velocities_<method_name>(fx, fy, rho, dt)
+        3. Set sim.velocity_integration_method = '<method_name>'
+        
+        Args:
+            fx, fy: Force field components (N)
+            rho: Density field (kg/m³)
+            dt: Time step (s)
+        """
+        # Dispatch based on integration method
+        method = getattr(self.sim, 'velocity_integration_method', 'explicit_euler')
+        
+        if method == 'explicit_euler':
+            self._update_velocities_explicit_euler(fx, fy, rho, dt)
+        # elif method == 'rk4':
+        #     self._update_velocities_rk4(fx, fy, rho, dt)
+        # elif method == 'verlet':
+        #     self._update_velocities_verlet(fx, fy, rho, dt)
+        else:
+            raise ValueError(f"Unknown velocity integration method: {method}")
             
-            # Skip if target is space - let surface tension handle fluid-space interfaces
-            not_to_space = mt_tgt_flat != MaterialType.SPACE
-            
-            # For fluid cells, be more restrictive about settling
-            # to avoid undoing surface tension work
-            fluid_types = {MaterialType.WATER, MaterialType.MAGMA}
-            is_fluid_src = np.array([m in fluid_types for m in mt_src_flat])
-            
-            # Only settle if density difference is significant
-            # For fluids, require larger density difference to overcome surface tension
-            density_threshold = np.where(is_fluid_src, 100.0, 1e-3)  # kg/m³
-            heavier = (rho[src_y, src_x] > rho[tgt_y, tgt_x] + density_threshold)
-            
-            # Combined condition: not to space, and significantly heavier
-            valid_swaps = heavier & not_to_space
-            
-            if not np.any(valid_swaps):
-                break
-                
-            # Perform swaps
-            valid_src_y = src_y[valid_swaps]
-            valid_src_x = src_x[valid_swaps]
-            valid_tgt_y = tgt_y[valid_swaps]
-            valid_tgt_x = tgt_x[valid_swaps]
-            
-            self._perform_material_swaps(valid_src_y, valid_src_x, valid_tgt_y, valid_tgt_x)
-            swaps_done += int(np.sum(valid_swaps))
+    # Available integration methods (implement as needed):
+    
+    def _update_velocities_explicit_euler(self, fx: np.ndarray, fy: np.ndarray, rho: np.ndarray, dt: float):
+        """Update velocities using explicit Euler integration.
+        
+        Simple first-order method: v_new = v_old + (F/ρ) * dt
+        Fast and stable for small time steps with sufficient damping.
+        
+        Args:
+            fx, fy: Force field components (N)
+            rho: Density field (kg/m³) 
+            dt: Time step (s)
+        """
+        dt_seconds = dt  # dt already in seconds
+        
+        # Calculate accelerations: a = F/m = F/(ρ*V) = F/ρ (since V=1 for unit cells)
+        # Handle divide by zero for vacuum regions
+        accel_x = np.where(rho > 0, fx / rho, 0.0)
+        accel_y = np.where(rho > 0, fy / rho, 0.0)
 
-            # Refresh density for subsequent passes
-            self.sim._properties_dirty = True
-            self.sim._update_material_properties()
-            rho = self.sim.density  # view updated array
+        # Explicit Euler integration: v = v + a*dt
+        self.velocity_x += accel_x * dt_seconds
+        self.velocity_y += accel_y * dt_seconds
+
+        # CFL-based velocity clamping for numerical stability (see PHYSICS.md)
+        if self.velocity_clamp:
+            max_u = 0.5 * self.sim.cell_size / dt_seconds  # CFL ≤ 0.5
+            np.clip(self.velocity_x, -max_u, max_u, out=self.velocity_x)
+            np.clip(self.velocity_y, -max_u, max_u, out=self.velocity_y)
     
     def calculate_effective_density(self, temperature: np.ndarray) -> np.ndarray:
         """Calculate effective density including thermal expansion"""
-        # Base density from material properties
-        base_density = self.sim.density.copy()
-        
-        # Apply thermal expansion
-        thermal_expansion = np.zeros_like(temperature)
-        
-        for y in range(self.sim.height):
-            for x in range(self.sim.width):
-                if self.sim.material_types[y, x] == MaterialType.SPACE:
-                    continue
-                
-                material_props = self.sim.material_db.get_properties(self.sim.material_types[y, x])
-                expansion_coeff = getattr(material_props, 'thermal_expansion', 1e-5)
-                
-                # Effective density with thermal expansion
-                temp_diff = temperature[y, x] - self.sim.reference_temperature
-                expansion_factor = 1.0 + expansion_coeff * temp_diff
-                thermal_expansion[y, x] = expansion_factor
-        
-        # Avoid division by zero
-        thermal_expansion = np.maximum(thermal_expansion, 0.1)
-        
-        return base_density / thermal_expansion
-    
-    def calculate_effective_density_single(self, y: int, x: int) -> float:
-        """Calculate effective density for a single cell"""
-        if self.sim.material_types[y, x] == MaterialType.SPACE:
-            return 0.0
-        
-        material_props = self.sim.material_db.get_properties(self.sim.material_types[y, x])
-        expansion_coeff = getattr(material_props, 'thermal_expansion', 1e-5)
-        
-        temp_diff = self.sim.temperature[y, x] - self.sim.reference_temperature
-        expansion_factor = max(1.0 + expansion_coeff * temp_diff, 0.1)
-        
-        return self.sim.density[y, x] / expansion_factor
+        # Use the comprehensive method from CoreState
+        return self.sim.calculate_effective_density(temperature)
     
     def _perform_material_swaps(self, src_y: np.ndarray, src_x: np.ndarray, 
                                tgt_y: np.ndarray, tgt_x: np.ndarray):
@@ -440,17 +381,24 @@ class FluidDynamics:
 
     def _binding_threshold(self, mt_a, mt_b, temp_avg):
         """Return binding force threshold between two materials (scalar, N).
-        Uses precomputed matrix plus simple temperature weakening for solids.
+        Uses precomputed matrix plus temperature weakening only above melting point.
         """
         from materials import MaterialType  # local import
         idx_a = self._mat_index[mt_a]
         idx_b = self._mat_index[mt_b]
         base_th = self._binding_matrix[idx_a, idx_b]
+        
         # Temperature weakening only affects bonds where at least one side is solid
         if np.isfinite(base_th) and base_th > 0:
-            T_ref = 273.15
-            temp_factor = max(0.1, 1.0 - (temp_avg - T_ref) / 1500.0)
-            return base_th * temp_factor
+            # Only weaken binding above melting point (~1200°C)
+            melting_point = 1473.15  # 1200°C in Kelvin
+            if temp_avg > melting_point:
+                # Gentle weakening above melting point, minimum 50% strength
+                temp_factor = max(0.5, 1.0 - (temp_avg - melting_point) / 1000.0)
+                return base_th * temp_factor
+            else:
+                # Full binding strength below melting point
+                return base_th
         return base_th
 
     def apply_force_based_swapping(self):

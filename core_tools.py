@@ -201,4 +201,81 @@ class CoreToolsMixin:
             'material_composition': sorted_materials,
             'history_length': len(getattr(self, 'history', [])),
         }
-        return stats 
+        return stats
+
+    # ------------------------------------------------------------------
+    # Reset functionality (used by visualiser key 'R')
+    # ------------------------------------------------------------------
+    def reset(self):
+        """Reset simulation to initial pristine state.
+        
+        Restores the simulation to its initial planetary configuration,
+        clearing all history and resetting all physics state.
+        """
+        # Store current grid dimensions and configuration
+        width = self.width
+        height = self.height
+        cell_size = getattr(self, 'cell_size', 50.0)
+        quality = getattr(self, 'quality', 1)
+        
+        # Reset time and history
+        self.time = 0.0
+        self.history.clear()
+        
+        # Clear time series data
+        if hasattr(self, 'time_series_data'):
+            for key in self.time_series_data:
+                self.time_series_data[key].clear()
+        
+        # Reset thermal fluxes
+        if hasattr(self, 'thermal_fluxes'):
+            self.thermal_fluxes = {
+                'solar_input': 0.0,
+                'radiative_output': 0.0,
+                'internal_heating': 0.0,
+                'atmospheric_heating': 0.0,
+                'net_flux': 0.0
+            }
+        
+        # Reset power density
+        if hasattr(self, 'power_density'):
+            self.power_density.fill(0.0)
+        
+        # Reset pressure offset (user-applied pressure changes)
+        if hasattr(self, 'pressure_offset'):
+            self.pressure_offset.fill(0.0)
+        
+        # Reset material cache
+        if hasattr(self, '_material_props_cache'):
+            self._material_props_cache.clear()
+        self._properties_dirty = True
+        
+        # Re-initialize planetary conditions
+        if hasattr(self, '_setup_planetary_conditions'):
+            self._setup_planetary_conditions()
+        
+        # Update material properties and center of mass
+        if hasattr(self, '_update_material_properties'):
+            self._update_material_properties()
+        if hasattr(self, '_calculate_center_of_mass'):
+            self._calculate_center_of_mass()
+        
+        # Reset velocity fields if they exist
+        if hasattr(self, 'velocity_x'):
+            self.velocity_x.fill(0.0)
+        if hasattr(self, 'velocity_y'):
+            self.velocity_y.fill(0.0)
+        
+        # Reset any module-specific state
+        if hasattr(self, 'heat_transfer'):
+            # Reset any heat transfer module state if needed
+            pass
+        if hasattr(self, 'fluid_dynamics'):
+            # Reset fluid dynamics state
+            if hasattr(self.fluid_dynamics, 'velocity_x'):
+                self.fluid_dynamics.velocity_x.fill(0.0)
+            if hasattr(self.fluid_dynamics, 'velocity_y'):
+                self.fluid_dynamics.velocity_y.fill(0.0)
+        
+        self.logger.info("Simulation reset to initial state (grid: %dx%d, cell_size: %.1f)", 
+                        width, height, cell_size) 

@@ -1,3 +1,7 @@
+# AIDEV-NOTE: This is the original simulation engine. It is deprecated and will be removed in the future.
+# AIDEV-NOTE: It is kept here for reference and to help us understand the changes that we have made.
+# AIDEV-NOTE: It is not used in the current implementation.
+
 """
 Core simulation engine for 2D geological processes.
 Handles heat transfer, pressure calculation, and rock state evolution.
@@ -7,7 +11,7 @@ import numpy as np
 import logging
 from typing import Tuple, Optional
 try:
-    from .materials import MaterialType, MaterialDatabase
+    from ..materials import MaterialType, MaterialDatabase
 except ImportError:
     from materials import MaterialType, MaterialDatabase
 from scipy import ndimage

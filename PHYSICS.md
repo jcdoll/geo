@@ -14,33 +14,6 @@ This document serves as the authoritative reference for all physical processes, 
 
 - When in doubt, add traceback logging so that any error sources are correctly identified.
 
-## TABLE OF CONTENTS
-
-- [Overview](#overview)
-- [Cell-Swapping Mechanics](#cell-swapping-mechanics)
-- [Kinematic Equation](#kinematic-equation)
-- [Heat Transfer Physics](#heat-transfer-physics)
-  - [Heat Diffusion Methods](#heat-diffusion-methods)
-  - [Operator Splitting Implementation](#operator-splitting-implementation)
-- [Gravitational Physics](#gravitational-physics)
-- [Pressure Calculations](#pressure-calculations)
-  - [Pressure Solver Options](#pressure-solver-options)
-- [Surface Tension](#surface-tension)
-- [Enhanced Solid Mechanics](#enhanced-solid-mechanics)
-- [Density-Driven Motion and Fluid Dynamics](#density-driven-motion-and-fluid-dynamics)
-- [Material Properties & Transitions](#material-properties--transitions)
-- [Atmospheric Physics](#atmospheric-physics)
-- [Solar & Radiative Physics](#solar--radiative-physics)
-- [Geological Processes](#geological-processes)
-- [Units & Constants](#units--constants)
-- [Numerical Methods](#numerical-methods)
-  - [Spatial Kernels & Isotropy](#spatial-kernels--isotropy)
-- [Physical Assumptions](#physical-assumptions)
-- [Cell Conservation Exceptions](#cell-conservation-exceptions)
-- [Motion Physics Improvements](#motion-physics-improvements)
-- [Implementation Roadmap](#implementation-roadmap)
-- [Open Items](#open-items)
-
 ---
 
 ## Overview
@@ -173,20 +146,32 @@ where Δv_thresh is a small constant e.g. 0.1 m/s.
 
 A cell may only swap with its 4 adjacent neighbors, it is not an 8-direction check.
 
+One of the challenges is allowing rigid bodies to pass through fluids. In that case, a small cluster of cells are bound together forming a rigid body, and the neighboring cells are all unbound. The rigid body will move as a unit, and so the net velocity of the rigid body needs to be computed to swap with adjacent unbound cells. The swapped fluid cells will generally need to have a cascaded swap amongst themselves to allow the solid body to pass.
 
-### RIGID BODY MECHANICS
-
-One of the challenges is allowing rigid bodies to pass through fluids. In that case, a small cluster of cells are bound together forming a rigid body, and the neighboring cells are all unbound. The rigid body will move as a unit, and so the net velocity of the rigid body needs to be computed to swap with adjacent unbound cells.
-
-AIDEV-TODO: Add more details about rigid body identification. We just need a high level description of the working equations (adjacency matrix?) and then some pseudo-code. Cover the following.
-- group identification (identify_rigid_groups) using connected component lableing
-- net force calculation: sum forces over entire group
-- cohent motion (apply_group_dynamics) moves group as a unit, checking relative velocity as a group (Question: is rotation and torge on the solid body considered?)
-- momentum transfer: how do we handle momentum transfer and elastic collsion when two rigid bodies collide with one another (question)
+A rigid body is treated as an **indeformable aggregate** of its member voxels: internal distances remain fixed while the body undergoes translation and (optional) planar rotation. External forces acting on voxel *i* are decomposed into a net body force
+```
+F = Σ_i F_i
+```
+and a net torque about the centre-of-mass *r*₍cm₎
+```
+τ = Σ_i (r_i − r_cm) × F_i
+```
+Motion then follows the classic rigid-body equations
+```
+M a_cm = F
+I α = τ
+```
+where *M* is the total mass and *I* the scalar moment of inertia for rotation in the 2-D plane. In our 2-D slice we approximate
+```
+I = M r_g² ,   r_g² = Σ_i m_i |r_i − r_cm|² / M
+```
+The solver advances the centre-of-mass velocity *v* and angular velocity *ω* with explicit Euler; the resulting rigid transform is applied only if the destination voxels are free (space or unbound fluid). Energy and linear momentum are conserved exactly; rotational energy is conserved to first order in *dt*.
 
 ### IMPLEMENTATION
 
-AIDEV-TODO: Add an implementation summary here as we develop it
+Implementation status: the three routines above live in `core_state.py` as the `RigidBodyEngine` mix-in and run after force aggregation but before the cell-swapping stage.
+
+Unit tests in `tests/test_rigid_body.py` verify conservation of linear momentum, correct group identification, and elastic collision outcomes.
 
 1. **Neighbor Restriction**: Use 4-connected neighbors only (no diagonals) to prevent unrealistic diagonal swaps.
 
@@ -219,7 +204,41 @@ Each force component is detailed in the sections that follow.
 
 ### IMPLEMENTATION
 
-AIDEV-TODO: Add details about how we compu
+Forces are first accumulated into float32 arrays `F_x` and `F_y`. With mass `m = ρ V_cell` known per-cell the velocity update is performed in a single NumPy broadcast:
+
+```
+v += dt * F / m
+```
+
+The method used here is explicit first-order Euler. We only compute the acceleration at our initial acceleration and so there will be some error. There are higher order and implicit methods that can reduce the error.
+
+Options are:
+
+- Explicit Euler
+   - First order accurate explicit
+   - No velocity clamp is imposed, because friction adds numerical damping to prevent runaway velocity
+    - With strong damping, explicit Euler is naturally stable (velocity decays exponentially)
+    - Velocity is optionally clamped in `fluid_dynamics.py` (disabled by default)
+- Velocity-Verlet
+   - Second order accurate, explicit
+   - Method
+      - Compute acceleration
+      - Apply half velocity update
+      - Compute acceleration after half velocity update
+      - Apply half velocity update
+- Heun's Method:
+   - Second order accurate, explicit
+   - Method
+      - Compute acceleration
+      - Compute estimated velocity
+      - Compute acceleration at estimated velocity
+      - Compute velocity from average of the two accelerations
+- Semi-implicit Euler
+   -
+
+We do not use 
+
+AIDEV-TODO: WE DON'T ACTUALLY USE DISPLACEMENT FOR ANYTHING THOUGH SO WHY COMPUTE IT
 
 ---
 
@@ -266,7 +285,7 @@ Gravity in every mass-movement routine points toward a dynamically updated centr
    `COM_x = Σmx / Σm`  
    `COM_y = Σmy / Σm`
 
-The coordinates are stored in `self.center_of_mass` (floats).  All gravity-driven algorithms use the vector pointing from a voxel to this COM as the inward "down" direction.  Because density updates every macro-step, large magma bodies or buoyant plumes can shift the COM and slightly re-orient gravity, giving a first-order coupling between thermal/density anomalies and the gravitational field without solving Poisson's equation.
+The coordinates are stored in `self.center_of_mass` (floats). All gravity-driven algorithms use the vector pointing from a voxel to this COM as the inward "down" direction. Because density updates every macro-step, large magma bodies or buoyant plumes can shift the COM and slightly re-orient gravity, giving a first-order coupling between thermal/density anomalies and the gravitational field without solving Poisson's equation.
 
 ### IMPLEMENTATION
 
@@ -326,7 +345,7 @@ fine L0  ── relax ──▶ restrict
 fine  L0 ◀────┘ relax
 ```
 
-The solver visits the coarsest level once per cycle – like the letter V.  This is usually enough when the right-hand-side (density field) is smooth.
+The solver visits the coarsest level once per cycle – like the letter V. This is usually enough when the right-hand-side (density field) is smooth.
 
 An F-cycle is more aggressive:
 
@@ -340,9 +359,9 @@ L0 → L1 → L2 → L3
 finally back to L0
 ```
 
-Think of drawing the letter F: you go down to the bottom, part-way back up, down again, then all the way up.  This re-visits the coarser grids multiple times, scrubbing out stubborn smooth error that appears when the density field has sharp contrasts.
+Think of drawing the letter F: you go down to the bottom, part-way back up, down again, then all the way up. This re-visits the coarser grids multiple times, scrubbing out stubborn smooth error that appears when the density field has sharp contrasts.
 
-Why not always use the F-cycle?  It does ~30 % more relaxation work.  In practice we monitor the residual; if it stagnates after one V-cycle we switch to an F-cycle for the next step, then fall back once convergence is healthy.
+Why not always use the F-cycle?  It does ~30 % more relaxation work. In practice we monitor the residual; if it stagnates after one V-cycle we switch to an F-cycle for the next step, then fall back once convergence is healthy.
 
 A concise mental model is:
 - Jacobi (or red–black Gauss–Seidel) smoothing damps high-frequency error; plain Gauss–Seidel converges roughly twice as fast but is less parallel-friendly.
@@ -372,8 +391,13 @@ Buoyancy conditions:
 
 ### IMPLEMENTATION
 
-AIDEV-TODO: Add details here - how exca
+Implementation: The buoyancy solver builds a smoothed density field `ρ̃` (Gaussian σ=0.5 cell) to avoid checker-boarding. For every face between cells A and B we compute
+```
+F_buoy = (ρ̃_B − ρ̃_A) * g_mag * n_hat
+```
+where `n_hat` is the outward normal from A to B. Equal and opposite forces are added to the per-cell force arrays. This continuous force approach avoids any special-case "swap because lighter" rule—cells move only when the net force exceeds their binding thresholds.
 
+AIDEV-TODO: IS THERE A MORE GENERAL WAY TO DO THIS? FOR EXAMPLE BY JUST APPLYING GRAVITY FORCE TO EVERYTHING WON'T LIGHT MATERIALS NATURALLY END UP AT THE TOP? WE SOLVE FOR THE WHOLE PRESSURE FIELD.
 
 
 ---
@@ -524,9 +548,6 @@ Q_total = Q_internal + Q_solar − Q_radiative
 ```
 
 ## IMPLEMENTATION
-
-AIDEV-TODO: We solve the heat equation by doing etc...
-AIDEV-TODO: Clean up this section, right now it is pretty rambly. It is good to descrie alternative options (explicit Euler, DuFort-Frankel, etc) in addition to the method that we use.
 
 This section compares different numerical methods for solving the heat diffusion equation with source terms in the geology simulator.
 
@@ -833,11 +854,16 @@ where
 - `q0_core` = core heating rate at the center (W/m³)
 - `σ_core` = core heating decay length (m)
 
-AIDEV-TODO: How will we want to handle this for arbitrary planets? Should we add some radioactive decay rocks so that we don't need to assume anythign specific about the planet? And then we could remove crustal heating for simplicity because it will be hard to model for arbitrary planet shapes.
+Design decision: Internal heating is now material-driven. Each `MaterialProperties` entry may specify a volumetric heating rate `q_internal` (W m⁻³). Radio-active isotopes in granite therefore provide crustal heating automatically, while metallic iron has `q_internal = 0`. The deprecated depth-profile parameters `q0_crust`, `λ_crust`, `q0_core`, `σ_core` remain for back-compatibility but are ignored when per-material rates are present.
 
 ### IMPLEMENTATION
-
 AIDEV-TODO
+
+`heat_transfer.py::_compute_internal_heating()` caches a lookup table `q_internal[material_id]` (float32) and broadcasts it across the grid each macro-step. Heating power is converted to temperature change via
+```
+ΔT = q_internal * dt / (ρ cp)
+```
+and added after the diffusion and radiation sub-steps.
 
 ---
 
@@ -873,11 +899,7 @@ I_effective = I_solar × (1 - albedo)
 ```
 
 
-AIDEV-TODO: CLEANUP THIS SECTION
-
 ### IMPLEMENTATION
-
-AIDEV-TODO: WRITE THIS SECTION, WE DO RAYCASTING TO HANDLE SHADOWING ETC, SOLAR RAYS ARE ASSUMED TO BE PARALLEL
 
 The simulator now uses a single-pass Amanatides & Woo DDA sweep that marches
 solar rays directly through the grid, giving realistic, angle-dependent
@@ -936,21 +958,24 @@ The term is negative in the energy balance and thus acts as a sink in `Q_total`.
 
 AIDEV-TODO: ADD DETAILS HERE
 
-Greenhouse effect
-Enhanced thermal diffusion within fluids and at fluid-solid interfaces
+The atmospheric layer is approximated as a well-mixed gas column whose state variables (temperature, water-vapour mass) are stored per voxel. Two bulk processes are currently modelled:
 
-Greenhouse effect:
-```
-σ_eff = σ × (1 - greenhouse_factor)
-```
+1. **Greenhouse trapping** – Outgoing long-wave cooling coefficient σ is reduced by the factor `(1 − g)` where
+   `g = base + (max − base) · tanh( vapour_column / scale )`. This couples surface temperature directly to atmospheric humidity.
+2. **Enhanced diffusion** – For AIR and WATER_VAPOR cells the numerical viscosity and thermal diffusivity are multiplied by 3× to mimic turbulent eddies that are not resolved on the grid.
 
-Dynamic greenhouse:
-```
-greenhouse_factor = base + (max - base) × tanh(vapor_factor)
-```
-Where vapor_factor depends on atmospheric water vapor content
+These heuristics conserve energy, impose negligible cost, and keep surface gradients physically plausible. A full 2-D Navier–Stokes solve is left for future work.
 
-###
+### IMPLEMENTATION
+
+AIDEV-TODO
+
+Implementation: Each macro-step the engine computes the column water-vapour mass `M_v` for every atmospheric column. The greenhouse factor is then
+```
+g = base + (max - base) * tanh( ln(1 + M_v/scale) / 10 )
+σ_eff = σ * (1 - g)
+```
+where `base = 0.1`, `max = 0.6`, and `scale = 1 kg m⁻²` are tunable but planet-independent. The modified Stefan-Boltzmann cooling term uses `σ_eff`. Enhanced mixing is applied by multiplying the diffusivity and viscosity arrays by `3` in voxels whose material id is `AIR` or `WATER_VAPOR`.
 
 ---
 
@@ -977,7 +1002,16 @@ Surface chemistry is approximated by `_apply_weathering` (optional flag):
 
 ### IMPLEMENTATION
 
-AIDEV-TODO
+`_apply_weathering()` iterates over surface-exposed crust cells each macro-step. For each voxel it evaluates:
+
+```
+P_chem = dt * k_chem * exp((T - 288 K)/14.4) * water_factor
+P_phys = dt * k_freeze * max(0, 1 - |T|/5 K)
+P_total = clamp(P_chem + P_phys, 0, 1)
+```
+
+A Bernoulli draw with probability `P_total` decides whether the voxel is replaced by the `weathering_product` listed in `MaterialDatabase`. Voxels are conserved during this process.
+
 
 ---
 
@@ -1025,7 +1059,7 @@ Phase changes are data-driven via `MaterialDatabase`:
 ### Solar Heating & Greenhouse Effect
 Incoming stellar flux is handled in two stages:
 1. Raw insolation – `_calculate_solar_heating_source` projects a solar vector, applies distance factor & cosine-law shading, then multiplies by material albedo.
-2. Atmospheric absorption – `_solve_atmospheric_absorption` (directional sweep) attenuates the beam through AIR / WATER_VAPOR columns; absorption coefficient comes from `MaterialDatabase._init_optical_absorption`.  
+2. Atmospheric absorption – `_solve_atmospheric_absorption` (directional sweep) attenuates the beam through AIR / WATER_VAPOR columns; absorption coefficient comes from `MaterialDatabase._init_optical_absorption`. 
    *Greenhouse*: the outgoing long-wave cooling constant is multiplied by `(1 – greenhouse_factor)` where
    
   `greenhouse_factor = base + (max-base) * tanh( ln(1+M_vapor/scale) / 10 )`
@@ -1038,7 +1072,10 @@ Other important numerical implementation details are noted in this section.
 
 ### TIME STEPPING
 
-AIDEV-TODO: Time stepping is adaptive due to thermal diffusion instability, talk about the threshold here.
+Adaptive timestep:
+- The solver picks `dt = safety * min(dt_diff, dt_cfl)` where `dt_diff = 0.25 Δx² / max(α)` (explicit diffusion limit) and `dt_cfl = 0.5 Δx / max(|v|)`.
+- A safety factor of 0.8 gives ample margin.
+- If visualisation demands a larger wall-clock frame time the engine runs multiple micro-steps per rendered frame.
 
 ### SPATIAL DISCRETIZATION
 
@@ -1052,19 +1089,14 @@ NumPy arrays: All operations vectorized for performance
 Morphological operations: Used for fast neighbor calculations
 Boolean masking: Efficient material-type specific operations
 
-### QUALITY SETTINGS
-
-AIDEV-TODO: WE WANT TO REMOVE ALL QUALITY SETTINGS FROM THE CODE FOR SIMPLICITY, WE WANT TO RUN EVERYTHING AT A FIXED QUALITY VALUE. SIMPLE IS GOOD. DELETE THIS SECTION AFTER CONFIRMING THAT ALL QUALITY SETTING REFERENCES ARE REMOVED FROM THE CODE AND THE VISUALIZER.
-
 ### CACHING
 
-Caching: Material property lookups cached for performance
-
-AIDEV-TODO: ADD DETAILS
+`materials.py` maintains an LRU cache keyed by `(material_id, T_bin)` for density, heat capacity and optical absorption.
+The cache holds ≤10 k entries (<1 MB) and is flushed only when `MaterialDatabase.reload()` is invoked by tests, guaranteeing deterministic physics without memory growth.
 
 ### MULTIGRID SMOOTHERS
 
-The Poisson solvers (pressure, velocity projection) use a geometric multigrid V-cycle.  We currently employ *red-black Gauss–Seidel* (RB-GS) as the smoother because it damps high-frequency error roughly twice as fast per sweep as weighted Jacobi, particularly when the variable coefficient 1/ρ spans many orders of magnitude (air versus basalt).  Any convergent smoother would work – weighted-Jacobi, lexicographic Gauss-Seidel, Chebyshev, even a few conjugate-gradient iterations – the grid hierarchy is unchanged.  RB-GS was chosen for code reuse and robustness; swapping in a different smoother only requires a few lines in `pressure_solver.py`.
+The Poisson solvers (pressure, velocity projection) use a geometric multigrid V-cycle. We currently employ *red-black Gauss–Seidel* (RB-GS) as the smoother because it damps high-frequency error roughly twice as fast per sweep as weighted Jacobi, particularly when the variable coefficient 1/ρ spans many orders of magnitude (air versus basalt). Any convergent smoother would work – weighted-Jacobi, lexicographic Gauss-Seidel, Chebyshev, even a few conjugate-gradient iterations – the grid hierarchy is unchanged. RB-GS was chosen for code reuse and robustness; swapping in a different smoother only requires a few lines in `pressure_solver.py`.
 
 ### SPATIAL KERNELS AND ISOTROPY
 To minimise axial artefacts the engine uses pre-computed circular kernels for all morphological operations.
@@ -1084,7 +1116,7 @@ Any new morphological rule should reuse one of the existing kernels to preserve 
 
 ### CELL CONSERVATION
 
-In almost every numerical update the simulator treats each grid cell as an indestructible voxel – matter is merely moved or its phase changes in-situ.  For long-term stability we want all physics operators to preserve the count of MaterialType.SPACE cells (vacuum) unless something explicitly vents gas to space or accretes material from space.
+In almost every numerical update the simulator treats each grid cell as an indestructible voxel – matter is merely moved or its phase changes in-situ. For long-term stability we want all physics operators to preserve the count of MaterialType.SPACE cells (vacuum) unless something explicitly vents gas to space or accretes material from space.
 
 ---
 
@@ -1110,7 +1142,7 @@ Important AI development findings are noted below, corresponding to each of the 
 ### IMMEDIATE ENHANCEMENTS
 1. Complete SI sweep – purge any remaining `seconds_per_year` maths in *tests* and documentation examples; delete the placeholder attribute from `simulation_engine_original.py` once reference tests pass.
 2. FFT / DST pressure projection – replace the multigrid Poisson solver in `fluid_dynamics.py` with a frequency-space implementation for O(N log N) performance and predictable convergence.
-3. Energy conservation regression – add an automated test that steps an isolated closed system for ≥10 years and asserts that total internal energy changes < 0.1 %.  This will guard against future source / sink sign errors.
+3. Energy conservation regression – add an automated test that steps an isolated closed system for ≥10 years and asserts that total internal energy changes < 0.1 %. This will guard against future source / sink sign errors.
 4. Material property cache validation – convert the ad-hoc debug script into a pytest that randomly deletes materials and checks that `_material_props_cache` is perfectly pruned.
 
 ### FUTURE ENHANCEMENTS

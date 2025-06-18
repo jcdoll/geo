@@ -1,45 +1,45 @@
-import numpy as np
-import sys, os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+"""
+Pytest tests for water blob condensation using the test framework.
+"""
 
-from geo_game import GeoGame
-from materials import MaterialType
+import pytest
+from tests.test_framework import ScenarioRunner
+from tests.test_water_blob_scenario import WaterBlobCondensationScenario
 
-def _bounding_box(mask: np.ndarray):
-    ys, xs = np.where(mask)
-    return ys.min(), ys.max(), xs.min(), xs.max()
-
-
-def _aspect_ratio(mask: np.ndarray):
-    y0, y1, x0, x1 = _bounding_box(mask)
-    h = y1 - y0 + 1
-    w = x1 - x0 + 1
-    return max(w / h, h / w)  # always >=1
 
 def test_water_condenses_to_circular_blob():
-    # Create simulation domain mostly SPACE
-    sim = GeoGame(width=40, height=40, cell_size=50.0)
+    """Test that a water bar condenses into a circular blob."""
+    # Use default parameters (30x4 bar)
+    scenario = WaterBlobCondensationScenario()
+    runner = ScenarioRunner(scenario, sim_width=40, sim_height=40)
+    
+    # Run for 120 steps as in the original test
+    result = runner.run_headless(max_steps=120)
+    
+    # Check that it succeeded
+    assert result['success'], f"Water blob test failed: {result['message']}"
+    
+    # Additional assertion on the aspect ratio
+    aspect_ratio = result['metrics']['aspect_ratio']
+    assert aspect_ratio < 1.6, f"Water blob still elongated (ratio {aspect_ratio:.2f})"
 
-    # Fill rectangular bar of WATER across centre
-    bar_top, bar_bottom = 18, 22
-    bar_left, bar_right = 5, 35
-    water_mask = np.zeros((40, 40), dtype=bool)
-    water_mask[bar_top:bar_bottom, bar_left:bar_right] = True
-    sim.material_types[water_mask] = MaterialType.WATER
-    sim.temperature[water_mask] = 293.15  # room temp
 
-    # Update derived fields
-    sim._update_material_properties()
-    sim.fluid_dynamics.calculate_planetary_pressure()
-
-    initial_ratio = _aspect_ratio(sim.material_types == MaterialType.WATER)
-    assert initial_ratio > 2.0  # sanity check bar is elongated
-
-    # Run simulation for 120 macro-steps (reasonable settling time)
-    for _ in range(120):
-        sim.step_forward()
-
-    final_ratio = _aspect_ratio(sim.material_types == MaterialType.WATER)
-
-    # Expect water to approach circular blob: aspect ratio significantly reduced
-    assert final_ratio < 1.6, f"Water blob still elongated (ratio {final_ratio:.2f})" 
+def test_water_blob_different_sizes():
+    """Test water condensation with different initial bar sizes."""
+    test_cases = [
+        (20, 2),  # Thin bar
+        (40, 6),  # Wide bar
+        (10, 10), # Square (should already be ~circular)
+    ]
+    
+    for width, height in test_cases:
+        scenario = WaterBlobCondensationScenario(bar_width=width, bar_height=height)
+        runner = ScenarioRunner(scenario, sim_width=60, sim_height=60)
+        
+        result = runner.run_headless(max_steps=150)
+        
+        # Square should already be circular, others should converge
+        if width == height:
+            assert result['metrics']['aspect_ratio'] < 1.2, f"Square didn't stay circular"
+        else:
+            assert result['success'], f"Test failed for {width}x{height}: {result['message']}" 

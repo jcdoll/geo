@@ -131,6 +131,10 @@ Each rock type has realistic:
 - **Temperature Range**: 15°C surface to 1500°C+ at depth
 - **Pressure Range**: 0.1 MPa surface to 1000+ MPa at depth
 
+## Testing
+
+See the [testing readme](./tests/README.md).
+
 ## Limitations and Future Enhancements
 
 ### Current Limitations

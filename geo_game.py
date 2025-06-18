@@ -207,7 +207,23 @@ class GeoGame(CoreState, CoreToolsMixin):
             self._perf_times["unified_kinematics"] = time.perf_counter() - _last_cp
             _last_cp = time.perf_counter()
 
-            # 6) Advance simulation clock using stability-scaled dt
+            # 6) Material processes – metamorphism, weathering, phase transitions
+            step_count = int(self.time / self.dt)
+            
+            # Apply metamorphism every step (fundamental physics)
+            self.material_processes.apply_metamorphism()
+            
+            # Apply phase transitions every step (water/ice/vapor)
+            self.material_processes.apply_phase_transitions()
+            
+            # Apply weathering every 10th step (slower process)
+            if getattr(self, 'enable_weathering', True) and step_count % 10 == 0:
+                self.material_processes.apply_weathering()
+            
+            self._perf_times["material_processes"] = time.perf_counter() - _last_cp
+            _last_cp = time.perf_counter()
+
+            # 7) Advance simulation clock using stability-scaled dt
             self.time += self.dt * stability
             self._last_stability_factor = stability
             self._actual_effective_dt = self.dt * stability

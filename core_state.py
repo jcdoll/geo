@@ -14,7 +14,7 @@ are intentionally **not** included here – those responsibilities now live
 in the dedicated modules.
 """
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, List, Any
 import logging
 
 import numpy as np
@@ -22,8 +22,16 @@ from scipy import ndimage
 
 try:
     from .materials import MaterialType, MaterialDatabase
+    from .heat_transfer import HeatTransfer
+    from .fluid_dynamics import FluidDynamics
+    from .material_processes import MaterialProcesses
+    from .atmospheric_processes import AtmosphericProcesses
 except ImportError:  # fallback for standalone unit tests
     from materials import MaterialType, MaterialDatabase
+    from heat_transfer import HeatTransfer
+    from fluid_dynamics import FluidDynamics
+    from material_processes import MaterialProcesses
+    from atmospheric_processes import AtmosphericProcesses
 
 
 class CoreState:
@@ -46,7 +54,7 @@ class CoreState:
         self.cell_size = float(cell_size)
 
         # ---------- logger -------------------------------------------------
-        self.logger = logging.getLogger(f"GeologySimulation_{id(self)}")
+        self.logger = logging.getLogger(f"GeoGame_{id(self)}")
         self.logger.setLevel(getattr(logging, str(log_level).upper(), logging.INFO))
         if not self.logger.handlers:
             handler = logging.StreamHandler()
@@ -122,7 +130,7 @@ class CoreState:
         self.logging_enabled = False
 
         # ---------- caches / book-keeping ---------------------------------
-        self._material_props_cache: dict = {}
+        self._material_props_cache: Dict[MaterialType, Tuple[float, float, float]] = {}
         self._properties_dirty = True
 
         self._setup_neighbors()
@@ -140,8 +148,8 @@ class CoreState:
         self.fluid_migration_probability: float = 0.25
 
         # minimal history for undo (optional)
-        self.history: list = []
-        self.max_history = 100
+        self.history: List[Dict[str, Any]] = []
+        self.max_history = 50
 
         # Diffusion stencil selection ('radius1' or 'radius2')
         self.diffusion_stencil = "radius2"
@@ -150,15 +158,26 @@ class CoreState:
         # Place-holder time-series buffers so the visualiser's graphs work.
         # Modules are free to push to these lists at their leisure.
         # ------------------------------------------------------------------
-        self.time_series = {
+        self.time_series_data = {
             'time': [],
             'avg_temperature': [],
             'max_temperature': [],
+            'min_temperature': [],
+            'avg_pressure': [],
+            'max_pressure': [],
+            'min_pressure': [],
+            'thermal_flux_solar': [],
+            'thermal_flux_radiative': [],
+            'thermal_flux_internal': [],
+            'thermal_flux_net': [],
+            'material_counts': [],  # Dict of material type counts per timestep
+            'center_of_mass_x': [],
+            'center_of_mass_y': [],
+            'planet_radius': [],
+            'atmospheric_mass': [],
             'total_energy': [],
-            'net_power': [],
-            'greenhouse_factor': [],
-            'planet_albedo': [],
         }
+        self.max_time_series_length = 1000  # Keep last 1000 timesteps
 
         # Running thermal flux bookkeeping (W).  Updated by HeatTransfer.
         self.thermal_fluxes = {
@@ -174,6 +193,7 @@ class CoreState:
         # ------------------------------------------------------------------
         self.thermal_diffusion_method = "explicit_euler"  # only method implemented so far
         self.radiative_cooling_method = "linearized_stefan_boltzmann"
+        self.velocity_integration_method = "explicit_euler"  # velocity update method
 
         # Constant external gravitational field (m/s²).  Positive y is downward in
         # array coordinates, so Earth-like gravity uses (0, +9.81).
@@ -193,6 +213,17 @@ class CoreState:
         self.enable_solar_heating: bool = True  
         self.enable_radiative_cooling: bool = True
         self.enable_heat_diffusion: bool = True
+
+        # Initialize modules (note: order matters)
+        self.heat_transfer = HeatTransfer(self)
+        self.fluid_dynamics = FluidDynamics(self)
+        self.material_processes = MaterialProcesses(self)
+        self.atmospheric_processes = AtmosphericProcesses(self)
+
+        # Planetary setup
+        self._setup_planetary_conditions()
+        self._update_material_properties()
+        self._calculate_center_of_mass()
 
     # ------------------------------------------------------------------
     #  Performance presets (copied from legacy engine)
@@ -384,17 +415,156 @@ class CoreState:
 
     # Time-series stub (modules may record)
     def _record_time_series_data(self):
-        pass
+        """Record comprehensive time-series data for analytics and graphing"""
+        # Skip recording if time hasn't advanced
+        if len(self.time_series_data['time']) > 0 and self.time == self.time_series_data['time'][-1]:
+            return
+            
+        # Get non-space mask for statistics
+        non_space_mask = (self.material_types != MaterialType.SPACE)
+        
+        # Temperature statistics
+        if np.any(non_space_mask):
+            temps = self.temperature[non_space_mask]
+            avg_temp = float(np.mean(temps))
+            max_temp = float(np.max(temps))
+            min_temp = float(np.min(temps))
+        else:
+            avg_temp = max_temp = min_temp = self.space_temperature
+            
+        # Pressure statistics
+        if np.any(non_space_mask):
+            pressures = self.pressure[non_space_mask]
+            avg_pressure = float(np.mean(pressures))
+            max_pressure = float(np.max(pressures))
+            min_pressure = float(np.min(pressures))
+        else:
+            avg_pressure = max_pressure = min_pressure = 0.0
+            
+        # Material composition counts
+        material_counts = {}
+        unique_materials, counts = np.unique(self.material_types, return_counts=True)
+        for material, count in zip(unique_materials, counts):
+            material_counts[material.value] = int(count)
+            
+        # Atmospheric mass (air + water vapor)
+        atmospheric_mask = ((self.material_types == MaterialType.AIR) | 
+                          (self.material_types == MaterialType.WATER_VAPOR))
+        atmospheric_mass = float(np.sum(self.density[atmospheric_mask])) if np.any(atmospheric_mask) else 0.0
+        
+        # Planet radius (distance from center to farthest non-space cell)
+        if np.any(non_space_mask):
+            non_space_coords = np.where(non_space_mask)
+            distances = np.sqrt((non_space_coords[1] - self.center_of_mass[0])**2 + 
+                              (non_space_coords[0] - self.center_of_mass[1])**2)
+            planet_radius = float(np.max(distances) * self.cell_size)
+        else:
+            planet_radius = 0.0
+            
+        # Total thermal energy
+        if np.any(non_space_mask):
+            thermal_energy = np.sum(self.density[non_space_mask] * 
+                                  self.specific_heat[non_space_mask] * 
+                                  self.temperature[non_space_mask])
+            total_energy = float(thermal_energy * (self.cell_size ** 3))  # J
+        else:
+            total_energy = 0.0
+            
+        # Record all data
+        self.time_series_data['time'].append(self.time)
+        self.time_series_data['avg_temperature'].append(avg_temp)
+        self.time_series_data['max_temperature'].append(max_temp)
+        self.time_series_data['min_temperature'].append(min_temp)
+        self.time_series_data['avg_pressure'].append(avg_pressure)
+        self.time_series_data['max_pressure'].append(max_pressure)
+        self.time_series_data['min_pressure'].append(min_pressure)
+        self.time_series_data['thermal_flux_solar'].append(self.thermal_fluxes.get('solar_input', 0.0))
+        self.time_series_data['thermal_flux_radiative'].append(self.thermal_fluxes.get('radiative_output', 0.0))
+        self.time_series_data['thermal_flux_internal'].append(self.thermal_fluxes.get('internal_heating', 0.0))
+        self.time_series_data['thermal_flux_net'].append(self.thermal_fluxes.get('net_flux', 0.0))
+        self.time_series_data['material_counts'].append(material_counts)
+        self.time_series_data['center_of_mass_x'].append(self.center_of_mass[0])
+        self.time_series_data['center_of_mass_y'].append(self.center_of_mass[1])
+        self.time_series_data['planet_radius'].append(planet_radius)
+        self.time_series_data['atmospheric_mass'].append(atmospheric_mass)
+        self.time_series_data['total_energy'].append(total_energy)
+        
+        # Trim old data to keep memory usage reasonable
+        for key in self.time_series_data:
+            if len(self.time_series_data[key]) > self.max_time_series_length:
+                self.time_series_data[key] = self.time_series_data[key][-self.max_time_series_length:]
 
     def _get_mobile_mask(self, temperature_threshold: float | None = None) -> np.ndarray:
-        """Return boolean mask of *mobile* (liquid or gas) voxels.
-
-        A voxel is considered *mobile* when its temperature exceeds
-        ``temperature_threshold`` (defaults to 800 °C in Kelvin) **and** it is
-        not SPACE.  This matches the legacy behaviour used by density
-        stratification and buoyancy routines.
-        """
+        """Get mask for mobile (liquid/gas) materials"""
         if temperature_threshold is None:
-            temperature_threshold = 800.0 + 273.15  # 800 °C expressed in Kelvin
+            temperature_threshold = 800.0 + 273.15  # Default: 800°C in Kelvin
 
-        return (self.temperature > temperature_threshold) & (self.material_types != MaterialType.SPACE)
+        return ((self.temperature > temperature_threshold) &
+                (self.material_types != MaterialType.SPACE))
+
+    def calculate_effective_density(self, temperature: np.ndarray) -> np.ndarray:
+        """Calculate temperature-dependent effective densities using thermal expansion.
+        
+        This method implements the physics formula:
+        ρ_eff = ρ₀ / (1 + β(T - T₀))
+        
+        Where:
+        - ρ₀ = reference density from material database
+        - β = volumetric thermal expansion coefficient 
+        - T = current temperature
+        - T₀ = reference temperature (273.15K)
+        
+        Args:
+            temperature: Temperature grid in Kelvin
+            
+        Returns:
+            Effective density grid accounting for thermal expansion
+        """
+        # Initialize effective density grid
+        effective_density = np.zeros_like(self.density)
+        non_space_mask = (self.material_types != MaterialType.SPACE)
+
+        if not np.any(non_space_mask):
+            return effective_density
+
+        # Get coordinates and properties for all non-space cells
+        non_space_coords = np.where(non_space_mask)
+        materials = self.material_types[non_space_coords]
+        temperatures = temperature[non_space_coords]
+        base_densities = self.density[non_space_coords]
+
+        # Vectorized thermal expansion calculation using material properties
+        # ρ_eff = ρ₀ / (1 + β(T - T₀)) where β is volumetric expansion coefficient
+        expansion_coeffs = np.array([
+            self.material_db.get_properties(mat).thermal_expansion 
+            for mat in materials.flat
+        ])
+        
+        # Calculate volumetric expansion factor
+        volumetric_expansion = 1.0 + expansion_coeffs * (temperatures - self.reference_temperature)
+        
+        # Prevent division by zero/negative and extreme values
+        volumetric_expansion = np.maximum(0.1, volumetric_expansion)
+        
+        # Calculate effective densities
+        effective_densities = base_densities / volumetric_expansion
+        effective_densities = np.maximum(0.01, effective_densities)  # Prevent negative density
+
+        # Fill the effective density grid
+        effective_density[non_space_coords] = effective_densities
+
+        return effective_density
+
+    # TODO: Implement porosity-dependent fluid flow and material properties
+    # Porosity affects:
+    # - Fluid permeability and flow rates through porous materials
+    # - Effective thermal conductivity (lower for high porosity materials)
+    # - Mechanical strength (higher porosity = lower strength)
+    # - Density calculations (effective density = (1-porosity)*solid_density + porosity*fluid_density)
+    # - Weathering rates (higher porosity = faster weathering)
+    # - Heat capacity (mixture of solid and fluid components)
+    # This would enhance realism for sedimentary rocks, pumice, and weathered materials
+
+    def _setup_planetary_conditions(self):
+        # Implementation of _setup_planetary_conditions method
+        pass

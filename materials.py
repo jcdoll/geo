@@ -22,6 +22,8 @@ class MaterialType(Enum):
     LIMESTONE = "limestone"
     SHALE = "shale"
     CONGLOMERATE = "conglomerate"
+    SAND = "sand"
+    CLAY = "clay"
     
     # Metamorphic rocks
     GNEISS = "gneiss"
@@ -58,6 +60,7 @@ class TransitionRule:
     min_pressure: float  # Minimum pressure (MPa)
     max_pressure: float  # Maximum pressure (MPa)
     description: str = ""  # Human-readable description
+    probability: float = 1.0  # Probability of the transition occurring
     
     def is_applicable(self, temperature: float, pressure: float) -> bool:
         """Check if this transition applies under given P-T conditions"""
@@ -85,12 +88,24 @@ class MaterialProperties:
         """Find the first applicable transition for given P-T conditions"""
         for transition in self.transitions:
             if transition.is_applicable(temperature, pressure):
+                # Check probability for non-guaranteed transitions
+                if transition.probability < 1.0:
+                    if np.random.random() > transition.probability:
+                        continue  # Skip this transition based on probability
                 return transition
         return None
     
     def get_all_applicable_transitions(self, temperature: float, pressure: float) -> List[TransitionRule]:
         """Find all applicable transitions for given P-T conditions (for complex phase diagrams)"""
-        return [t for t in self.transitions if t.is_applicable(temperature, pressure)]
+        applicable_transitions = []
+        for transition in self.transitions:
+            if transition.is_applicable(temperature, pressure):
+                # Check probability for non-guaranteed transitions
+                if transition.probability < 1.0:
+                    if np.random.random() > transition.probability:
+                        continue  # Skip this transition based on probability
+                applicable_transitions.append(transition)
+        return applicable_transitions
 
 class MaterialDatabase:
     """Database of material properties and transitions"""
@@ -112,7 +127,10 @@ class MaterialDatabase:
                 color_rgb=(255, 182, 193),  # Light pink - felsic igneous
                 transitions=[
                     TransitionRule(MaterialType.MAGMA, 1215, float('inf'), 0, float('inf'), "Melting to magma"),
-                    TransitionRule(MaterialType.GNEISS, 650, 1215, 200, float('inf'), "Metamorphism to gneiss")
+                    TransitionRule(MaterialType.GNEISS, 650, 1215, 200, float('inf'), "Metamorphism to gneiss"),
+                    # Weathering transitions (surface processes)
+                    TransitionRule(MaterialType.SAND, float('-inf'), float('inf'), 0, 10, "Weathering to sand", probability=0.001),
+                    TransitionRule(MaterialType.CLAY, float('-inf'), float('inf'), 0, 10, "Weathering to clay", probability=0.0005),
                 ]
             ),
             MaterialType.BASALT: MaterialProperties(
@@ -123,7 +141,10 @@ class MaterialDatabase:
                 color_rgb=(47, 79, 79),  # Dark slate gray - mafic igneous
                 transitions=[
                     TransitionRule(MaterialType.MAGMA, 1200, float('inf'), 0, float('inf'), "Melting to magma"),
-                    TransitionRule(MaterialType.SCHIST, 500, 1200, 150, float('inf'), "Metamorphism to schist")
+                    TransitionRule(MaterialType.SCHIST, 500, 1200, 150, float('inf'), "Metamorphism to schist"),
+                    # Weathering transitions (surface processes)
+                    TransitionRule(MaterialType.CLAY, float('-inf'), float('inf'), 0, 10, "Weathering to clay", probability=0.0008),
+                    TransitionRule(MaterialType.SAND, float('-inf'), float('inf'), 0, 10, "Weathering to sand", probability=0.0003),
                 ]
             ),
             MaterialType.OBSIDIAN: MaterialProperties(
@@ -166,7 +187,10 @@ class MaterialDatabase:
                 color_rgb=(238, 203, 173),  # Tan - sandstone
                 transitions=[
                     TransitionRule(MaterialType.MAGMA, 1650, float('inf'), 0, float('inf'), "Melting to magma"),
-                    TransitionRule(MaterialType.QUARTZITE, 300, 1650, 50, float('inf'), "Metamorphism to quartzite")
+                    TransitionRule(MaterialType.QUARTZITE, 300, 1650, 50, float('inf'), "Metamorphism to quartzite"),
+                    # Weathering transitions (surface processes)
+                    TransitionRule(MaterialType.SAND, float('-inf'), float('inf'), 0, 10, "Disaggregation to sand", probability=0.002),
+                    TransitionRule(MaterialType.CLAY, float('-inf'), float('inf'), 0, 10, "Cement weathering to clay", probability=0.0002),
                 ]
             ),
             MaterialType.LIMESTONE: MaterialProperties(
@@ -177,7 +201,10 @@ class MaterialDatabase:
                 color_rgb=(255, 255, 224),  # Light yellow - limestone
                 transitions=[
                     TransitionRule(MaterialType.MAGMA, 825, float('inf'), 0, float('inf'), "Melting to magma"),
-                    TransitionRule(MaterialType.MARBLE, 400, 825, 100, float('inf'), "Metamorphism to marble")
+                    TransitionRule(MaterialType.MARBLE, 400, 825, 100, float('inf'), "Metamorphism to marble"),
+                    # Weathering transitions (surface processes) 
+                    TransitionRule(MaterialType.CLAY, float('-inf'), float('inf'), 0, 10, "Insoluble residue to clay", probability=0.0006),
+                    TransitionRule(MaterialType.WATER, float('-inf'), float('inf'), 0, 10, "Chemical dissolution", probability=0.0004),
                 ]
             ),
             MaterialType.SHALE: MaterialProperties(
@@ -204,6 +231,26 @@ class MaterialDatabase:
                     TransitionRule(MaterialType.GNEISS, 600, 1500, 300, float('inf'), "High-grade metamorphism to gneiss")
                 ]
             ),
+            MaterialType.SAND: MaterialProperties(
+                density=1500, thermal_conductivity=0.8, specific_heat=800,
+                strength=5, porosity=0.4,
+                emissivity=0.9, albedo=0.35,  # High emissivity solid, moderate-high albedo (light colored)
+                thermal_expansion=3.6e-5,  # Similar to quartz
+                color_rgb=(255, 218, 185),  # Peach puff - loose sand
+                transitions=[
+                    TransitionRule(MaterialType.SANDSTONE, float('-inf'), float('inf'), 50, float('inf'), "Lithification to sandstone")
+                ]
+            ),
+            MaterialType.CLAY: MaterialProperties(
+                density=1800, thermal_conductivity=1.0, specific_heat=900,
+                strength=2, porosity=0.5,
+                emissivity=0.9, albedo=0.25,  # High emissivity solid, moderate albedo (brownish)
+                thermal_expansion=4.5e-5,  # High expansion due to clay minerals
+                color_rgb=(160, 82, 45),  # Saddle brown - clay sediment
+                transitions=[
+                    TransitionRule(MaterialType.SHALE, float('-inf'), float('inf'), 30, float('inf'), "Lithification to shale")
+                ]
+            ),
             
             # Metamorphic rocks
             MaterialType.GNEISS: MaterialProperties(
@@ -213,7 +260,10 @@ class MaterialDatabase:
                 thermal_expansion=2.7e-5,  # Volumetric expansion coefficient for gneiss
                 color_rgb=(128, 128, 128),  # Gray - high-grade metamorphic
                 transitions=[
-                    TransitionRule(MaterialType.MAGMA, 1250, float('inf'), 0, float('inf'), "Melting to magma")
+                    TransitionRule(MaterialType.MAGMA, 1250, float('inf'), 0, float('inf'), "Melting to magma"),
+                    # Weathering transitions (surface processes)
+                    TransitionRule(MaterialType.SAND, float('-inf'), float('inf'), 0, 10, "Weathering to sand", probability=0.0008),
+                    TransitionRule(MaterialType.CLAY, float('-inf'), float('inf'), 0, 10, "Weathering to clay", probability=0.0004),
                 ]
             ),
             MaterialType.SCHIST: MaterialProperties(
@@ -224,7 +274,10 @@ class MaterialDatabase:
                 color_rgb=(85, 107, 47),  # Dark olive green - medium-grade metamorphic
                 transitions=[
                     TransitionRule(MaterialType.MAGMA, 1300, float('inf'), 0, float('inf'), "Melting to magma"),
-                    TransitionRule(MaterialType.GNEISS, 700, 1300, 400, float('inf'), "High-grade metamorphism to gneiss")
+                    TransitionRule(MaterialType.GNEISS, 700, 1300, 400, float('inf'), "High-grade metamorphism to gneiss"),
+                    # Weathering transitions (surface processes)
+                    TransitionRule(MaterialType.SAND, float('-inf'), float('inf'), 0, 10, "Quartz weathering to sand", probability=0.0006),
+                    TransitionRule(MaterialType.CLAY, float('-inf'), float('inf'), 0, 10, "Mica weathering to clay", probability=0.0008),
                 ]
             ),
             MaterialType.SLATE: MaterialProperties(
@@ -236,7 +289,10 @@ class MaterialDatabase:
                 transitions=[
                     TransitionRule(MaterialType.MAGMA, 1400, float('inf'), 0, float('inf'), "Melting to magma"),
                     TransitionRule(MaterialType.SCHIST, 500, 1400, 200, float('inf'), "Metamorphism to schist"),
-                    TransitionRule(MaterialType.GNEISS, 700, 1400, 400, float('inf'), "High-grade metamorphism to gneiss")
+                    TransitionRule(MaterialType.GNEISS, 700, 1400, 400, float('inf'), "High-grade metamorphism to gneiss"),
+                    # Weathering transitions (surface processes)
+                    TransitionRule(MaterialType.CLAY, float('-inf'), float('inf'), 0, 10, "Breakdown to clay", probability=0.001),
+                    TransitionRule(MaterialType.SAND, float('-inf'), float('inf'), 0, 10, "Resistant grains to sand", probability=0.0003),
                 ]
             ),
             MaterialType.MARBLE: MaterialProperties(
@@ -270,7 +326,10 @@ class MaterialDatabase:
                 transitions=[
                     TransitionRule(MaterialType.OBSIDIAN, float('-inf'), 600, 0, 10, "Rapid cooling to obsidian (shallow/surface)"),
                     TransitionRule(MaterialType.BASALT, 600, 900, 0, 50, "Moderate cooling to basalt"),
-                    TransitionRule(MaterialType.GRANITE, 700, 1000, 50, float('inf'), "Slow deep cooling to granite")
+                    TransitionRule(MaterialType.GRANITE, 700, 1000, 50, float('inf'), "Slow deep cooling to granite"),
+                    # Convective transitions (low probability)
+                    TransitionRule(MaterialType.ANDESITE, 650, 950, 10, 100, "Convective cooling to andesite", probability=0.05),
+                    TransitionRule(MaterialType.PUMICE, 500, 700, 0, 5, "Rapid gas expansion to pumice", probability=0.05),
                 ],
                 is_solid=False  # Molten rock - rocks can sink through it
             ),
@@ -282,7 +341,9 @@ class MaterialDatabase:
                 color_rgb=(30, 144, 255),  # Dodger blue - water
                 transitions=[
                     TransitionRule(MaterialType.ICE, float('-inf'), 0, 0, float('inf'), "Freezing to ice"),
-                    TransitionRule(MaterialType.WATER_VAPOR, 100, float('inf'), 0, float('inf'), "Vaporization to water vapor")
+                    TransitionRule(MaterialType.WATER_VAPOR, 100, float('inf'), 0, float('inf'), "Vaporization to water vapor"),
+                    # Convective transitions (low probability)
+                    TransitionRule(MaterialType.WATER_VAPOR, 80, 100, 0, 0.5, "Convective evaporation", probability=0.05),
                 ],
                 is_solid=False,  # Liquid - rocks can sink through it
                 kinematic_viscosity=1e-6, rigidity_coeff=0.0
@@ -295,7 +356,9 @@ class MaterialDatabase:
                 color_rgb=(173, 216, 230),  # Light blue - ice
                 transitions=[
                     TransitionRule(MaterialType.WATER, 0, float('inf'), 0, float('inf'), "Melting to water"),
-                    TransitionRule(MaterialType.WATER_VAPOR, -10, 0, 0, 0.1, "Sublimation to water vapor")
+                    TransitionRule(MaterialType.WATER_VAPOR, -10, 0, 0, 0.1, "Sublimation to water vapor"),
+                    # Convective transitions (low probability)
+                    TransitionRule(MaterialType.WATER, -5, 5, 0, float('inf'), "Convective melting", probability=0.05),
                 ]
             ),
             MaterialType.WATER_VAPOR: MaterialProperties(
@@ -305,7 +368,10 @@ class MaterialDatabase:
                 thermal_expansion=3.7e-3,  # High volumetric expansion coefficient for gas (ideal gas law)
                 color_rgb=(192, 224, 255),  # Light blue-white - humid air/steam
                 transitions=[
-                    TransitionRule(MaterialType.WATER, float('-inf'), 100, 0, float('inf'), "Condensation to water")
+                    TransitionRule(MaterialType.WATER, float('-inf'), 100, 0, float('inf'), "Condensation to water"),
+                    # Convective transitions (low probability) 
+                    TransitionRule(MaterialType.WATER, 80, 120, 0.5, float('inf'), "Convective condensation", probability=0.05),
+                    TransitionRule(MaterialType.ICE, float('-inf'), -5, 0, float('inf'), "Convective deposition", probability=0.05),
                 ],
                 is_solid=False  # Gas - rocks can fall through it
             ),

@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from geo.simulation_engine import GeologySimulation
-from geo.materials import MaterialType
+from geo_game import GeoGame
+from materials import MaterialType
 
 def _disable_phase(sim, dotted_attr: str):
     """Replace the given dotted attribute path with a no-op lambda."""
@@ -36,7 +36,7 @@ def test_water_loss_by_phase(disabled_phase, capsys):
     assertion.
     """
     np.random.seed(0)
-    sim = GeologySimulation(50, 50, log_level="INFO")
+    sim = GeoGame(50, 50, log_level="INFO")
 
     # Deliberately poke holes (SPACE) near surface to stress leakage.
     for y in range(45, 50):
