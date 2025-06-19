@@ -397,6 +397,102 @@ F_buoy = (ρ̃_B − ρ̃_A) * g_mag * n_hat
 ```
 where `n_hat` is the outward normal from A to B. Equal and opposite forces are added to the per-cell force arrays. This continuous force approach avoids any special-case "swap because lighter" rule—cells move only when the net force exceeds their binding thresholds.
 
+---
+
+## RIGID BODY-FLUID INTERACTIONS
+
+### THEORY
+
+When rigid bodies move through fluids, they must displace the fluid volume they occupy. This creates complex interactions including pressure waves, momentum transfer, and fluid routing around obstacles. Special care is needed for scenarios where fluids are enclosed within rigid bodies (e.g., water inside a donut-shaped rock).
+
+#### Displacement Mechanics
+
+When a rigid body of volume V_rb moves with velocity v_rb through a fluid:
+
+1. **Volume Conservation**: The displaced fluid volume equals the swept volume of the rigid body
+   ```
+   V_displaced = V_rb × |v_rb| × dt
+   ```
+
+2. **Pressure Wave Generation**: The moving rigid body creates a pressure disturbance
+   ```
+   ΔP = ρ_fluid × c² × (v_rb · n) / L
+   ```
+   where c is the effective wave speed and L is the characteristic length scale
+
+3. **Momentum Transfer**: The rigid body imparts momentum to the displaced fluid
+   ```
+   Δp_fluid = M_rb × v_rb × (1 - e)
+   ```
+   where e is the coefficient of restitution (0 for perfectly inelastic)
+
+#### Enclosed Fluid Handling
+
+For rigid bodies containing enclosed fluids:
+
+1. **Composite Object Treatment**: The rigid body and its enclosed fluid move as a unit when no relative motion is possible
+
+2. **Internal Sloshing**: When acceleration exceeds threshold, internal fluid can move relative to container:
+   ```
+   a_threshold = g × sin(θ_critical)
+   ```
+   where θ_critical is the angle at which fluid begins to move
+
+3. **Pressure Equilibration**: Enclosed fluids develop internal pressure gradients based on acceleration:
+   ```
+   ∇P_internal = -ρ_fluid × (a_rb - g)
+   ```
+
+#### Multi-Phase Displacement Algorithm
+
+The displacement process follows these phases:
+
+1. **Displacement Planning**
+   - Calculate swept volume of rigid body motion
+   - Identify all fluid cells that must be displaced
+   - Compute required displacement vectors for each fluid cell
+
+2. **Pressure Propagation**
+   - Create pressure sources at rigid body leading edge
+   - Solve pressure field to find natural flow paths
+   - Use existing Poisson solver with displacement boundary conditions
+
+3. **Coordinated Movement**
+   - Execute fluid movements in order of pressure gradient
+   - Handle cascading displacements (fluid pushing fluid)
+   - Ensure volume conservation at each step
+
+4. **Enclosed Region Handling**
+   - Detect topologically enclosed regions using flood-fill
+   - Move enclosed fluids with their container
+   - Allow internal motion only when forces exceed threshold
+
+### IMPLEMENTATION
+
+The implementation uses a multi-pass algorithm to handle complex displacement scenarios:
+
+1. **Rigid Body Motion Planning** (`plan_rigid_body_motion`):
+   - Identifies which rigid body groups can move
+   - Calculates required fluid displacements
+   - Determines if motion is feasible
+
+2. **Fluid Displacement Execution** (`displace_fluids_for_rigid_body`):
+   - Creates displacement pressure field
+   - Routes fluids through available paths
+   - Handles cascading displacements
+
+3. **Enclosed Fluid Detection** (`detect_enclosed_fluids`):
+   - Uses flood-fill from rigid body boundaries
+   - Identifies disconnected fluid regions
+   - Marks fluids that must move with container
+
+4. **Momentum Conservation** (`apply_displacement_momentum`):
+   - Transfers momentum from rigid body to displaced fluids
+   - Ensures conservation laws are satisfied
+   - Applies appropriate damping
+
+The key insight is that fluid displacement is not instantaneous but propagates as a pressure wave. This allows fluids to find natural escape routes and prevents unphysical teleportation of material.
+
 AIDEV-TODO: IS THERE A MORE GENERAL WAY TO DO THIS? FOR EXAMPLE BY JUST APPLYING GRAVITY FORCE TO EVERYTHING WON'T LIGHT MATERIALS NATURALLY END UP AT THE TOP? WE SOLVE FOR THE WHOLE PRESSURE FIELD.
 
 
