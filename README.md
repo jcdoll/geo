@@ -29,33 +29,21 @@ A real-time interactive geological simulation system that models heat transfer, 
 
 ## Installation
 
-1. **Install Dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+Abbreviated instructions are as follows:
 
-2. **Run the Simulator**:
    ```bash
+   wsl --install -d Ubuntu
+   cd geo
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
    python main.py
    ```
 
 ## Usage
 
-### Basic Controls
-- **Space**: Play/Pause simulation
-- **R**: Step forward in time
-- **T**: Step backward in time
-- **1/2/3**: Switch between display modes (rocks/temperature/pressure)
-
-### Interactive Tools
-- **Left Click + Drag**: Apply selected tool to simulation
-- **Mouse Wheel**: Adjust tool radius
-- **Shift + Mouse Wheel**: Adjust tool intensity
-
-### Available Tools
-1. **Heat Source**: Add thermal energy (simulate magma intrusions)
-2. **Pressure**: Apply tectonic stress
-3. **Inspect**: View detailed cell properties
+### Controls
+Controls are printed to the terminal when you run the simulator. Press H in the simulation for complete controls help.
 
 ## Geological Processes Modeled
 
@@ -81,19 +69,33 @@ Each rock type has realistic:
 
 ## Architecture
 
-### Core Components
+### Modular Physics Engine
+The codebase uses a modular architecture with physics domains isolated in separate modules:
 
-1. **`rock_types.py`**: Rock classification system with physical properties
-2. **`simulation_engine.py`**: Main simulation engine with physics calculations
-3. **`visualizer.py`**: Interactive pygame-based visualization
-4. **`main.py`**: Entry point and user interface
+- **`geo_game.py`**: Main simulation facade, inherits from CoreState + CoreToolsMixin
+- **`core_state.py`**: Shared state and grid allocation for physics modules
+- **`core_tools.py`**: Interactive tools mixin (heat sources, pressure application)
 
-### Key Algorithms
+### Physics Modules
+Each physics domain is isolated in its own module:
+- **`heat_transfer.py`**: Heat diffusion calculations using operator splitting
+- **`fluid_dynamics.py`**: Fluid flow and material swapping
+- **`gravity_solver.py`**: Gravitational field calculations using Poisson solver
+- **`pressure_solver.py`**: Pressure field calculations
+- **`atmospheric_processes.py`**: Atmospheric physics and greenhouse effects
+- **`material_processes.py`**: Rock metamorphism and phase transitions
 
-- **Heat Diffusion**: Finite difference solution to the heat equation
-- **Pressure Calculation**: Lithostatic pressure from overlying rock weight
-- **Metamorphic Logic**: P-T phase diagrams for rock transitions
-- **Time Stepping**: Explicit forward Euler with history tracking
+### Materials System
+- **`materials.py`**: Material types, properties, and metamorphic transitions
+- **`visualizer.py`**: Interactive pygame-based visualization with multiple display modes
+
+### Key Physical Models
+
+- **Gravitational Physics**: Dynamic gravity field calculation using Poisson equation solver
+- **Heat Transfer**: Operator splitting approach with configurable radiative cooling methods
+- **Cell-Swapping Mechanics**: Physics-based material movement using force thresholds
+- **Surface Tension**: Curvature-based cohesive forces for fluid interface minimization
+- **Atmospheric Effects**: Greenhouse warming and enhanced turbulent mixing
 
 ## Examples
 
@@ -118,46 +120,12 @@ Each rock type has realistic:
 
 ## Technical Details
 
-### Performance Optimizations
-- NumPy vectorized operations for grid computations
-- Numba JIT compilation for heat diffusion kernel
-- Efficient pygame rendering with surface blitting
-- Sparse history storage for time reversal
-
-### Simulation Parameters
-- **Grid Size**: 100x60 cells (configurable)
-- **Cell Size**: 1000m (1 km per cell)
-- **Time Step**: 1000 years (adjustable)
-- **Temperature Range**: 15°C surface to 1500°C+ at depth
-- **Pressure Range**: 0.1 MPa surface to 1000+ MPa at depth
+See [PHYSICS.md](PHYSICS.md) for details.
 
 ## Testing
 
 See the [testing readme](./tests/README.md).
 
-## Limitations and Future Enhancements
-
-### Current Limitations
-- 2D simulation only (no 3D effects)
-- Simplified fluid dynamics
-- No plate tectonics simulation
-- Limited weathering and erosion
-
-### Potential Enhancements
-- Fluid flow modeling
-- Plate boundary interactions
-- Surface processes (weathering, erosion, sedimentation)
-- More complex geochemistry
-- Structural geology (faulting, folding)
-
 ## License
 
 This project is open source and available under the MIT License.
-
-## Next steps
-
-- Additional rock types and transitions
-- More sophisticated physics models
-- Better visualization and UI
-- Performance optimizations
-- Educational materials and tutorials 

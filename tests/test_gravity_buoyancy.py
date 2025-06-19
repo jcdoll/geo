@@ -45,7 +45,6 @@ class FluidGravityScenario(TestScenario):
         sim.cell_depth = 1000000.0
         sim.fluid_dynamics.velocity_threshold = False  # No velocity requirement
         sim.enable_pressure = False  # Disable pressure which interferes
-        sim.enable_surface_tension = False  # Disable surface tension which moves water upward
         
         # Clear to space
         sim.material_types.fill(MaterialType.SPACE)
@@ -156,7 +155,6 @@ class RockOnIceScenario(TestScenario):
         sim.cell_depth = 1000000.0  # Strong gravity
         sim.fluid_dynamics.velocity_threshold = False
         sim.enable_pressure = False
-        sim.enable_surface_tension = False
         
         # Clear to space
         sim.material_types.fill(MaterialType.SPACE)
@@ -276,7 +274,6 @@ class BuoyancyScenario(TestScenario):
         sim.cell_depth = 1000000.0  # Strong gravity for buoyancy
         sim.fluid_dynamics.velocity_threshold = False
         sim.enable_pressure = True  # Keep pressure for buoyancy
-        sim.enable_surface_tension = False
         
         # Clear to space
         sim.material_types.fill(MaterialType.SPACE)
@@ -393,7 +390,6 @@ def test_rock_falls_through_melted_ice():
     assert result['success'], f"Rock didn't fall through melted ice: {result['message']}"
 
 
-@pytest.mark.skip(reason="Buoyancy not working due to physics implementation issues")
 def test_air_rises_in_water():
     """Test buoyancy: air bubble rises in water."""
     scenario = BuoyancyScenario(
@@ -406,7 +402,6 @@ def test_air_rises_in_water():
     result = runner.run_headless(max_steps=50)  # Less steps needed
     assert result['success'], f"Air didn't rise in water: {result['message']}"
 
-@pytest.mark.skip(reason="Buoyancy not working due to physics implementation issues")
 def test_space_rises_in_water():
     """Test buoyancy: space (vacuum) bubble rises in water."""
     scenario = BuoyancyScenario(
@@ -419,11 +414,6 @@ def test_space_rises_in_water():
     result = runner.run_headless(max_steps=80)
     assert result['success'], f"Space bubble didn't rise in water: {result['message']}"
 
-
-
-
-
-@pytest.mark.skip(reason="Buoyancy not working due to physics implementation issues")
 def test_air_rises_in_magma():
     """Test buoyancy: air bubble rises in magma."""
     scenario = BuoyancyScenario(
@@ -437,7 +427,6 @@ def test_air_rises_in_magma():
     assert result['success'], f"Air didn't rise in magma: {result['message']}"
 
 
-@pytest.mark.skip(reason="Buoyancy not working due to physics implementation issues")
 @pytest.mark.parametrize("fluid,bubble", [
     (MaterialType.WATER, MaterialType.AIR),
     (MaterialType.WATER, MaterialType.SPACE),

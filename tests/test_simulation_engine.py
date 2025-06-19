@@ -1,8 +1,8 @@
 """Test suite for simulation engine"""
 
 import numpy as np
-from simulation_engine import GeologySimulation
-from geo.materials import MaterialType
+from geo_game import GeoGame as GeologySimulation
+from materials import MaterialType
 
 
 def test_simulation_initialization():
@@ -19,7 +19,7 @@ def test_heat_injection():
     """Inject local heat using modular HeatTransfer API"""
     sim = GeologySimulation(width=10, height=10)
     initial_temp = np.max(sim.temperature)
-    sim.heat_transfer_module.inject_heat(5, 5, 2, 1000)
+    sim.heat_transfer.inject_heat(5, 5, 2, 1000)
     new_temp = np.max(sim.temperature)
     assert new_temp > initial_temp
 
@@ -27,12 +27,12 @@ def test_heat_injection():
 def test_pressure_offset():
     """Apply localized pressure offset via FluidDynamics API"""
     sim = GeologySimulation(width=10, height=10)
-    sim.fluid_dynamics_module.calculate_planetary_pressure()
+    sim.fluid_dynamics.calculate_planetary_pressure()
     initial_pressure = np.max(sim.pressure)
 
     # Apply offset and recalculate
-    sim.fluid_dynamics_module.apply_pressure_offset(5, 5, 2, 100)
-    sim.fluid_dynamics_module.calculate_planetary_pressure()
+    sim.apply_tectonic_stress(5, 5, 2, 100)
+    sim.fluid_dynamics.calculate_planetary_pressure()
 
     new_pressure = np.max(sim.pressure)
     assert new_pressure > initial_pressure
@@ -45,8 +45,7 @@ def test_time_stepping():
     sim.step_forward()
     assert sim.time > initial_time
     
-    success = sim.step_backward()
-    assert success
+    sim.step_backward()
     assert sim.time == initial_time
 
 

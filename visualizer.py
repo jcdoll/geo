@@ -95,6 +95,17 @@ class GeologyVisualizer:
         """
         pygame.init()
         
+        # Some headless CI environments provide a minimal SDL build where
+        # ``pygame.init()`` does *not* automatically initialise the font
+        # module.  Explicitly initialise it to avoid "font not initialized"
+        # errors seen in the unit-test harness (test_visualizer_functionality).
+        try:
+            if not pygame.font.get_init():  # type: ignore[attr-defined]
+                pygame.font.init()  # type: ignore[attr-defined]
+        except Exception:
+            # Silently ignore if font sub-module absent (mocked pygame)
+            pass
+        
         self.sim_width = sim_width
         self.sim_height = sim_height
         self.window_width = window_width
@@ -1550,6 +1561,15 @@ class GeologyVisualizer:
                 btn['text'] = f'Add: {material_name}'
                 break
     
+    def print_controls(self):
+        """Print basic controls help to console"""
+        print("Basic Controls:")
+        print("• Left click + drag: Apply selected tool")
+        print("• Space: Play/Pause simulation")
+        print("• Arrow keys: Step forward/backward through time")
+        print("• Press H in the simulation for complete controls help")
+        print()
+
     def _show_controls_help(self):
         """Print complete controls help to console"""
         print("\n" + "="*60)
@@ -1652,9 +1672,9 @@ class GeologyVisualizer:
 def main():
     """Run the geology simulator"""
     print("Starting Geology Simulator...")
-    print("Press H in the simulation window for complete controls help")
     
     visualizer = GeologyVisualizer()
+    visualizer.print_controls()
     visualizer.run()
 
 if __name__ == "__main__":

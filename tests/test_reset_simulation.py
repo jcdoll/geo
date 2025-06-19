@@ -14,7 +14,7 @@ import os
 # running the tests from the project root.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from simulation_engine import GeologySimulation
+from geo_game import GeoGame as GeologySimulation
 
 
 def test_simulate_reset_simulate_workflow():

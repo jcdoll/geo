@@ -279,7 +279,7 @@ class MaterialProcesses:
                 self.sim._properties_dirty = True
     
     @staticmethod
-    def create_binding_matrix(solid_binding_force: float = 2e-4) -> tuple[np.ndarray, dict]:
+    def create_binding_matrix(solid_binding_force: float = 1e4) -> tuple[np.ndarray, dict]:
         """Create material binding matrix for force-based swapping calculations.
         
         Args:
@@ -309,7 +309,13 @@ class MaterialProcesses:
                     binding_matrix[i, j] = 0.0
                 elif (material_a in fluid_set) ^ (material_b in fluid_set):
                     # Fluid-solid interactions: half binding (SPACE counts as fluid)
-                    binding_matrix[i, j] = 0.5 * solid_binding_force
+                    # BUT: Space should have minimal binding to allow materials to fall
+                    if material_a == MaterialType.SPACE or material_b == MaterialType.SPACE:
+                        # Space-to-anything: minimal binding (allows falling)
+                        binding_matrix[i, j] = 0.0  # No binding for space interactions
+                    else:
+                        # Other fluid-solid: half binding
+                        binding_matrix[i, j] = 0.5 * solid_binding_force
                 else:
                     # Solid-solid interactions: full binding
                     binding_matrix[i, j] = solid_binding_force

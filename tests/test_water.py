@@ -547,10 +547,8 @@ def test_surface_tension_line_thickness(line_thickness):
 
 # Diagnostic tests
 PHASE_ATTRS = [
-    "fluid_dynamics_module.apply_fluid_dynamics",
-    "fluid_dynamics_module.apply_density_stratification", 
-    "fluid_dynamics_module.apply_gravitational_collapse",
-    "material_processes_module.apply_weathering",
+    "fluid_dynamics",
+    "material_processes",
 ]
 
 @pytest.mark.parametrize("disabled_phase", [None] + PHASE_ATTRS)

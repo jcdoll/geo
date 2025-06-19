@@ -9,11 +9,16 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Mock pygame before importing visualizer
+# Mock pygame and matplotlib before importing visualizer
 from unittest.mock import Mock, MagicMock, patch
 sys.modules['pygame'] = MagicMock()
 sys.modules['pygame.font'] = MagicMock()
 sys.modules['pygame.display'] = MagicMock()
+
+sys.modules['matplotlib'] = MagicMock()
+sys.modules['matplotlib.pyplot'] = MagicMock()
+sys.modules['matplotlib.backends.backend_agg'] = MagicMock()
+sys.modules['matplotlib.backends'] = MagicMock()
 
 from visualizer import GeologyVisualizer
 from geo_game import GeoGame

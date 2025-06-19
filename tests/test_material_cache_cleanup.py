@@ -8,8 +8,8 @@ that could cause unexpected material conversions.
 
 import pytest
 import numpy as np
-from simulation_engine import GeologySimulation
-from geo.materials import MaterialType
+from geo_game import GeoGame as GeologySimulation
+from materials import MaterialType
 
 
 class TestMaterialCacheCleanup:
@@ -20,10 +20,10 @@ class TestMaterialCacheCleanup:
         # Create small simulation for faster testing
         sim = GeologySimulation(10, 10)
         
-        # Add specific materials to create cache entries
-        sim.material_processes_module.paint_blob(5, 5, 2, MaterialType.BASALT)
-        sim.material_processes_module.paint_blob(3, 3, 1, MaterialType.GRANITE)
-        sim.material_processes_module.paint_blob(7, 7, 1, MaterialType.WATER)
+        # Add specific materials to create cache entries using public API
+        sim.add_material_blob(5, 5, 2, MaterialType.BASALT)
+        sim.add_material_blob(3, 3, 1, MaterialType.GRANITE)
+        sim.add_material_blob(7, 7, 1, MaterialType.WATER)
         
         # Get initial state
         initial_grid_materials = set(sim.material_types.flatten())
@@ -34,11 +34,12 @@ class TestMaterialCacheCleanup:
             "Initial cache should match grid materials"
         
         # Delete some materials
-        sim.material_processes_module.erase_blob(5, 5, 3)  # Remove basalt area
-        sim.material_processes_module.erase_blob(3, 3, 2)  # Remove granite area
+        sim.delete_material_blob(5, 5, 3)  # Remove basalt area
+        sim.delete_material_blob(3, 3, 2)  # Remove granite area
         
-        # After erase_blob the cache is refreshed immediately – no dirty flag
-        assert not sim._properties_dirty, "Cache should be clean after deletion"
+        # Deletion sets dirty flag; update material properties
+        if sim._properties_dirty:
+            sim._update_material_properties()
         
         # Run simulation step to trigger cache update
         sim.step_forward()
@@ -64,7 +65,7 @@ class TestMaterialCacheCleanup:
         sim = GeologySimulation(8, 8)
         
         # Add water at high temperature to trigger evaporation
-        sim.material_processes_module.paint_blob(4, 4, 2, MaterialType.WATER)
+        sim.add_material_blob(4, 4, 2, MaterialType.WATER)
         
         # Set high temperature to trigger phase transition
         water_mask = (sim.material_types == MaterialType.WATER)
@@ -90,8 +91,8 @@ class TestMaterialCacheCleanup:
         sim = GeologySimulation(6, 6)
         
         # Create a scenario with different density materials
-        sim.material_processes_module.paint_blob(3, 2, 1, MaterialType.GRANITE)  # Heavy
-        sim.material_processes_module.paint_blob(3, 4, 1, MaterialType.AIR)     # Light
+        sim.add_material_blob(3, 2, 1, MaterialType.GRANITE)  # Heavy
+        sim.add_material_blob(3, 4, 1, MaterialType.AIR)     # Light
         
         # Get initial state
         initial_materials = set(sim.material_types.flatten())
@@ -114,11 +115,11 @@ class TestMaterialCacheCleanup:
         # Perform many add/delete cycles
         for i in range(10):
             # Add material
-            sim.material_processes_module.paint_blob(4, 4, 1, MaterialType.BASALT)
+            sim.add_material_blob(4, 4, 1, MaterialType.BASALT)
             sim.step_forward()
             
             # Delete material
-            sim.material_processes_module.erase_blob(4, 4, 2)
+            sim.delete_material_blob(4, 4, 2)
             sim.step_forward()
             
             # Cache size should remain reasonable
@@ -129,4 +130,4 @@ class TestMaterialCacheCleanup:
                 f"Cache size ({cache_size}) should match grid materials ({grid_materials}) at cycle {i}"
             
             # Cache should not grow beyond reasonable bounds
-            assert cache_size < 20, f"Cache size ({cache_size}) is too large at cycle {i}" 
+            assert cache_size < 20, f"Cache size ({cache_size}) is too large at cycle {i}"

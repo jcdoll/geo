@@ -8,8 +8,8 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from geo.materials import MaterialType, MaterialDatabase, MaterialProperties
-from geo.materials import TransitionRule, MaterialType
+from materials import MaterialType, MaterialDatabase, MaterialProperties
+from materials import TransitionRule, MaterialType
 
 
 class TestMaterialType:

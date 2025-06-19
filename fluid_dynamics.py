@@ -27,8 +27,9 @@ class FluidDynamics:
         self.velocity_y = self.sim.velocity_y
         self.dv_thresh = 0.01  # m/s – velocity-difference threshold for swapping (reduced for surface tension)
         # Scale binding force appropriately for cell size (100m cells = 1e6 m³ volume)
-        # Rock cohesion ~1-10 MPa, so binding force should be ~1e6 to 1e7 N for 100m cell
-        self.solid_binding_force = 1e6  # N – reference cohesion between solid voxels (scaled for cell size)
+        # Rock cohesion ~1-10 MPa, so binding force density should be pressure / length scale
+        # For 100m cells: 1 MPa / 100m = 1e6 Pa / 100m = 1e4 N/m³
+        self.solid_binding_force = 1e4  # N/m³ – reference cohesion force density between solid voxels
         self.velocity_clamp = True # Enable/disable velocity clamping (enable if instability)
         self.velocity_threshold = True  # Enable/disable velocity threshold for swapping
 
@@ -40,7 +41,7 @@ class FluidDynamics:
         self._binding_matrix, self._mat_index = MaterialProcesses.create_binding_matrix(self.solid_binding_force)
     
     def calculate_planetary_pressure(self):
-        """Multigrid solve for pressure using self-gravity field plus surface tension."""
+        """Multigrid solve for pressure using self-gravity field."""
 
         # Ensure gravity field is up-to-date
         if hasattr(self.sim, 'calculate_self_gravity'):
@@ -58,10 +59,6 @@ class FluidDynamics:
 
         # Build RHS: -ρ ∇·g  (MPa units -> divide 1e6)
         rhs = (self.sim.density * div_g) / 1e6   # Pa → MPa
-
-        # Add surface tension / cohesive pressure for fluids
-        surface_tension_rhs = self._compute_surface_tension_pressure() / 1e6  # Pa → MPa
-        rhs += surface_tension_rhs
 
         # Solve Poisson
         pressure = solve_pressure(rhs, dx)
@@ -160,16 +157,14 @@ class FluidDynamics:
         # force-based binding criterion defined in `apply_force_based_swapping`.
         _t_swap_force_start = _time.perf_counter()
         
-        # Apply physics-based surface tension through local cohesive forces
-        if getattr(self.sim, 'enable_surface_tension', True):
-            surface_swaps = self.apply_physics_based_surface_tension()
-        else:
-            surface_swaps = 0
-        
         # Apply group dynamics for rigid bodies (ice, rock)
         self.apply_group_dynamics()
         
+        # First handle rigid body group movements
+        self.apply_rigid_body_movements()
+        
         # Then apply general force-based swapping for all material interactions
+        # Surface tension is now handled through forces in compute_force_field()
         self.apply_force_based_swapping()
         
         self.sim._perf_times["uk_force_swaps"] = _time.perf_counter() - _t_swap_force_start
@@ -308,32 +303,6 @@ class FluidDynamics:
         # Mark properties as dirty for recalculation
         self.sim._properties_dirty = True
 
-    # ------------------------------------------------------------------
-    # Helper: buoyancy force  F_b = (ρ_ref − ρ) g
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _compute_buoyancy_force(rho: np.ndarray,
-                                 gx: np.ndarray,
-                                 gy: np.ndarray,
-                                 *,
-                                 kernel_size: int = 3) -> Tuple[np.ndarray, np.ndarray]:
-        """Return buoyancy force components for each cell.
-
-        Parameters
-        ----------
-        rho : ndarray
-            Density field (kg/m³).
-        gx, gy : ndarray
-            Gravitational acceleration components (m/s²).
-        kernel_size : int, optional
-            Side length of the uniform filter window used to estimate the
-            local reference density.  Defaults to 3 (Moore neighbourhood).
-        """
-        rho_ref = ndimage.uniform_filter(rho, size=kernel_size, mode="nearest")
-        drho = rho_ref - rho  # positive where cell is lighter than surroundings
-        fbx = drho * gx
-        fby = drho * gy
-        return fbx, fby
 
     # ------------------------------------------------------------------
     # NEW: force-field assembly (gravity – ∇P) exposed for re-use
@@ -383,6 +352,20 @@ class FluidDynamics:
         fx += fx_pressure
         fy += fy_pressure
 
+        # NOTE: No explicit buoyancy term is added here.
+        # The body-force term ρ g together with the projection/pressure solve
+        # already reproduces Archimedean buoyancy: lighter cells accelerate
+        # upward because they are pulled down less than their heavier
+        # neighbours, and the incompressibility projection converts that
+        # imbalance into a pressure field that pushes the light phase up.
+        # Adding another (ρ_ref − ρ) g term would double-count the physics.
+
+        # Add surface tension forces if enabled
+        if getattr(self.sim, 'enable_surface_tension', False):
+            fx_st, fy_st = self._compute_surface_tension_forces()
+            fx += fx_st
+            fy += fy_st
+
         # Store for any other module this macro-step
         self.sim.force_x = fx
         self.sim.force_y = fy
@@ -396,6 +379,11 @@ class FluidDynamics:
         idx_a = self._mat_index[mt_a]
         idx_b = self._mat_index[mt_b]
         base_th = self._binding_matrix[idx_a, idx_b]
+        
+        # No special-case water/space or magma/space glue.
+        # Cohesion of fluids is provided by surface-tension forces, not by an
+        # artificial static binding threshold.  Therefore we leave `base_th`
+        # as defined in the pre-computed binding matrix.
         
         # Temperature weakening only affects bonds where at least one side is solid
         if np.isfinite(base_th) and base_th > 0:
@@ -425,6 +413,9 @@ class FluidDynamics:
         temp = self.sim.temperature
         h, w = mt.shape
         
+        # Get rigid body labels to avoid breaking them apart
+        labels, _ = self.identify_rigid_groups()
+        
         # 4-neighbour offsets only (no diagonals)
         offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)]
 
@@ -440,6 +431,10 @@ class FluidDynamics:
         # Iterate over all cells and check neighbors
         for y in range(h):
             for x in range(w):
+                # Skip if this cell is part of a rigid body group
+                if labels[y, x] > 0:
+                    continue
+                    
                 # Don't skip any cells - SPACE needs to participate in swaps too
                     
                 for dy, dx in offsets:
@@ -447,6 +442,10 @@ class FluidDynamics:
                     
                     # Check bounds
                     if ny < 0 or ny >= h or nx < 0 or nx >= w:
+                        continue
+                    
+                    # Skip if target is part of a rigid body group (unless same group)
+                    if labels[ny, nx] > 0 and labels[ny, nx] != labels[y, x]:
                         continue
                     
                     # Get forces and velocities
@@ -470,24 +469,35 @@ class FluidDynamics:
                     # Check material's self-binding (internal cohesion)
                     src_bind = self._binding_threshold(mt[y, x], mt[y, x], temp[y, x])
                     
-                    # Directional force projection
+                    # Directional force projection (force of source along neighbour direction)
                     proj_src = fsrc_x * dx + fsrc_y * dy
+                    
+                    # Directional requirement: source force must point toward the neighbour cell
+                    cond_direction = proj_src > 0
                     
                     # Check conditions for swapping:
                     # 1. Net force must overcome material binding threshold
                     # 2. Velocity difference must be significant (if threshold enabled)
                     # 3. For solids, source must overcome its own binding
                     cond_force = F_net > threshold
-                    # Use velocity threshold only if enabled
-                    cond_velocity = V_diff >= self.dv_thresh if self.velocity_threshold else True
+                    # Use velocity threshold only if enabled, but relax for fluid ↔ space/fluid interactions
+                    if self.velocity_threshold:
+                        fluid_set = {MaterialType.WATER, MaterialType.MAGMA, MaterialType.AIR, MaterialType.WATER_VAPOR, MaterialType.SPACE}
+                        if mt[y, x] in fluid_set or mt[ny, nx] in fluid_set:
+                            # No velocity gate for fluid/space interactions
+                            cond_velocity = True
+                        else:
+                            cond_velocity = V_diff >= self.dv_thresh
+                    else:
+                        cond_velocity = True
                     
-                    # For solids, also check if force can overcome binding
-                    if src_bind > 0:  # Solid material
+                    # Determine if source can overcome its own binding (solids)
+                    if src_bind > 0:
                         cond_src = abs(proj_src) > src_bind
-                    else:  # Fluid material
+                    else:
                         cond_src = True
                     
-                    if cond_force and cond_velocity and cond_src:
+                    if cond_force and cond_velocity and cond_src and cond_direction:
                         cand_src_y.append(y)
                         cand_src_x.append(x)
                         cand_tgt_y.append(ny)
@@ -505,159 +515,6 @@ class FluidDynamics:
             
             if len(src_y):
                 self._perform_material_swaps(src_y, src_x, tgt_y, tgt_x)
-
-    def apply_physics_based_surface_tension(self):
-        """Apply surface tension through local cohesive forces between fluid cells.
-        
-        This hybrid approach uses physics-based cohesive forces but processes
-        multiple cells per timestep to achieve visible effects in discrete simulations.
-        """
-        from materials import MaterialType
-        from scipy import ndimage
-        
-        mt = self.sim.material_types
-        temp = self.sim.temperature
-        h, w = mt.shape
-        
-        # Identify fluid cells
-        fluid_types = {MaterialType.WATER, MaterialType.MAGMA}
-        fluid_mask = np.zeros((h, w), dtype=bool)
-        for ftype in fluid_types:
-            fluid_mask |= (mt == ftype)
-        
-        if not np.any(fluid_mask):
-            return 0
-            
-        # Surface tension coefficient - strong for discrete cells
-        sigma_base = 50000.0  # Pa·m (from PHYSICS.md)
-        cell_size = self.sim.cell_size
-        
-        # For each fluid cell at an interface, calculate cohesive forces
-        swaps_performed = 0
-        max_swaps_per_pass = 50
-        num_passes = 3  # Multiple passes for faster evolution
-        
-        for pass_num in range(num_passes):
-            # Find interface cells fresh each pass
-            non_fluid_mask = ~fluid_mask
-            struct = np.ones((3, 3), dtype=bool)
-            non_fluid_dilated = ndimage.binary_dilation(non_fluid_mask, structure=struct)
-            interface_mask = fluid_mask & non_fluid_dilated
-            
-            interface_cells = np.where(interface_mask)
-            if len(interface_cells[0]) == 0:
-                break
-                
-            # Calculate curvature for all interface cells
-            interface_data = []
-            
-            for i in range(len(interface_cells[0])):
-                y, x = interface_cells[0][i], interface_cells[1][i]
-                
-                # Count neighbors to determine curvature
-                fluid_count = 0
-                for dy in [-1, 0, 1]:
-                    for dx in [-1, 0, 1]:
-                        if dy == 0 and dx == 0:
-                            continue
-                        ny, nx = y + dy, x + dx
-                        if 0 <= ny < h and 0 <= nx < w:
-                            if mt[ny, nx] in fluid_types:
-                                fluid_count += 1
-                
-                # Curvature: fewer neighbors = higher curvature = stronger force
-                curvature = (8 - fluid_count) / 8.0
-                
-                if curvature > 0:
-                    # Temperature adjustment
-                    T = temp[y, x]
-                    T_ref = 273.15
-                    temp_factor = max(0.1, 1.0 - (T - T_ref) / 1000.0)
-                    
-                    # Cohesive force magnitude
-                    force = sigma_base * temp_factor * curvature * cell_size / 1000.0  # Scale down
-                    
-                    interface_data.append({
-                        'y': y, 'x': x,
-                        'force': force,
-                        'curvature': curvature,
-                        'neighbors': fluid_count
-                    })
-            
-            # Sort by curvature (process highest curvature first)
-            interface_data.sort(key=lambda d: d['curvature'], reverse=True)
-            
-            # Process swaps for this pass
-            swaps_this_pass = 0
-            
-            for data in interface_data[:max_swaps_per_pass]:
-                y, x = data['y'], data['x']
-                
-                # Verify still fluid (might have been swapped)
-                if mt[y, x] not in fluid_types:
-                    continue
-                
-                # For high curvature cells, find best neighbor to swap with
-                # Prefer swapping toward other fluid cells to create compact shapes
-                best_swap = None
-                best_score = -float('inf')
-                
-                for dy in [-1, 0, 1]:
-                    for dx in [-1, 0, 1]:
-                        if dy == 0 and dx == 0:
-                            continue
-                            
-                        ny, nx = y + dy, x + dx
-                        if not (0 <= ny < h and 0 <= nx < w):
-                            continue
-                            
-                        # Only swap with space
-                        if mt[ny, nx] != MaterialType.SPACE:
-                            continue
-                        
-                        # Count how many fluid neighbors this space cell has
-                        # (excluding the source cell)
-                        space_fluid_neighbors = 0
-                        for ddy in [-1, 0, 1]:
-                            for ddx in [-1, 0, 1]:
-                                if ddy == 0 and ddx == 0:
-                                    continue
-                                nny, nnx = ny + ddy, nx + ddx
-                                if 0 <= nny < h and 0 <= nnx < w:
-                                    if mt[nny, nnx] in fluid_types and not (nny == y and nnx == x):
-                                        space_fluid_neighbors += 1
-                        
-                        # Score: prefer positions with more fluid neighbors
-                        # This creates more compact shapes
-                        score = space_fluid_neighbors - 0.1 * (abs(dy) + abs(dx))  # Slight preference for cardinal
-                        
-                        if score > best_score:
-                            best_score = score
-                            best_swap = (ny, nx)
-                
-                # Perform swap if beneficial
-                if best_swap and data['curvature'] > 0.2:  # Only swap if significant curvature
-                    ty, tx = best_swap
-                    
-                    # Check force against minimal threshold
-                    if data['force'] > 1.0:  # Minimal force threshold
-                        self._swap_cells(y, x, ty, tx, mt, temp)
-                        swaps_this_pass += 1
-                        swaps_performed += 1
-                        
-                        # Update fluid mask for this swap
-                        fluid_mask[y, x] = False
-                        fluid_mask[ty, tx] = True
-            
-            # Break if no swaps in this pass
-            if swaps_this_pass == 0:
-                break
-        
-        # Mark properties dirty if any swaps
-        if swaps_performed > 0:
-            self.sim._properties_dirty = True
-            
-        return swaps_performed
 
     def identify_rigid_groups(self):
         """Identify connected components of rigid materials (ice, rock, etc.)
@@ -703,45 +560,36 @@ class FluidDynamics:
         for group_id in range(1, num_groups + 1):
             group_mask = (labels == group_id)
             
-            # Skip very small groups
+            # Don't skip small groups - even single cells should fall
             group_size = np.sum(group_mask)
-            if group_size < 4:  # Less than 2x2 block
+            if group_size == 0:
                 continue
             
             # Calculate group properties
             group_coords = np.where(group_mask)
             # Use cell_depth for proper 3D mass calculation
             cell_volume = self.sim.cell_size ** 2 * self.sim.cell_depth
-            group_mass = np.sum(self.sim.density[group_mask]) * cell_volume
+            
+            # Get material densities for the group
+            group_densities = np.zeros(group_size)
+            for i, (y, x) in enumerate(zip(*group_coords)):
+                mat = self.sim.material_types[y, x]
+                mat_props = self.sim.material_db.get_properties(mat)
+                group_densities[i] = mat_props.density
+            
+            group_mass = np.sum(group_densities) * cell_volume
             
             # Calculate center of mass of the group
-            com_y = np.average(group_coords[0], weights=self.sim.density[group_mask])
-            com_x = np.average(group_coords[1], weights=self.sim.density[group_mask])
+            com_y = np.average(group_coords[0], weights=group_densities)
+            com_x = np.average(group_coords[1], weights=group_densities)
             
-            # Calculate net force on group
+            # Calculate net force on group using force density
             if hasattr(self.sim, 'force_x') and hasattr(self.sim, 'force_y'):
-                net_force_x = np.sum(self.sim.force_x[group_mask])
-                net_force_y = np.sum(self.sim.force_y[group_mask])
+                # Force density is already in N/m³, multiply by cell volume for total force
+                net_force_x = np.sum(self.sim.force_x[group_mask]) * cell_volume
+                net_force_y = np.sum(self.sim.force_y[group_mask]) * cell_volume
             else:
                 continue
-            
-            # Calculate net buoyancy (important for floating ice)
-            buoyancy_y = 0
-            for y, x in zip(*group_coords):
-                # Check if cell is adjacent to fluid
-                neighbors = [(y-1,x), (y+1,x), (y,x-1), (y,x+1)]
-                for ny, nx in neighbors:
-                    if (0 <= ny < self.sim.height and 0 <= nx < self.sim.width and
-                        self.sim.material_types[ny, nx] == MaterialType.WATER):
-                        # Simplified buoyancy based on density difference
-                        water_density = self.sim.density[ny, nx]
-                        ice_density = self.sim.density[y, x]
-                        if water_density > ice_density:
-                            # Use cell_depth for proper 3D force calculation
-                            cell_volume = self.sim.cell_size ** 2 * self.sim.cell_depth
-                            buoyancy_y -= (water_density - ice_density) * 9.81 * cell_volume
-            
-            net_force_y += buoyancy_y
             
             # Update group velocity
             if group_mass > 0:
@@ -753,17 +601,179 @@ class FluidDynamics:
                 self.velocity_x[group_mask] += accel_x * dt
                 self.velocity_y[group_mask] += accel_y * dt
                 
-                # Apply damping to prevent instability
-                self.velocity_x[group_mask] *= 0.95
-                self.velocity_y[group_mask] *= 0.95
+                # Apply damping to prevent instability (reduced from 0.95)
+                damping = 0.98  # Less damping to allow motion
+                self.velocity_x[group_mask] *= damping
+                self.velocity_y[group_mask] *= damping
                 
-                # Check if group can move (simplified - just check if velocity is significant)
+                # Get average velocity for the group
                 avg_vel_x = np.mean(self.velocity_x[group_mask])
                 avg_vel_y = np.mean(self.velocity_y[group_mask])
                 
-                if np.abs(avg_vel_x) > 0.1 or np.abs(avg_vel_y) > 0.1:
-                    # Attempt to move entire group
-                    self._attempt_group_move(group_mask, avg_vel_x, avg_vel_y)
+                # Debug output for testing
+                if abs(net_force_x) > 0 or abs(net_force_y) > 0:
+                    if getattr(self.sim, 'debug_rigid_bodies', False):
+                        print(f"Group {group_id}: size={group_size}, F=({net_force_x:.1e},{net_force_y:.1e}), v=({avg_vel_x:.2f},{avg_vel_y:.2f})")
+    
+    def apply_rigid_body_movements(self):
+        """Move rigid body groups as coherent units based on net forces.
+        
+        This ensures rocks, ice, etc. fall and move as single objects rather than
+        breaking apart cell by cell.
+        """
+        # Get rigid body groups
+        labels, num_groups = self.identify_rigid_groups()
+        
+        if num_groups == 0:
+            return
+            
+        mt = self.sim.material_types
+        h, w = mt.shape
+        
+        # Track which cells have already been moved to avoid double-swapping
+        moved_mask = np.zeros((h, w), dtype=bool)
+        
+        # Process each rigid group
+        for group_id in range(1, num_groups + 1):
+            group_mask = (labels == group_id)
+            
+            # Skip if any cell in group has already moved
+            if np.any(moved_mask[group_mask]):
+                continue
+                
+            group_coords = np.where(group_mask)
+            group_size = len(group_coords[0])
+            
+            if group_size == 0:
+                continue
+            
+            # Get material densities and calculate total force on group
+            cell_volume = self.sim.cell_size ** 2 * self.sim.cell_depth
+            total_force_x = 0.0
+            total_force_y = 0.0
+            total_mass = 0.0
+            
+            for y, x in zip(*group_coords):
+                # Get force density and convert to total force
+                force_x = self.sim.force_x[y, x] * cell_volume
+                force_y = self.sim.force_y[y, x] * cell_volume
+                total_force_x += force_x
+                total_force_y += force_y
+                
+                # Get mass
+                mat = mt[y, x]
+                mat_props = self.sim.material_db.get_properties(mat)
+                mass = mat_props.density * cell_volume
+                total_mass += mass
+            
+            # Skip if no significant net force
+            force_magnitude = np.hypot(total_force_x, total_force_y)
+            if force_magnitude < 1e-10:
+                continue
+                
+            # Determine movement direction based on force
+            # For discrete grid, we can only move in 8 directions
+            force_angle = np.arctan2(total_force_y, total_force_x)
+            
+            # Quantize to nearest 45-degree direction
+            directions = [
+                (1, 0),   # East
+                (1, 1),   # Southeast  
+                (0, 1),   # South
+                (-1, 1),  # Southwest
+                (-1, 0),  # West
+                (-1, -1), # Northwest
+                (0, -1),  # North
+                (1, -1),  # Northeast
+            ]
+            
+            # Find best direction
+            best_dir = None
+            best_dot = -1
+            force_unit_x = total_force_x / force_magnitude
+            force_unit_y = total_force_y / force_magnitude
+            
+            for dx, dy in directions:
+                dot = dx * force_unit_x + dy * force_unit_y
+                if dot > best_dot:
+                    best_dot = dot
+                    best_dir = (dx, dy)
+            
+            if best_dir is None or best_dot < 0.5:  # Require reasonable alignment
+                continue
+                
+            dx, dy = best_dir
+            
+            # Check if entire group can move in this direction
+            can_move = True
+            target_cells = []
+            
+            for y, x in zip(*group_coords):
+                ny, nx = y + dy, x + dx
+                
+                # Check bounds
+                if ny < 0 or ny >= h or nx < 0 or nx >= w:
+                    can_move = False
+                    break
+                    
+                target_cells.append((ny, nx))
+                
+                # Check if target is empty (space) or same group
+                target_mat = mt[ny, nx]
+                if target_mat != MaterialType.SPACE and not group_mask[ny, nx]:
+                    # Check if we can push through this material
+                    # Need to overcome binding between group material and target
+                    group_mat = mt[y, x]
+                    temp_avg = 0.5 * (self.sim.temperature[y, x] + self.sim.temperature[ny, nx])
+                    binding = self._binding_threshold(group_mat, target_mat, temp_avg)
+                    
+                    # Force per interface cell
+                    force_per_cell = force_magnitude / group_size
+                    
+                    if force_per_cell <= binding:
+                        can_move = False
+                        break
+            
+            if not can_move:
+                continue
+                
+            # Perform the group move
+            # First, collect all source and target data
+            src_materials = []
+            src_temps = []
+            src_ages = []
+            src_vx = []
+            src_vy = []
+            
+            for y, x in zip(*group_coords):
+                src_materials.append(mt[y, x])
+                src_temps.append(self.sim.temperature[y, x])
+                src_ages.append(self.sim.age[y, x])
+                src_vx.append(self.velocity_x[y, x])
+                src_vy.append(self.velocity_y[y, x])
+                
+            # Clear source positions (replace with space)
+            for y, x in zip(*group_coords):
+                mt[y, x] = MaterialType.SPACE
+                self.sim.temperature[y, x] = self.sim.space_temperature
+                self.velocity_x[y, x] = 0
+                self.velocity_y[y, x] = 0
+                moved_mask[y, x] = True
+                
+            # Place at target positions
+            for i, (ny, nx) in enumerate(target_cells):
+                mt[ny, nx] = src_materials[i]
+                self.sim.temperature[ny, nx] = src_temps[i]
+                self.sim.age[ny, nx] = src_ages[i]
+                self.velocity_x[ny, nx] = src_vx[i]
+                self.velocity_y[ny, nx] = src_vy[i]
+                moved_mask[ny, nx] = True
+                
+            # Mark properties dirty
+            self.sim._properties_dirty = True
+            
+            if getattr(self.sim, 'debug_rigid_bodies', False):
+                print(f"Moved rigid body group {group_id} ({group_size} cells) by ({dx}, {dy})")
     
     def _attempt_group_move(self, group_mask, vel_x, vel_y):
         """Attempt to move an entire group of cells based on velocity.
@@ -850,6 +860,66 @@ class FluidDynamics:
             self.sim.age[y1, x1] = self.sim.age[y2, x2]
             self.sim.age[y2, x2] = age_temp
 
+    def _compute_surface_tension_forces(self):
+        """Return surface-tension force density arrays (fx, fy).
+
+        Method
+        ------
+        We treat the colour function *c* as a smoothed indicator (1 = fluid,
+        0 = ambient).  With
+
+            n  = ∇c / |∇c|                (interface normal, points outwards)
+            κ  = ∇·n                      (curvature)
+
+        the continuum force per unit volume is
+
+            **f** = σ κ n |∇c|
+
+        where |∇c|≈δ_s is non-zero only in the diffuse interface.  This form
+        guarantees equal-and-opposite forces on the two sides → net zero linear
+        momentum.  Everything is computed with central differences and NumPy
+        vectorisation – no Python loops.
+        """
+
+        from materials import MaterialType
+        from scipy import ndimage
+
+        # ------------------------------------------------------------------
+        # Parameters
+        # ------------------------------------------------------------------
+        sigma_phys = 0.072                    # N m⁻¹ (water @ 20 °C)
+        boost = getattr(self.sim, "surface_tension_scale", 1.0)  # allow tests to exaggerate
+        sigma = sigma_phys * boost
+
+        mt = self.sim.material_types
+        fluid_mask = (mt == MaterialType.WATER) | (mt == MaterialType.MAGMA)
+
+        if not np.any(fluid_mask):
+            z = np.zeros_like(self.sim.density)
+            return z, z
+
+        # Smooth indicator 0…1 (Gaussian blur eliminates stair-step artefacts)
+        c = ndimage.gaussian_filter(fluid_mask.astype(float), sigma=1.0, mode="nearest")
+
+        dx = self.sim.cell_size
+
+        # Colour-function gradients → interface normals
+        dc_dy, dc_dx = np.gradient(c, dx)
+        mag = np.hypot(dc_dx, dc_dy) + 1e-12
+        nx = dc_dx / mag
+        ny = dc_dy / mag
+
+        # Curvature κ = ∂n_x/∂x + ∂n_y/∂y
+        dnxdx = np.gradient(nx, dx, axis=1)
+        dnydy = np.gradient(ny, dx, axis=0)
+        kappa = dnxdx + dnydy
+
+        # Surface-tension force density  f = σ κ n |∇c|
+        fx_st = sigma * kappa * nx * mag
+        fy_st = sigma * kappa * ny * mag
+
+        return fx_st, fy_st
+    
     def _compute_surface_tension_pressure(self):
         """Compute surface tension pressure source term for fluids at interfaces.
         

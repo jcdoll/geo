@@ -8,7 +8,15 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pygame
+import pytest
+
+# Gracefully skip if optional GUI deps are missing
+try:
+    import pygame  # type: ignore
+    import matplotlib  # type: ignore
+except ModuleNotFoundError:
+    pytest.skip("pygame/matplotlib not available – skipping GUI tests", allow_module_level=True)
+
 from visualizer import GeologyVisualizer
 from tests.test_framework import ScenarioRunner
 

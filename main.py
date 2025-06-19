@@ -27,15 +27,6 @@ if __name__ == "__main__":
     print("• Forward and backward time stepping")
     print("• Multiple visualization modes (materials, temperature, pressure, power)")
     print()
-    print("Basic Controls:")
-    print("• Left click + drag: Apply selected tool")
-    print("• Space: Play/Pause simulation")
-    print("• Arrow keys: Step forward/backward through time")
-    print("• Press H in the simulation for complete controls help")
-    print()
-    print("Starting simulation...")
-    print()
-    
     try:
         main()
     except KeyboardInterrupt:

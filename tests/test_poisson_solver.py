@@ -5,8 +5,8 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from simulation_engine import GeologySimulation
-from geo.materials import MaterialType
+from geo_game import GeoGame as GeologySimulation
+from materials import MaterialType
 import pytest
 
 

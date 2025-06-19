@@ -115,6 +115,8 @@ class ScenarioRunner:
         self.sim = None
         self.step_count = 0
         self.evaluation_history = []
+        # ModuleDisabler now works without sim; instantiate early so tests can register phases
+        self.module_disabler = ModuleDisabler()
         
     def setup(self) -> GeoGame:
         """Create simulation and set up the scenario."""
@@ -126,6 +128,9 @@ class ScenarioRunner:
             quality=1, 
             log_level="WARNING"
         )
+        
+        # Bind the real simulation now
+        self.module_disabler.attach_sim(self.sim)
         
         # Let scenario configure it
         self.scenario.setup(self.sim)
@@ -209,16 +214,36 @@ class ScenarioRunner:
 
 
 class ModuleDisabler:
-    """Context manager for temporarily disabling simulation modules."""
-    
-    def __init__(self, sim: GeoGame, disable_modules: Optional[List[str]] = None):
-        """Initialize with simulation and modules to disable."""
+    """Context-manager that turns off expensive/unstable physics phases.
+
+    Tests sometimes create a ``ScenarioRunner`` *first* (to register phases to
+    disable) *before* the actual ``GeoGame`` instance exists.  To accommodate
+    that workflow the ``sim`` argument is now optional; it can be bound later
+    via :py:meth:`attach_sim` or by the runner after it calls ``setup()``.
+    """
+
+    def __init__(self, sim: Optional[GeoGame] = None, disable_modules: Optional[List[str]] = None):
+        self.sim: Optional[GeoGame] = sim
+        self.disable_modules: list[str] = list(disable_modules) if disable_modules else []
+        self.original_states: dict[str, Any] = {}
+
+    # ------------------------------------------------------------------
+    # Public helpers
+    # ------------------------------------------------------------------
+    def add_disabled_phase(self, phase: str):
+        """Register an additional phase (e.g. ``"fluid_dynamics"``) to disable."""
+        if phase not in self.disable_modules:
+            self.disable_modules.append(phase)
+
+    def attach_sim(self, sim: GeoGame):
+        """Bind the actual simulation object once it has been created."""
         self.sim = sim
-        self.disable_modules = disable_modules or []
-        self.original_states = {}
-        
+
     def __enter__(self):
         """Disable specified modules."""
+        if self.sim is None:
+            raise RuntimeError("ModuleDisabler used without a bound simulation. Call attach_sim() first.")
+
         for module in self.disable_modules:
             if module == 'heat_transfer':
                 self._disable_heat_transfer()
@@ -233,6 +258,9 @@ class ModuleDisabler:
         
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Restore original module states."""
+        if self.sim is None:
+            return False  # nothing to restore
+
         for attr, value in self.original_states.items():
             if '.' in attr:  # Handle nested attributes
                 obj_path, attr_name = attr.rsplit('.', 1)

@@ -146,14 +146,6 @@ python tests/run_visual_tests.py magma_containment --variant large
 python tests/run_visual_tests.py water_phase --disabled-phase fluid_dynamics
 ```
 
-### Visual Controls
-
-When running visually:
-- **SPACE**: Play/Pause simulation
-- **R**: Step forward one frame
-- **S**: Save screenshot
-- **ESC**: Exit
-
 ## Available Scenarios
 
 Run `python tests/run_visual_tests.py --list` to see all available scenarios.

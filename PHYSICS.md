@@ -434,84 +434,52 @@ Where:
 
 ## SURFACE TENSION
 
-**Status**: Implemented with physics-based cohesive force model achieving 50-100+ swaps per timestep.
+The simulation now follows the continuum surface-force (CSF) model.
 
-Surface tension minimizes the surface area of fluid-vacuum interfaces through cohesive forces between fluid particles. This is now implemented using local curvature-based forces that allow bulk interface processing.
+Notation (2-D slab):
 
-### Physical Model
+*  c(x,y)       smoothed colour function – 1 inside fluid, 0 outside
+*  n             interface normal   n = ∇c / |∇c|
+*  κ             curvature           κ = ∇·n (positive for convex fluid)
+*  σ             surface tension coefficient (N m⁻¹).  For water σ≈0.072 but we expose
+                 `surface_tension_scale` so tests may exaggerate it.
 
-Surface tension emerges from cohesive forces between fluid cells:
+The volumetric force density acting only in the diffuse interface is
+
 ```
-F_cohesion = σ × (n_max - n_current) × direction_to_neighbors
-```
-
-Where:
-- `σ` = surface tension strength coefficient
-- `n_max` = maximum possible neighbors (8 for 2D grid)
-- `n_current` = current count of fluid neighbors
-- Cells with fewer neighbors (higher curvature) experience stronger inward forces
-
-### Implementation: Physics-Based Bulk Processing
-
-The new `apply_physics_based_surface_tension()` method processes entire interfaces simultaneously:
-
-1. **Interface Detection**: Identify all fluid cells adjacent to vacuum/space
-2. **Curvature Calculation**: Count fluid neighbors for each interface cell
-   - 1-2 neighbors = high curvature (sharp protrusion)
-   - 3-5 neighbors = moderate curvature 
-   - 6-8 neighbors = low curvature (flat or internal)
-3. **Multi-Pass Processing**: Up to 3 passes of 50 swaps each per timestep
-4. **Smart Target Selection**:
-   - Find vacuum cells with most fluid neighbors (gaps to fill)
-   - Move high-curvature fluid cells to low-curvature positions
-   - Preserve momentum during swaps
-
-### Performance Improvements
-
-**Previous Limitations**:
-- Only 3 swaps per timestep (sequential processing)
-- Ad-hoc shape analysis (aspect ratios, COM calculations)
-- No physical basis for movement decisions
-
-**Current Performance**:
-- 50-100+ swaps per timestep (bulk parallel processing)
-- Physics-based curvature forces drive motion
-- Water line collapses from 20:1 to ~2:1 aspect ratio in 10 steps
-- Momentum-conserving material swaps
-- Natural emergence of circular shapes from local rules
-
-### Force-Based Integration
-
-Surface tension is integrated with the unified kinematics system:
-
-```python
-# Calculate effective surface tension force
-curvature = 8 - num_fluid_neighbors  # 0-7 scale
-F_surface_tension = strength * curvature * direction_to_center
-
-# Combined with other forces
-F_total = F_gravity + F_buoyancy + F_surface_tension
-
-# Swap when total force exceeds binding threshold
-if |F_total| > binding_threshold:
-    perform_swap()
+    f = σ κ n |∇c|
 ```
 
-### Key Technical Details
+Implementation steps (all vectorised):
 
-1. **Parallel Processing**: Process all interface cells simultaneously rather than sequentially
-2. **Curvature-Based Priority**: High-curvature cells (protrusions) move first
-3. **Gap Filling**: Actively identify and fill interior gaps in fluid bodies
-4. **Momentum Conservation**: Swap velocities along with materials
-5. **No Hard-Coded Shapes**: Circular/spherical shapes emerge naturally from local curvature minimization
+1.  Compute a **Gaussian-smoothed indicator** `c = gaussian_filter(mask, σ=1)`.
+    The 1-cell blur gives the interface a finite thickness so |∇c| ≈ δₛ.
+2.  Central differences → `dc/dx`, `dc/dy` then normal `n`.
+3.  Divergence of the normal → curvature κ.
+4.  Body-force arrays `fx, fy` are
+   `σ * κ * n_x * |∇c|` and `σ * κ * n_y * |∇c|`.
+5.  These forces are added **with opposite sign on the two sides of the
+    interface**, therefore the global momentum sum is identically zero; the
+    resulting motion is pure surface-energy minimisation.
 
-### Remaining Challenges
+No extra "surface-tension pressure" source is needed and has been removed –
+adding both would double count.
 
-1. **Discrete Grid Effects**: Some water conservation issues (~10-15% loss) due to discrete swapping
-2. **Lateral Movement**: Sometimes needs encouragement through gap-filling logic
-3. **Competition with Settling**: Gravity settling can interfere with surface tension reshaping
+Practical notes
+---------------
 
----
+*  The method works for any mixture of fluids.  We currently enable it for
+   WATER and MAGMA.  AIR is treated as part of the ambient phase; SPACE has
+   |∇c| = 0 so it exerts no forces of its own.
+*  Momentum conservation is automatic – the discrete
+   force field satisfies `Σ f ΔV = 0` up to round-off.
+*  The characteristic capillary time-step is
+
+```
+    Δt_cap ≈ √(ρ Δx³ / σ)
+```
+
+  Keep the solver CFL clamp if you increase `surface_tension_scale` in tests.
 
 ## HEAT TRANSFER PHYSICS
 

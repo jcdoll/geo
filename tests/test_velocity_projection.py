@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from geo.core_state import CoreState as GeologySimulation
-from geo.materials import MaterialType
+from core_state import CoreState as GeologySimulation
+from materials import MaterialType
 
 
 dx_default = 50.0  # Shared cell size used across tests
