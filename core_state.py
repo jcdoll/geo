@@ -46,12 +46,16 @@ class CoreState:
         height: int,
         *,
         cell_size: float = 50.0,
+        cell_depth: Optional[float] = None,
         quality: int = 1,
         log_level: str | int = "INFO",
     ) -> None:
         self.width = width
         self.height = height
         self.cell_size = float(cell_size)
+        
+        # Cell depth for 2.5D simulation (default: simulation width)
+        self.cell_depth = float(cell_depth) if cell_depth is not None else float(width * cell_size)
 
         # ---------- logger -------------------------------------------------
         self.logger = logging.getLogger(f"GeoGame_{id(self)}")
@@ -323,15 +327,53 @@ class CoreState:
     def _dedupe_swap_pairs(self, src_y, src_x, tgt_y, tgt_x):
         if len(src_y) == 0:
             return src_y, src_x, tgt_y, tgt_x
-        src_flat = src_y * self.width + src_x
-        tgt_flat = tgt_y * self.width + tgt_x
-        combined = np.concatenate([src_flat, tgt_flat])
-        unique_cells, counts = np.unique(combined, return_counts=True)
-        conflict_cells = unique_cells[counts > 1]
-        conflict_src = np.isin(src_flat, conflict_cells)
-        conflict_tgt = np.isin(tgt_flat, conflict_cells)
-        keep = ~(conflict_src | conflict_tgt)
-        return src_y[keep], src_x[keep], tgt_y[keep], tgt_x[keep]
+        
+        # Calculate force differences for each swap to prioritize
+        if hasattr(self, 'force_x') and hasattr(self, 'force_y'):
+            fx, fy = self.force_x, self.force_y
+            force_diffs = []
+            for i in range(len(src_y)):
+                fsrc_x = fx[src_y[i], src_x[i]]
+                fsrc_y = fy[src_y[i], src_x[i]]
+                ftgt_x = fx[tgt_y[i], tgt_x[i]]
+                ftgt_y = fy[tgt_y[i], tgt_x[i]]
+                dFx = fsrc_x - ftgt_x
+                dFy = fsrc_y - ftgt_y
+                F_net = np.hypot(dFx, dFy)
+                force_diffs.append(F_net)
+            force_diffs = np.array(force_diffs)
+            
+            # Sort by force magnitude (highest first)
+            priority_order = np.argsort(force_diffs)[::-1]
+        else:
+            # No forces available, use random order
+            priority_order = np.arange(len(src_y))
+            np.random.shuffle(priority_order)
+        
+        # Process swaps in priority order, marking cells as used
+        used_cells = set()
+        keep_indices = []
+        
+        for idx in priority_order:
+            src_cell = (src_y[idx], src_x[idx])
+            tgt_cell = (tgt_y[idx], tgt_x[idx])
+            
+            # Skip if either cell is already used
+            if src_cell in used_cells or tgt_cell in used_cells:
+                continue
+            
+            # Mark cells as used and keep this swap
+            used_cells.add(src_cell)
+            used_cells.add(tgt_cell)
+            keep_indices.append(idx)
+        
+        # Convert back to arrays
+        keep_indices = np.array(keep_indices)
+        if len(keep_indices) > 0:
+            return src_y[keep_indices], src_x[keep_indices], tgt_y[keep_indices], tgt_x[keep_indices]
+        else:
+            return np.array([], dtype=src_y.dtype), np.array([], dtype=src_x.dtype), \
+                   np.array([], dtype=tgt_y.dtype), np.array([], dtype=tgt_x.dtype)
 
     # ------------------------------------------------------------------
     #  Derived material properties
@@ -389,7 +431,9 @@ class CoreState:
             self.center_of_mass = (self.width / 2, self.height / 2)
             return
         yy, xx = np.where(matter_mask)
-        cell_volume = self.cell_size ** 2
+        
+        # Use cell_depth for proper 3D mass calculation
+        cell_volume = self.cell_size ** 2 * self.cell_depth
         masses = self.density[matter_mask] * cell_volume
         total_mass = np.sum(masses)
         if total_mass > 0:
@@ -466,7 +510,9 @@ class CoreState:
             thermal_energy = np.sum(self.density[non_space_mask] * 
                                   self.specific_heat[non_space_mask] * 
                                   self.temperature[non_space_mask])
-            total_energy = float(thermal_energy * (self.cell_size ** 3))  # J
+            # Use cell_depth for proper 3D volume
+            cell_volume = self.cell_size ** 2 * self.cell_depth
+            total_energy = float(thermal_energy * cell_volume)  # J
         else:
             total_energy = 0.0
             

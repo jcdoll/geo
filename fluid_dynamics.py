@@ -29,7 +29,8 @@ class FluidDynamics:
         # Scale binding force appropriately for cell size (100m cells = 1e6 m³ volume)
         # Rock cohesion ~1-10 MPa, so binding force should be ~1e6 to 1e7 N for 100m cell
         self.solid_binding_force = 1e6  # N – reference cohesion between solid voxels (scaled for cell size)
-        self.velocity_clamp = False # Enable/disable velocity clamping (enable if instability)
+        self.velocity_clamp = True # Enable/disable velocity clamping (enable if instability)
+        self.velocity_threshold = True  # Enable/disable velocity threshold for swapping
 
         # Create binding matrix using material processes helper
         try:
@@ -160,7 +161,10 @@ class FluidDynamics:
         _t_swap_force_start = _time.perf_counter()
         
         # Apply physics-based surface tension through local cohesive forces
-        surface_swaps = self.apply_physics_based_surface_tension()
+        if getattr(self.sim, 'enable_surface_tension', True):
+            surface_swaps = self.apply_physics_based_surface_tension()
+        else:
+            surface_swaps = 0
         
         # Apply group dynamics for rigid bodies (ice, rock)
         self.apply_group_dynamics()
@@ -277,7 +281,8 @@ class FluidDynamics:
             # Get masses (density * cell volume)
             src_density = self.sim.density[src_y, src_x]
             tgt_density = self.sim.density[tgt_y, tgt_x]
-            cell_volume = self.sim.cell_size ** 2  # 2D simulation
+            # Use cell_depth for proper 3D mass calculation
+            cell_volume = self.sim.cell_size ** 2 * self.sim.cell_depth
             
             src_mass = src_density * cell_volume
             tgt_mass = tgt_density * cell_volume
@@ -334,7 +339,11 @@ class FluidDynamics:
     # NEW: force-field assembly (gravity – ∇P) exposed for re-use
     # ------------------------------------------------------------------
     def compute_force_field(self):
-        """Assemble net body force F = ρ g − ∇P and store on the simulation."""
+        """Assemble net body force density f = ρ g − ∇P and store on the simulation.
+        
+        Returns force density (N/m³), not total force. This is more numerically stable
+        and makes material binding thresholds scale-independent.
+        """
         rho = self.sim.density
 
         # Ensure gravity is up-to-date
@@ -350,7 +359,7 @@ class FluidDynamics:
                 gx_total = gx_total + g_ext_x
                 gy_total = gy_total + g_ext_y
 
-        # Gravity term
+        # Gravity term - force density (N/m³)
         fx = rho * gx_total
         fy = rho * gy_total
 
@@ -362,7 +371,7 @@ class FluidDynamics:
         fx_pressure = np.zeros_like(fx)
         fy_pressure = np.zeros_like(fy)
 
-        # X-direction forces
+        # X-direction forces - pressure gradient (force density N/m³)
         fx_pressure[:, :-1] -= (P_pa[:, :-1] - P_pa[:, 1:]) / dx  # interface with east neighbour
         fx_pressure[:, 1:]  += (P_pa[:, :-1] - P_pa[:, 1:]) / dx  # equal & opposite on west side
 
@@ -427,14 +436,11 @@ class FluidDynamics:
 
         # Helper uses existing _binding_threshold against a reference solid (granite)
         from materials import MaterialType  # local import to avoid circular
-        _ref_solid = MaterialType.GRANITE
 
         # Iterate over all cells and check neighbors
         for y in range(h):
             for x in range(w):
-                # Skip space cells as sources
-                if mt[y, x] == MaterialType.SPACE:
-                    continue
+                # Don't skip any cells - SPACE needs to participate in swaps too
                     
                 for dy, dx in offsets:
                     ny, nx = y + dy, x + dx
@@ -461,17 +467,19 @@ class FluidDynamics:
                     
                     # For solid materials, check if source can overcome its own binding
                     # For fluid materials, binding is typically 0
-                    src_bind = self._binding_threshold(mt[y, x], _ref_solid, temp[y, x])
+                    # Check material's self-binding (internal cohesion)
+                    src_bind = self._binding_threshold(mt[y, x], mt[y, x], temp[y, x])
                     
                     # Directional force projection
                     proj_src = fsrc_x * dx + fsrc_y * dy
                     
                     # Check conditions for swapping:
                     # 1. Net force must overcome material binding threshold
-                    # 2. Velocity difference must be significant
+                    # 2. Velocity difference must be significant (if threshold enabled)
                     # 3. For solids, source must overcome its own binding
                     cond_force = F_net > threshold
-                    cond_velocity = V_diff >= self.dv_thresh
+                    # Use velocity threshold only if enabled
+                    cond_velocity = V_diff >= self.dv_thresh if self.velocity_threshold else True
                     
                     # For solids, also check if force can overcome binding
                     if src_bind > 0:  # Solid material
@@ -702,7 +710,9 @@ class FluidDynamics:
             
             # Calculate group properties
             group_coords = np.where(group_mask)
-            group_mass = np.sum(self.sim.density[group_mask]) * self.sim.cell_size**2
+            # Use cell_depth for proper 3D mass calculation
+            cell_volume = self.sim.cell_size ** 2 * self.sim.cell_depth
+            group_mass = np.sum(self.sim.density[group_mask]) * cell_volume
             
             # Calculate center of mass of the group
             com_y = np.average(group_coords[0], weights=self.sim.density[group_mask])
@@ -727,7 +737,9 @@ class FluidDynamics:
                         water_density = self.sim.density[ny, nx]
                         ice_density = self.sim.density[y, x]
                         if water_density > ice_density:
-                            buoyancy_y -= (water_density - ice_density) * 9.81 * self.sim.cell_size**2
+                            # Use cell_depth for proper 3D force calculation
+                            cell_volume = self.sim.cell_size ** 2 * self.sim.cell_depth
+                            buoyancy_y -= (water_density - ice_density) * 9.81 * cell_volume
             
             net_force_y += buoyancy_y
             

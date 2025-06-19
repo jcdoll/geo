@@ -1492,6 +1492,9 @@ class GeologyVisualizer:
                     print(f"Kinematics mode: {mode}")
                 else:
                     print("Kinematics toggle not available (requires modular simulation)")
+            elif event.key == pygame.K_h:
+                # H: Show complete controls help
+                self._show_controls_help()
         
         elif event.type == pygame.KEYUP:
             # Handle key releases for repeat functionality
@@ -1546,6 +1549,40 @@ class GeologyVisualizer:
             if btn['action'] == 'tool_add':
                 btn['text'] = f'Add: {material_name}'
                 break
+    
+    def _show_controls_help(self):
+        """Print complete controls help to console"""
+        print("\n" + "="*60)
+        print("GEOLOGY SIMULATOR - COMPLETE CONTROLS")
+        print("="*60)
+        print("\nSIMULATION CONTROL:")
+        print("  SPACE             - Play/Pause simulation")
+        print("  Left Arrow        - Step backward") 
+        print("  Right Arrow       - Step forward")
+        print("  Up/Down Arrows    - Increase/decrease speed")
+        print("  R                 - Reset simulation")
+        print("\nVIEW MODES:")
+        print("  1                 - Material view")
+        print("  2                 - Temperature view") 
+        print("  3                 - Power view")
+        print("  4                 - Pressure view")
+        print("  5                 - Velocity view")
+        print("  6                 - Gravity view")
+        print("  7                 - Potential view")
+        print("\nTOOLS:")
+        print("  A                 - Add mass tool (cycle materials)")
+        print("  D                 - Delete mass tool")
+        print("  Left Click+Drag   - Apply current tool")
+        print("  Right Click       - Select tile (show info)")
+        print("  Mouse Wheel       - Adjust tool radius")
+        print("  Shift+Mouse Wheel - Adjust tool intensity")
+        print("\nINTERFACE:")
+        print("  TAB               - Cycle sidebar tabs")
+        print("  H                 - Show this help")
+        print("  L                 - Toggle logging (INFO/DEBUG)")
+        print("  Q                 - Change quality (Full/Balanced/Fast)")
+        print("  M                 - Toggle kinematics mode (if available)")
+        print("="*60 + "\n")
     
     def run(self):
         """Main visualization loop"""
@@ -1615,23 +1652,7 @@ class GeologyVisualizer:
 def main():
     """Run the geology simulator"""
     print("Starting Geology Simulator...")
-    print("Controls:")
-    print("  Mouse: Click and drag to add heat sources")
-    print("  Right Click: Select tile (show info)")
-    print("  Shift + Right Click: Add tectonic stress")
-    print("  SPACE: Play/Pause simulation")
-    print("  Left/Right arrows: Step backward/forward")
-    print("  Up/Down arrows: Adjust simulation speed")
-    print("  1-7: Switch visualization modes (Material, Temperature, Power, Pressure, Velocity, Gravity, Potential)")
-    print("  R: Reset simulation")
-    print("  G: Toggle graphs display")
-    print("  Q: Change quality setting (1=Full, 2=Balanced, 3=Fast)")
-    print("  Tab: Cycle through sidebar tabs")
-    print("  Mouse wheel: Adjust tool radius")
-    print("  Shift + mouse wheel: Adjust tool intensity")
-    print("  A: Add mass tool (cycle material)")
-    print("  D: Delete mass tool")
-    print("  L: Toggle logging (INFO/DEBUG)")
+    print("Press H in the simulation window for complete controls help")
     
     visualizer = GeologyVisualizer()
     visualizer.run()

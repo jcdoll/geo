@@ -283,11 +283,11 @@ class MaterialProcesses:
         """Create material binding matrix for force-based swapping calculations.
         
         Args:
-            solid_binding_force: Reference cohesion force between solid voxels (N)
+            solid_binding_force: Reference cohesion force density between solid voxels (N/m³)
             
         Returns:
             Tuple of (binding_matrix, material_index_map)
-            - binding_matrix: N×N array where N is number of MaterialTypes
+            - binding_matrix: N×N array where N is number of MaterialTypes (force density in N/m³)
             - material_index_map: Dict mapping MaterialType to matrix index
         """
         # Get all material types
@@ -299,7 +299,7 @@ class MaterialProcesses:
         material_index_map = {m: i for i, m in enumerate(mt_list)}
         
         # Define fluid materials (including SPACE which acts as fluid)
-        fluid_set = {MaterialType.AIR, MaterialType.WATER_VAPOR, MaterialType.WATER, MaterialType.MAGMA}
+        fluid_set = {MaterialType.AIR, MaterialType.WATER_VAPOR, MaterialType.WATER, MaterialType.MAGMA, MaterialType.SPACE}
         
         # Fill binding matrix
         for i, material_a in enumerate(mt_list):

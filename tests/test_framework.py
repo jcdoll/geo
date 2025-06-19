@@ -122,7 +122,7 @@ class ScenarioRunner:
         self.sim = GeoGame(
             self.sim_width, 
             self.sim_height, 
-            cell_size=100.0, 
+            cell_size=100.0,
             quality=1, 
             log_level="WARNING"
         )

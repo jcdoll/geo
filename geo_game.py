@@ -46,10 +46,11 @@ class GeoGame(CoreState, CoreToolsMixin):
         height: int,
         *,
         cell_size: float = 50.0,
+        cell_depth: Optional[float] = None,
         quality: int = 1,
         log_level: str | int = "INFO",
     ) -> None:
-        super().__init__(width, height, cell_size=cell_size, quality=quality, log_level=log_level)
+        super().__init__(width, height, cell_size=cell_size, cell_depth=cell_depth, quality=quality, log_level=log_level)
 
         # Physics sub-modules ------------------------------------------------
         self.heat_transfer = HeatTransfer(self)
@@ -61,7 +62,13 @@ class GeoGame(CoreState, CoreToolsMixin):
         self.gravity_y = np.zeros((height, width), dtype=np.float64)
 
         # Simple unified kinematics toggle flag (GUI convenience)
-        self.unified_kinematics = False
+        self.unified_kinematics = True
+        
+        # Flag to enable/disable pressure calculation
+        self.enable_pressure = True
+        
+        # Flag to enable/disable surface tension
+        self.enable_surface_tension = True
 
         # Populate with a crude basalt-magma sphere so the visualiser shows something
         self._setup_initial_planet()
@@ -111,7 +118,12 @@ class GeoGame(CoreState, CoreToolsMixin):
         if getattr(self, "_properties_dirty", False):
             self._update_material_properties()
 
-        phi = solve_potential(self.density, self.cell_size)
+        # Scale density by depth ratio to account for 2.5D simulation
+        # The gravity solver assumes cubic cells, but we have a slab of depth cell_depth
+        depth_ratio = self.cell_depth / self.cell_size
+        effective_density = self.density * depth_ratio
+        phi = solve_potential(effective_density, self.cell_size)
+        
         # Higher-order gradient (5-point compact stencil) for isotropy
         gx, gy = self._compute_gravity_5pt(phi, self.cell_size)
 
@@ -198,7 +210,8 @@ class GeoGame(CoreState, CoreToolsMixin):
             _last_cp = time.perf_counter()
 
             # 4) Pressure field (fluid-dynamics module)
-            self.fluid_dynamics.calculate_planetary_pressure()
+            if self.enable_pressure:
+                self.fluid_dynamics.calculate_planetary_pressure()
             self._perf_times["pressure"] = time.perf_counter() - _last_cp
             _last_cp = time.perf_counter()
 

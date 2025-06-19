@@ -1,38 +1,66 @@
-# Test Scenario Framework
+# Test Suite
 
-This directory contains a unified test framework that allows tests to be run both headlessly (for CI/CD) and with real-time visualization for debugging and understanding physics behavior.
+This directory contains physics simulation tests organized by category. Each test file contains both scenario definitions and pytest tests, allowing tests to be run headlessly (for CI/CD) or with real-time visualization for debugging.
 
-## Overview
+## Structure
 
-The framework consists of:
+### Scenario-Based Tests
+These files contain both test scenarios and pytest tests in a single file:
 
-1. **Base Classes** (`test_framework.py`):
-   - `TestScenario`: Abstract base for all test scenarios
-   - `ScenarioRunner`: Runs scenarios and collects results
-   - `ModuleDisabler`: Selectively disable physics modules
+- **`test_magma.py`** - Magma containment and stability tests
+- **`test_water.py`** - Water conservation, blob formation, and surface tension tests  
+- **`test_gravity_buoyancy.py`** - Gravitational attraction and buoyancy tests
 
-2. **Scenario Implementations**:
-   - Test-specific logic inheriting from `TestScenario`
-   - Define setup, evaluation criteria, and visualization hints
+### Core Physics Tests
+Traditional unit tests for core simulation components:
 
-3. **Pytest Integration**:
-   - Standard pytest files that use scenarios
-   - Can run in CI/CD without display
+- **`test_poisson_solver.py`** - Gravity field solver
+- **`test_unified_kinematics.py`** - Fluid dynamics and material swapping
+- **`test_motion_physics.py`** - Force field and velocity calculations
+- **`test_materials.py`** - Material property calculations
+- **`test_self_gravity.py`** - Self-gravity calculations
+- **`test_velocity_projection.py`** - Velocity field projections
 
-4. **Visual Runner** (`run_visual_tests.py`):
-   - Interactive visualization of any scenario
-   - Real-time metrics and status display
+### Integration Tests
+- **`test_integration.py`** - Complete simulation workflows
+- **`test_simulation_engine.py`** - Basic simulation operations
+- **`test_reset_simulation.py`** - Simulation state reset
+- **`test_space_integrity.py`** - Space cell conservation
+- **`test_material_cache_cleanup.py`** - Material cache management
 
-## Creating a New Test Scenario
+### Framework & Tools
+- **`test_framework.py`** - Base classes for scenario-based testing
+- **`test_visualizer.py`** - Test visualizer extension
+- **`test_visualizer_functionality.py`** - Visualizer unit tests
+- **`run_visual_tests.py`** - Command-line tool for visual test execution
 
-### 1. Create Scenario Class
+## Creating a New Test
+
+### For Scenario-Based Tests
+
+Add your scenario and test to one of the existing category files (`test_magma.py`, `test_water.py`, `test_chunk.py`) or create a new category file:
 
 ```python
-from tests.test_framework import TestScenario
+"""
+My category tests with integrated scenarios.
+"""
+
+import numpy as np
+import pytest
+from typing import Dict, Any
+
+from tests.test_framework import TestScenario, ScenarioRunner
 from materials import MaterialType
 from geo_game import GeoGame
 
+
+# ============================================================================
+# SCENARIO DEFINITIONS
+# ============================================================================
+
 class MyTestScenario(TestScenario):
+    """Description of what this scenario tests."""
+    
     def get_name(self) -> str:
         return "my_test_scenario"
     
@@ -40,40 +68,25 @@ class MyTestScenario(TestScenario):
         return "Tests that my feature works correctly"
     
     def setup(self, sim: GeoGame) -> None:
-        """Set up initial conditions"""
-        # Configure simulation state
+        """Set up initial conditions."""
         sim.material_types[10, 10] = MaterialType.WATER
         sim.temperature[10, 10] = 300.0
         sim._update_material_properties()
     
     def evaluate(self, sim: GeoGame) -> Dict[str, Any]:
-        """Evaluate current state"""
+        """Evaluate current state."""
         success = check_my_conditions(sim)
         
         return {
             'success': success,
-            'metrics': {
-                'my_metric': calculate_metric(sim),
-                'step': sim.time_step
-            },
+            'metrics': {'my_metric': calculate_metric(sim)},
             'message': f"Test {'passed' if success else 'failed'}"
         }
-    
-    def get_visualization_hints(self) -> Dict[str, Any]:
-        """Optional visualization configuration"""
-        return {
-            'highlight_materials': [MaterialType.WATER],
-            'focus_region': (5, 15, 5, 15),  # y_min, y_max, x_min, x_max
-            'show_metrics': ['my_metric', 'step']
-        }
-```
 
-### 2. Create Pytest File
 
-```python
-import pytest
-from tests.test_framework import ScenarioRunner
-from tests.my_test_scenarios import MyTestScenario
+# ============================================================================
+# PYTEST TESTS
+# ============================================================================
 
 def test_my_feature():
     """Test my feature using the scenario."""
@@ -81,19 +94,22 @@ def test_my_feature():
     runner = ScenarioRunner(scenario)
     result = runner.run_headless(max_steps=100)
     assert result['success'], f"Test failed: {result['message']}"
-```
 
-### 3. Add to Visual Runner
 
-Edit `run_visual_tests.py` to add your scenario:
-
-```python
-from tests.my_test_scenarios import MyTestScenario
+# ============================================================================
+# SCENARIO REGISTRY FOR VISUAL RUNNER
+# ============================================================================
 
 SCENARIOS = {
-    # ... existing scenarios ...
-    'my_test': MyTestScenario,
+    'my_test': lambda: MyTestScenario(),
 }
+```
+
+Then import your scenarios in `run_visual_tests.py`:
+
+```python
+from tests.test_my_category import SCENARIOS as MY_SCENARIOS
+SCENARIOS.update(MY_SCENARIOS)
 ```
 
 ## Running Tests
@@ -140,26 +156,32 @@ When running visually:
 
 ## Available Scenarios
 
-### Magma Tests
-- `magma_containment`: Tests magma stays contained by solid rock
+Run `python tests/run_visual_tests.py --list` to see all available scenarios.
+
+### Magma Tests (`test_magma.py`)
+- `magma_small`: Small magma containment test
+- `magma_large`: Large magma containment test  
 - `magma_no_physics`: Baseline with all physics disabled
-- `magma_heat_only`: Only heat transfer enabled
-- `magma_fluid_only`: Only fluid dynamics enabled
-- `magma_binding`: Tests binding force configuration
+- `granite_vacuum`: Granite stability in vacuum
 
-### Water Tests
-- `water_blob`: Water bar condenses into circular blob
-- `water_conservation`: Tests water is conserved with surface cavities
+### Water Tests (`test_water.py`)
+- `water_conservation`: Water conservation with surface cavities
 - `water_stress`: Aggressive conservation test
-- `water_phase`: Conservation with specific physics disabled
+- `water_blob`: Water bar condensing into blob
+- `water_blob_thin`: Thin water bar variant
+- `water_line`: Water line surface tension collapse
+- `water_droplet`: Water droplet formation
+- `water_diagnostic`: Water leakage diagnostics
 
-### Mechanics Tests
-- `chunk_settle`: Single chunk falling with terminal velocity
-- `multi_chunk`: Multiple materials falling simultaneously
+### Gravity & Buoyancy Tests (`test_gravity_buoyancy.py`)
+- `gravity_water`: Water falls toward rock planet (currently failing)
+- `gravity_magma`: Magma falls toward rock planet (currently failing)
+- `rock_on_ice`: Rock falls through melting ice (currently failing)
+- `buoyancy_air_water`: Air bubble rises in water (skipped - not working)
+- `buoyancy_space_water`: Space bubble rises in water (skipped - not working)
+- `buoyancy_air_magma`: Air bubble rises in magma (skipped - not working)
 
-### Surface Effects
-- `water_line`: Thin water line collapses via surface tension
-- `water_droplet`: Scattered water coalesces into droplets
+**Note**: Gravity and buoyancy tests are currently failing due to physics implementation issues. The gravity is realistically weak for small planets, and the force-based swapping requires velocity differences that prevent simple buoyancy from working.
 
 ## Best Practices
 

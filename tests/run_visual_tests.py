@@ -9,14 +9,14 @@ Usage:
     python tests/run_visual_tests.py [scenario_name] [options]
 
 Examples:
-    python tests/run_visual_tests.py magma_containment
+    python tests/run_visual_tests.py magma_small
     python tests/run_visual_tests.py water_conservation --steps 500
-    python tests/run_visual_tests.py surface_tension --list
+    python tests/run_visual_tests.py --list
 """
 
 import sys
 import argparse
-from typing import Dict, Type
+from typing import Dict, Type, Callable
 
 # Add parent directory to path
 sys.path.insert(0, '.')
@@ -24,57 +24,16 @@ sys.path.insert(0, '.')
 from tests.test_framework import TestScenario, ScenarioRunner
 from tests.test_visualizer import TestScenarioVisualizer
 
-# Import all scenario modules
-from tests.test_magma_containment_scenarios import (
-    MagmaContainmentScenario,
-    MagmaContainmentNoPhysicsScenario,
-    MagmaContainmentHeatOnlyScenario,
-    MagmaContainmentFluidOnlyScenario,
-    MagmaContainmentMaterialOnlyScenario,
-    MagmaContainmentGravityOnlyScenario,
-    MagmaBindingForceScenario
-)
-from tests.test_water_blob_scenario import WaterBlobCondensationScenario
-from tests.test_water_conservation_scenarios import (
-    WaterConservationScenario,
-    WaterConservationStressTestScenario,
-    WaterConservationByPhaseScenario
-)
-from tests.test_chunk_settle_scenarios import (
-    ChunkSettleScenario,
-    MultiChunkSettleScenario
-)
-from tests.test_surface_tension_scenarios import (
-    WaterLineCollapseScenario,
-    WaterDropletFormationScenario
-)
+# Import scenario registries from consolidated test files
+from tests.test_magma import SCENARIOS as MAGMA_SCENARIOS
+from tests.test_water import SCENARIOS as WATER_SCENARIOS
+from tests.test_gravity_buoyancy import SCENARIOS as GRAVITY_BUOYANCY_SCENARIOS
 
-
-# Registry of available scenarios
-SCENARIOS: Dict[str, Type[TestScenario]] = {
-    # Magma containment
-    'magma_containment': MagmaContainmentScenario,
-    'magma_no_physics': MagmaContainmentNoPhysicsScenario,
-    'magma_heat_only': MagmaContainmentHeatOnlyScenario,
-    'magma_fluid_only': MagmaContainmentFluidOnlyScenario,
-    'magma_material_only': MagmaContainmentMaterialOnlyScenario,
-    'magma_gravity_only': MagmaContainmentGravityOnlyScenario,
-    'magma_binding': MagmaBindingForceScenario,
-    
-    # Water scenarios
-    'water_blob': WaterBlobCondensationScenario,
-    'water_conservation': WaterConservationScenario,
-    'water_stress': WaterConservationStressTestScenario,
-    'water_phase': WaterConservationByPhaseScenario,
-    
-    # Chunk settling
-    'chunk_settle': ChunkSettleScenario,
-    'multi_chunk': MultiChunkSettleScenario,
-    
-    # Surface tension
-    'water_line': WaterLineCollapseScenario,
-    'water_droplet': WaterDropletFormationScenario,
-}
+# Combine all scenarios
+SCENARIOS: Dict[str, Callable[[], TestScenario]] = {}
+SCENARIOS.update(MAGMA_SCENARIOS)
+SCENARIOS.update(WATER_SCENARIOS)
+SCENARIOS.update(GRAVITY_BUOYANCY_SCENARIOS)
 
 
 def list_scenarios():
@@ -84,19 +43,17 @@ def list_scenarios():
     
     # Group by category
     categories = {
-        'Magma': [k for k in SCENARIOS if k.startswith('magma')],
+        'Magma': [k for k in SCENARIOS if k.startswith('magma') or k.startswith('granite')],
         'Water': [k for k in SCENARIOS if k.startswith('water')],
-        'Mechanics': [k for k in SCENARIOS if k.startswith('chunk') or k.startswith('multi')],
-        'Surface Effects': [k for k in SCENARIOS if 'line' in k or 'droplet' in k],
+        'Gravity & Buoyancy': [k for k in SCENARIOS if k.startswith('gravity') or k.startswith('buoyancy') or k.startswith('rock_on')],
     }
     
     for category, names in categories.items():
         if names:
             print(f"\n{category}:")
             for name in sorted(names):
-                scenario_class = SCENARIOS[name]
                 # Create instance to get description
-                instance = scenario_class()
+                instance = SCENARIOS[name]()
                 print(f"  {name:<20} - {instance.get_description()}")
 
 
@@ -142,20 +99,6 @@ def main():
         help='Display scale factor (default: 10)'
     )
     
-    # Scenario-specific options
-    parser.add_argument(
-        '--variant',
-        choices=['small', 'large'],
-        default='small',
-        help='Scenario variant for scenarios that support it'
-    )
-    
-    parser.add_argument(
-        '--disabled-phase',
-        choices=['fluid_dynamics', 'heat_transfer', 'material_processes', 'self_gravity'],
-        help='Disable a specific physics phase (for phase testing scenarios)'
-    )
-    
     args = parser.parse_args()
     
     # Handle list command
@@ -168,25 +111,7 @@ def main():
         parser.error("Please specify a scenario name or use --list")
         
     # Create scenario instance
-    scenario_class = SCENARIOS[args.scenario]
-    
-    # Build kwargs based on scenario type
-    kwargs = {}
-    
-    # Handle scenario variants
-    if args.variant and hasattr(scenario_class, '__init__'):
-        # Check if scenario accepts variant parameter
-        import inspect
-        sig = inspect.signature(scenario_class.__init__)
-        if 'scenario' in sig.parameters:
-            kwargs['scenario'] = args.variant
-            
-    # Handle disabled phase for phase testing
-    if args.disabled_phase and 'phase' in args.scenario:
-        kwargs['disabled_phase'] = args.disabled_phase
-        
-    # Create scenario
-    scenario = scenario_class(**kwargs)
+    scenario = SCENARIOS[args.scenario]()
     
     # Create runner
     runner = ScenarioRunner(scenario, sim_width=args.size, sim_height=args.size)
