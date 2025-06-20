@@ -35,26 +35,60 @@ class WaterConservationScenario(TestScenario):
         return f"Tests water conservation with {self.cavity_count} surface cavities"
         
     def setup(self, sim: GeoGame) -> None:
-        """Set up planet with surface cavities to stress test conservation."""
-        # Let default planet generation happen
-        # Carve random SPACE craters in the surface
-        rng = np.random.default_rng(123)
+        """Set up planet with surface water and cavities to stress test conservation."""
+        # Clear to all space first for consistent setup
+        sim.material_types[:] = MaterialType.SPACE
+        sim.temperature[:] = 0.0
         
         height, width = sim.height, sim.width
+        cx, cy = width // 2, height // 2
+        
+        # Create a simple rocky planet
+        radius = min(width, height) // 3
+        yy, xx = np.ogrid[:height, :width]
+        dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+        
+        # Fill with basalt
+        planet_mask = dist <= radius
+        sim.material_types[planet_mask] = MaterialType.BASALT
+        sim.temperature[planet_mask] = 290.0
+        
+        # Add atmosphere layer
+        atmo_mask = (dist > radius) & (dist <= radius + 3)
+        sim.material_types[atmo_mask] = MaterialType.AIR
+        sim.temperature[atmo_mask] = 280.0
+        
+        # Add water on the surface - find basalt cells adjacent to air
+        water_rng = np.random.RandomState(456)  # Different seed for water placement
+        for y in range(1, height - 1):
+            for x in range(1, width - 1):
+                if sim.material_types[y, x] == MaterialType.BASALT:
+                    # Check if adjacent to air
+                    if (sim.material_types[y-1, x] == MaterialType.AIR or
+                        sim.material_types[y+1, x] == MaterialType.AIR or
+                        sim.material_types[y, x-1] == MaterialType.AIR or
+                        sim.material_types[y, x+1] == MaterialType.AIR):
+                        # Convert to water with 40% probability
+                        if water_rng.random() < 0.4:
+                            sim.material_types[y, x] = MaterialType.WATER
+                            sim.temperature[y, x] = 290.0
+        
+        # Now carve random SPACE craters in the surface
+        rng = np.random.default_rng(123)
         surface_band = 10  # Outer 10 cells
         
         cavities_created = 0
         for _ in range(self.cavity_count * 2):
             angle = rng.random() * 2 * np.pi
-            radius = min(width, height) // 2 - rng.integers(0, surface_band)
+            crater_radius = radius - rng.integers(0, surface_band)
             
-            cx = width // 2 + int(radius * np.cos(angle))
-            cy = height // 2 + int(radius * np.sin(angle))
+            crater_x = cx + int(crater_radius * np.cos(angle))
+            crater_y = cy + int(crater_radius * np.sin(angle))
             
-            if 0 <= cx < width and 0 <= cy < height:
-                if sim.material_types[cy, cx] != MaterialType.SPACE:
+            if 0 <= crater_x < width and 0 <= crater_y < height:
+                if sim.material_types[crater_y, crater_x] != MaterialType.SPACE:
                     cavity_radius = rng.integers(*self.cavity_radius_range)
-                    sim.delete_material_blob(cx, cy, radius=cavity_radius)
+                    sim.delete_material_blob(crater_x, crater_y, radius=cavity_radius)
                     cavities_created += 1
                     
             if cavities_created >= self.cavity_count:
