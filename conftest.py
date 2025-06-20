@@ -1,5 +1,16 @@
+import os
 from pathlib import Path
 from typing import Any
+
+
+def pytest_configure(config):
+    """Configure pytest environment for headless operation."""
+    # Set SDL to use dummy video driver for headless operation
+    os.environ['SDL_VIDEODRIVER'] = 'dummy'
+    # Disable audio as well
+    os.environ['SDL_AUDIODRIVER'] = 'dummy'
+    # Set matplotlib to non-interactive backend
+    os.environ['MPLBACKEND'] = 'Agg'
 
 
 def pytest_ignore_collect(collection_path: Path, config: Any) -> bool:  # noqa: D401
