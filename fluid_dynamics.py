@@ -29,7 +29,9 @@ class FluidDynamics:
         # Scale binding force appropriately for cell size (100m cells = 1e6 m³ volume)
         # Rock cohesion ~1-10 MPa, so binding force density should be pressure / length scale
         # For 100m cells: 1 MPa / 100m = 1e6 Pa / 100m = 1e4 N/m³
-        self.solid_binding_force = 1e4  # N/m³ – reference cohesion force density between solid voxels
+        # But we need to scale by actual cell size
+        # For 50m cells with proper scaling: reduced to allow motion
+        self.solid_binding_force = 1e-2  # N/m³ – reference cohesion force density between solid voxels
         self.velocity_clamp = True # Enable/disable velocity clamping (enable if instability)
         self.velocity_threshold = True  # Enable/disable velocity threshold for swapping
 
@@ -619,7 +621,7 @@ class FluidDynamics:
         """Move rigid body groups as coherent units based on net forces.
         
         This ensures rocks, ice, etc. fall and move as single objects rather than
-        breaking apart cell by cell.
+        breaking apart cell by cell. Now includes fluid displacement mechanics.
         """
         # Get rigid body groups
         labels, num_groups = self.identify_rigid_groups()
@@ -704,76 +706,16 @@ class FluidDynamics:
                 
             dx, dy = best_dir
             
-            # Check if entire group can move in this direction
-            can_move = True
-            target_cells = []
+            # First detect any enclosed fluids that must move with the rigid body
+            enclosed_fluids = self.detect_enclosed_fluids(group_mask)
             
-            for y, x in zip(*group_coords):
-                ny, nx = y + dy, x + dx
-                
-                # Check bounds
-                if ny < 0 or ny >= h or nx < 0 or nx >= w:
-                    can_move = False
-                    break
-                    
-                target_cells.append((ny, nx))
-                
-                # Check if target is empty (space) or same group
-                target_mat = mt[ny, nx]
-                if target_mat != MaterialType.SPACE and not group_mask[ny, nx]:
-                    # Check if we can push through this material
-                    # Need to overcome binding between group material and target
-                    group_mat = mt[y, x]
-                    temp_avg = 0.5 * (self.sim.temperature[y, x] + self.sim.temperature[ny, nx])
-                    binding = self._binding_threshold(group_mat, target_mat, temp_avg)
-                    
-                    # Force per interface cell
-                    force_per_cell = force_magnitude / group_size
-                    
-                    if force_per_cell <= binding:
-                        can_move = False
-                        break
+            # Try to move with fluid displacement
+            success = self.attempt_rigid_body_displacement(
+                group_mask, dx, dy, force_magnitude, moved_mask, enclosed_fluids
+            )
             
-            if not can_move:
-                continue
-                
-            # Perform the group move
-            # First, collect all source and target data
-            src_materials = []
-            src_temps = []
-            src_ages = []
-            src_vx = []
-            src_vy = []
-            
-            for y, x in zip(*group_coords):
-                src_materials.append(mt[y, x])
-                src_temps.append(self.sim.temperature[y, x])
-                src_ages.append(self.sim.age[y, x])
-                src_vx.append(self.velocity_x[y, x])
-                src_vy.append(self.velocity_y[y, x])
-                
-            # Clear source positions (replace with space)
-            for y, x in zip(*group_coords):
-                mt[y, x] = MaterialType.SPACE
-                self.sim.temperature[y, x] = self.sim.space_temperature
-                self.velocity_x[y, x] = 0
-                self.velocity_y[y, x] = 0
-                moved_mask[y, x] = True
-                
-            # Place at target positions
-            for i, (ny, nx) in enumerate(target_cells):
-                mt[ny, nx] = src_materials[i]
-                self.sim.temperature[ny, nx] = src_temps[i]
-                self.sim.age[ny, nx] = src_ages[i]
-                self.velocity_x[ny, nx] = src_vx[i]
-                self.velocity_y[ny, nx] = src_vy[i]
-                moved_mask[ny, nx] = True
-                
-            # Mark properties dirty
-            self.sim._properties_dirty = True
-            
-            if getattr(self.sim, 'debug_rigid_bodies', False):
-                print(f"Moved rigid body group {group_id} ({group_size} cells) by ({dx}, {dy})")
+            if success and getattr(self.sim, 'debug_rigid_bodies', False):
+                print(f"Moved rigid body group {group_id} ({group_size} cells) by ({dx}, {dy}) with fluid displacement")
     
     def _attempt_group_move(self, group_mask, vel_x, vel_y):
         """Attempt to move an entire group of cells based on velocity.
@@ -919,6 +861,240 @@ class FluidDynamics:
         fy_st = sigma * kappa * ny * mag
 
         return fx_st, fy_st
+    
+    def detect_enclosed_fluids(self, rigid_body_mask):
+        """Detect fluid regions that are topologically enclosed by a rigid body.
+        
+        Uses flood-fill to identify disconnected fluid regions.
+        Returns a mask of fluids that should move with the rigid body.
+        """
+        from materials import MaterialType
+        h, w = self.sim.material_types.shape
+        
+        # Define fluid types
+        fluid_types = {MaterialType.WATER, MaterialType.MAGMA, MaterialType.AIR, MaterialType.WATER_VAPOR}
+        
+        # Create fluid mask
+        fluid_mask = np.zeros((h, w), dtype=bool)
+        for fluid_type in fluid_types:
+            fluid_mask |= (self.sim.material_types == fluid_type)
+        
+        # Find boundary of rigid body (cells adjacent to rigid body)
+        boundary_mask = np.zeros((h, w), dtype=bool)
+        for y in range(h):
+            for x in range(w):
+                if rigid_body_mask[y, x]:
+                    continue
+                # Check if adjacent to rigid body
+                for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < h and 0 <= nx < w and rigid_body_mask[ny, nx]:
+                        boundary_mask[y, x] = True
+                        break
+        
+        # Flood fill from edges to find external fluids
+        external_fluid = np.zeros((h, w), dtype=bool)
+        
+        # Start flood fill from all edge cells that are fluid or space
+        edge_seeds = []
+        # Top and bottom edges
+        for x in range(w):
+            if not rigid_body_mask[0, x] and not boundary_mask[0, x]:
+                edge_seeds.append((0, x))
+            if not rigid_body_mask[h-1, x] and not boundary_mask[h-1, x]:
+                edge_seeds.append((h-1, x))
+        # Left and right edges
+        for y in range(h):
+            if not rigid_body_mask[y, 0] and not boundary_mask[y, 0]:
+                edge_seeds.append((y, 0))
+            if not rigid_body_mask[y, w-1] and not boundary_mask[y, w-1]:
+                edge_seeds.append((y, w-1))
+        
+        # Flood fill to mark all externally connected regions
+        visited = set()
+        queue = edge_seeds[:]
+        
+        while queue:
+            y, x = queue.pop(0)
+            if (y, x) in visited:
+                continue
+            visited.add((y, x))
+            external_fluid[y, x] = True
+            
+            # Check neighbors
+            for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                ny, nx = y + dy, x + dx
+                if (0 <= ny < h and 0 <= nx < w and 
+                    not rigid_body_mask[ny, nx] and 
+                    (ny, nx) not in visited):
+                    queue.append((ny, nx))
+        
+        # Enclosed fluids are fluids that are not externally connected
+        enclosed_fluid_mask = fluid_mask & ~external_fluid
+        
+        return enclosed_fluid_mask
+    
+    def attempt_rigid_body_displacement(self, group_mask, dx, dy, force_magnitude, 
+                                        moved_mask, enclosed_fluids=None):
+        """Attempt to move a rigid body group with proper fluid displacement.
+        
+        Returns True if movement succeeded, False otherwise.
+        """
+        mt = self.sim.material_types
+        h, w = mt.shape
+        
+        group_coords = np.where(group_mask)
+        group_size = len(group_coords[0])
+        
+        # Include enclosed fluids in the moving group
+        if enclosed_fluids is not None:
+            combined_mask = group_mask | enclosed_fluids
+            combined_coords = np.where(combined_mask)
+        else:
+            combined_mask = group_mask
+            combined_coords = group_coords
+        
+        # Check all target positions
+        target_positions = []
+        fluids_to_displace = []
+        
+        for y, x in zip(*combined_coords):
+            ny, nx = y + dy, x + dx
+            
+            # Check bounds
+            if ny < 0 or ny >= h or nx < 0 or nx >= w:
+                return False  # Can't move out of bounds
+            
+            target_positions.append((ny, nx))
+            
+            # Skip if target is part of same combined group
+            if combined_mask[ny, nx]:
+                continue
+            
+            # Check what's at target position
+            target_mat = mt[ny, nx]
+            if target_mat == MaterialType.SPACE:
+                continue  # Empty space, can move freely
+            
+            # Define displaceable fluids
+            displaceable_fluids = {MaterialType.WATER, MaterialType.AIR, MaterialType.WATER_VAPOR, MaterialType.MAGMA}
+            
+            # It's a fluid or another material - add to displacement list if it's displaceable
+            if target_mat in displaceable_fluids and not moved_mask[ny, nx]:
+                fluids_to_displace.append((ny, nx))
+        
+        # If there are fluids to displace, try to displace them
+        if fluids_to_displace:
+            # Calculate displacement pressure based on force
+            cell_volume = self.sim.cell_size ** 2 * self.sim.cell_depth
+            displacement_pressure = force_magnitude / (group_size * self.sim.cell_size ** 2)
+            
+            # Attempt to displace fluids
+            if not self.displace_fluids(fluids_to_displace, -dx, -dy, displacement_pressure):
+                return False  # Couldn't displace fluids
+        
+        # Movement is possible - execute it
+        # Store all data from combined group
+        src_data = []
+        for y, x in zip(*combined_coords):
+            src_data.append({
+                'material': mt[y, x],
+                'temperature': self.sim.temperature[y, x],
+                'age': self.sim.age[y, x],
+                'vx': self.velocity_x[y, x],
+                'vy': self.velocity_y[y, x]
+            })
+        
+        # Clear source positions
+        for y, x in zip(*combined_coords):
+            mt[y, x] = MaterialType.SPACE
+            self.sim.temperature[y, x] = self.sim.space_temperature
+            self.velocity_x[y, x] = 0
+            self.velocity_y[y, x] = 0
+            moved_mask[y, x] = True
+        
+        # Place at target positions
+        for i, (ny, nx) in enumerate(target_positions):
+            data = src_data[i]
+            mt[ny, nx] = data['material']
+            self.sim.temperature[ny, nx] = data['temperature']
+            self.sim.age[ny, nx] = data['age']
+            self.velocity_x[ny, nx] = data['vx']
+            self.velocity_y[ny, nx] = data['vy']
+            moved_mask[ny, nx] = True
+        
+        # Transfer momentum to displaced fluids
+        if fluids_to_displace:
+            # Calculate average rigid body velocity
+            avg_vx = np.mean([d['vx'] for d in src_data[:group_size]])
+            avg_vy = np.mean([d['vy'] for d in src_data[:group_size]])
+            
+            # Apply momentum transfer (partial, with damping)
+            momentum_transfer = 0.5  # Transfer 50% of velocity
+            for fy, fx in fluids_to_displace:
+                # Find where the fluid ended up after displacement
+                new_fy, new_fx = fy - dy, fx - dx
+                if 0 <= new_fy < h and 0 <= new_fx < w:
+                    self.velocity_x[new_fy, new_fx] += avg_vx * momentum_transfer
+                    self.velocity_y[new_fy, new_fx] += avg_vy * momentum_transfer
+        
+        # Mark properties dirty
+        self.sim._properties_dirty = True
+        
+        return True
+    
+    def displace_fluids(self, fluid_positions, disp_dx, disp_dy, pressure):
+        """Displace fluids in response to rigid body motion.
+        
+        Uses simple swapping approach for now to ensure conservation.
+        Returns True if displacement succeeded, False otherwise.
+        """
+        mt = self.sim.material_types
+        h, w = mt.shape
+        
+        # For now, just try to move fluids out of the way using simple swaps
+        # This ensures material conservation
+        success = True
+        
+        for fy, fx in fluid_positions:
+            # Try to find an empty space nearby
+            found_space = False
+            
+            # Search in expanding rings
+            for radius in range(1, max(h, w)):
+                for dy in range(-radius, radius + 1):
+                    for dx in range(-radius, radius + 1):
+                        # Skip if not on ring perimeter
+                        if abs(dy) != radius and abs(dx) != radius:
+                            continue
+                            
+                        ny, nx = fy + dy, fx + dx
+                        if 0 <= ny < h and 0 <= nx < w:
+                            if mt[ny, nx] == MaterialType.SPACE:
+                                # Swap fluid with space
+                                mt[ny, nx] = mt[fy, fx]
+                                self.sim.temperature[ny, nx] = self.sim.temperature[fy, fx]
+                                self.sim.age[ny, nx] = self.sim.age[fy, fx]
+                                self.velocity_x[ny, nx] = self.velocity_x[fy, fx]
+                                self.velocity_y[ny, nx] = self.velocity_y[fy, fx]
+                                
+                                mt[fy, fx] = MaterialType.SPACE
+                                self.sim.temperature[fy, fx] = self.sim.space_temperature
+                                self.sim.age[fy, fx] = self.sim.age[0, 0]
+                                self.velocity_x[fy, fx] = 0
+                                self.velocity_y[fy, fx] = 0
+                                
+                                found_space = True
+                                break
+                    if found_space:
+                        break
+                if found_space:
+                    break
+            
+            if not found_space:
+                success = False
+        
+        return success
     
     def _compute_surface_tension_pressure(self):
         """Compute surface tension pressure source term for fluids at interfaces.

@@ -4,7 +4,21 @@
       "Bash(rg:*)",
       "WebFetch(domain:docs.anthropic.com)",
       "Bash(grep:*)",
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(python -m pytest tests/test_donut_displacement.py -v)",
+      "Bash(python3 -m pytest tests/test_donut_displacement.py -v)",
+      "Bash(pytest:*)",
+      "Bash(python -m pytest tests/test_gravity_buoyancy.py::test_air_rises_in_magma -v)",
+      "Bash(python3 -m pytest tests/test_gravity_buoyancy.py::test_air_rises_in_magma -v)",
+      "Bash(python3 -m pytest tests/test_donut_displacement.py::test_donut_with_water -v -s)",
+      "Bash(python3 tests/run_visual_tests.py:*)",
+      "Bash(python3 -m pytest tests/test_donut_displacement.py::test_donut_with_water -v -s --tb=short)",
+      "Bash(python3 -m pytest tests/test_donut_displacement.py::test_donut_with_water -v -s --tb=no)",
+      "Bash(python3 -m pytest tests/test_gravity_buoyancy.py::test_buoyancy_combinations -k \"magma and air\" -v)",
+      "Bash(python3 -m pytest tests/test_donut_displacement.py::test_donut_with_water -v --tb=short -k donut)",
+      "Bash(python3 -m pytest tests/test_donut_displacement.py::test_rock_water_displacement -v -s --tb=short)",
+      "Bash(python3:*)",
+      "Bash(rm:*)"
     ],
     "deny": []
   }

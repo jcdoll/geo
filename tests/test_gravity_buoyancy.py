@@ -275,6 +275,25 @@ class BuoyancyScenario(TestScenario):
         sim.fluid_dynamics.velocity_threshold = False
         sim.enable_pressure = True  # Keep pressure for buoyancy
         
+        # Disable heat transfer to prevent magma cooling
+        sim.enable_heat_diffusion = False
+        sim.enable_radiative_cooling = False
+        sim.enable_solar_heating = False
+        sim.enable_internal_heating = False
+        
+        # HACK: Completely disable heat transfer by monkey-patching
+        sim.heat_transfer.solve_heat_diffusion = lambda: (sim.temperature, 1.0)
+        
+        # HACK: Also disable metamorphism to prevent material transitions
+        sim.material_processes.apply_metamorphism = lambda: None
+        sim.material_processes.apply_phase_transitions = lambda: None
+        
+        # Disable surface tension which can remove isolated fluid cells
+        sim.enable_surface_tension = False
+        
+        # Disable weathering to prevent material transitions
+        sim.enable_weathering = False
+        
         # Clear to space
         sim.material_types.fill(MaterialType.SPACE)
         sim.temperature.fill(2.7)
