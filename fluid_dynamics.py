@@ -519,27 +519,31 @@ class FluidDynamics:
                 self._perform_material_swaps(src_y, src_x, tgt_y, tgt_x)
 
     def identify_rigid_groups(self):
-        """Identify connected components of rigid materials (ice, rock, etc.)
+        """Identify connected components of rigid materials (any non-fluid materials).
+        
+        This correctly handles metamorphosis - a donut made of granite that 
+        partially metamorphoses into other rock types will still be considered
+        one rigid body as long as the materials are solid (non-fluid).
         
         Returns a label array where each connected component has a unique ID.
         """
         from materials import MaterialType
         from scipy import ndimage
         
-        # Define rigid materials that should move as groups
-        rigid_types = {
-            MaterialType.ICE,
-            MaterialType.GRANITE, MaterialType.BASALT, MaterialType.SANDSTONE,
-            MaterialType.SHALE, MaterialType.PUMICE, MaterialType.OBSIDIAN,
-            MaterialType.ANDESITE, MaterialType.LIMESTONE, MaterialType.CONGLOMERATE,
-            MaterialType.GNEISS, MaterialType.SCHIST, MaterialType.SLATE,
-            MaterialType.MARBLE, MaterialType.QUARTZITE
+        # Define fluid materials that should NOT move as rigid groups
+        fluid_types = {
+            MaterialType.MAGMA,
+            MaterialType.WATER,
+            MaterialType.WATER_VAPOR, 
+            MaterialType.AIR,
+            MaterialType.SPACE
         }
         
-        # Create mask of rigid materials
-        rigid_mask = np.zeros(self.sim.material_types.shape, dtype=bool)
-        for mat_type in rigid_types:
-            rigid_mask |= (self.sim.material_types == mat_type)
+        # All non-fluid materials are considered rigid
+        # This includes rocks, sediments, metamorphic rocks, ice, etc.
+        rigid_mask = np.ones(self.sim.material_types.shape, dtype=bool)
+        for mat_type in fluid_types:
+            rigid_mask &= (self.sim.material_types != mat_type)
         
         # Label connected components
         labels, num_features = ndimage.label(rigid_mask)
@@ -714,8 +718,90 @@ class FluidDynamics:
                 group_mask, dx, dy, force_magnitude, moved_mask, enclosed_fluids
             )
             
-            if success and getattr(self.sim, 'debug_rigid_bodies', False):
-                print(f"Moved rigid body group {group_id} ({group_size} cells) by ({dx}, {dy}) with fluid displacement")
+            if not can_move:
+                continue
+                
+            # Identify fluids contained within the rigid body
+            # Use flood fill from edges to identify exterior space/fluids
+            # Everything not reached is "contained"
+            from scipy import ndimage
+            exterior_mask = np.zeros((h, w), dtype=bool)
+            
+            # Start flood fill from all edges that are not rigid body
+            # Top and bottom edges
+            for x in range(w):
+                if not group_mask[0, x]:
+                    exterior_mask[0, x] = True
+                if not group_mask[h-1, x]:
+                    exterior_mask[h-1, x] = True
+            # Left and right edges
+            for y in range(h):
+                if not group_mask[y, 0]:
+                    exterior_mask[y, 0] = True
+                if not group_mask[y, w-1]:
+                    exterior_mask[y, w-1] = True
+            
+            # Flood fill to find all exterior non-rigid cells
+            structure = np.ones((3, 3), dtype=bool)  # 8-connectivity
+            exterior_mask = ndimage.binary_dilation(exterior_mask, structure=structure, 
+                                                   mask=~group_mask, iterations=-1)
+            
+            # Contained cells are non-rigid cells that are not exterior
+            contained_mask = ~group_mask & ~exterior_mask
+            
+            # Collect all cells to move (rigid body + contained fluids)
+            all_move_coords = []
+            all_move_materials = []
+            all_move_temps = []
+            all_move_ages = []
+            all_move_vx = []
+            all_move_vy = []
+            
+            # First add rigid body cells
+            for y, x in zip(*group_coords):
+                all_move_coords.append((y, x))
+                all_move_materials.append(mt[y, x])
+                all_move_temps.append(self.sim.temperature[y, x])
+                all_move_ages.append(self.sim.age[y, x])
+                all_move_vx.append(self.velocity_x[y, x])
+                all_move_vy.append(self.velocity_y[y, x])
+            
+            # Then add contained fluid cells
+            contained_coords = np.where(contained_mask)
+            for y, x in zip(*contained_coords):
+                all_move_coords.append((y, x))
+                all_move_materials.append(mt[y, x])
+                all_move_temps.append(self.sim.temperature[y, x])
+                all_move_ages.append(self.sim.age[y, x])
+                all_move_vx.append(self.velocity_x[y, x])
+                all_move_vy.append(self.velocity_y[y, x])
+                
+            # Clear all source positions (replace with space)
+            for y, x in all_move_coords:
+                mt[y, x] = MaterialType.SPACE
+                self.sim.temperature[y, x] = self.sim.space_temperature
+                self.velocity_x[y, x] = 0
+                self.velocity_y[y, x] = 0
+                moved_mask[y, x] = True
+                
+            # Place at target positions
+            for i, (y, x) in enumerate(all_move_coords):
+                ny, nx = y + dy, x + dx
+                if 0 <= ny < h and 0 <= nx < w:
+                    mt[ny, nx] = all_move_materials[i]
+                    self.sim.temperature[ny, nx] = all_move_temps[i]
+                    self.sim.age[ny, nx] = all_move_ages[i]
+                    self.velocity_x[ny, nx] = all_move_vx[i]
+                    self.velocity_y[ny, nx] = all_move_vy[i]
+                    moved_mask[ny, nx] = True
+                
+            # Mark properties dirty
+            self.sim._properties_dirty = True
+            
+            if getattr(self.sim, 'debug_rigid_bodies', False):
+                contained_count = np.sum(contained_mask)
+                total_moved = len(all_move_coords)
+                print(f"Moved rigid body group {group_id} ({group_size} rigid + {contained_count} contained = {total_moved} total cells) by ({dx}, {dy})")
     
     def _attempt_group_move(self, group_mask, vel_x, vel_y):
         """Attempt to move an entire group of cells based on velocity.
