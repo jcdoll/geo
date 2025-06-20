@@ -18,7 +18,21 @@
       "Bash(python3 -m pytest tests/test_donut_displacement.py::test_donut_with_water -v --tb=short -k donut)",
       "Bash(python3 -m pytest tests/test_donut_displacement.py::test_rock_water_displacement -v -s --tb=short)",
       "Bash(python3:*)",
-      "Bash(rm:*)"
+      "Bash(rm:*)",
+      "Bash(PYTHONPATH=/home/jcdoll/github/personal/geo pytest tests/test_buoyancy_rigid_bodies.py::test_ice_floats_in_water -v -s)",
+      "Bash(PYTHONPATH=/home/jcdoll/github/personal/geo python tests/test_simple_buoyancy.py)",
+      "Bash(PYTHONPATH=/home/jcdoll/github/personal/geo python tests/test_buoyancy_mechanics.py)",
+      "Bash(PYTHONPATH=/home/jcdoll/github/personal/geo python tests/test_acceleration_analysis.py)",
+      "Bash(PYTHONPATH=/home/jcdoll/github/personal/geo python tests/test_pressure_diagnosis.py)",
+      "Bash(PYTHONPATH=/home/jcdoll/github/personal/geo python tests/test_gentle_buoyancy.py)",
+      "Bash(python tests:*)",
+      "Bash(rm:*)",
+      "Bash(python test_ice_buoyancy_debug.py:*)",
+      "Bash(mkdir:*)",
+      "Bash(mv:*)",
+      "Bash(ls:*)",
+      "Bash(echo:*)",
+      "Bash(python:*)"
     ],
     "deny": []
   }

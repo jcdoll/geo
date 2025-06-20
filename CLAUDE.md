@@ -13,6 +13,12 @@ Before making any changes, **read `AGENTS.md`** which contains:
 
 ## Commands
 
+### Python Virtual Environment
+Before running any Python commands, activate the virtual environment:
+```bash
+source .venv/bin/activate
+```
+
 ### Running the Simulation
 ```bash
 python main.py

@@ -43,26 +43,61 @@ class FluidDynamics:
         self._binding_matrix, self._mat_index = MaterialProcesses.create_binding_matrix(self.solid_binding_force)
     
     def calculate_planetary_pressure(self):
-        """Multigrid solve for pressure using self-gravity field."""
+        """Multigrid solve for pressure using both self-gravity and external gravity fields."""
 
-        # Ensure gravity field is up-to-date
-        if hasattr(self.sim, 'calculate_self_gravity'):
+        # Build total gravity field (self-gravity + external gravity)
+        gx_total = np.zeros_like(self.sim.density, dtype=np.float64)
+        gy_total = np.zeros_like(self.sim.density, dtype=np.float64)
+
+        # Add self-gravity component (if enabled)
+        if self.sim.enable_self_gravity and hasattr(self.sim, 'calculate_self_gravity'):
             self.sim.calculate_self_gravity()
+            gx_total += self.sim.gravity_x
+            gy_total += self.sim.gravity_y
 
-        gx = self.sim.gravity_x
-        gy = self.sim.gravity_y
+        # Add external gravity component
+        if hasattr(self.sim, 'external_gravity'):
+            g_ext_x, g_ext_y = self.sim.external_gravity
+            if g_ext_x != 0.0 or g_ext_y != 0.0:
+                gx_total += g_ext_x
+                gy_total += g_ext_y
 
-        # Divergence of gravity
-        div_g = np.zeros_like(gx)
+        # Divergence of total gravity field
+        div_g = np.zeros_like(gx_total)
         dx = self.sim.cell_size
         div_g[1:-1, 1:-1] = (
-            (gx[1:-1, 2:] - gx[1:-1, :-2]) + (gy[2:, 1:-1] - gy[:-2, 1:-1])
+            (gx_total[1:-1, 2:] - gx_total[1:-1, :-2]) + (gy_total[2:, 1:-1] - gy_total[:-2, 1:-1])
         ) / (2 * dx)
 
-        # Build RHS: -ρ ∇·g  (MPa units -> divide 1e6)
-        rhs = (self.sim.density * div_g) / 1e6   # Pa → MPa
+        # Build RHS for Poisson equation
+        # For external gravity, we need to solve: ∇²P = ∇·(ρg)
+        # This handles arbitrary geometries correctly
+        rhs = np.zeros_like(self.sim.density)
+        
+        # Self-gravity contribution: -ρ∇·g_self (if enabled)
+        if self.sim.enable_self_gravity:
+            rhs -= (self.sim.density * div_g) / 1e6   # Pa → MPa (negative for attractive gravity)
+        
+        # External gravity contribution: ∇·(ρg_ext)
+        # For uniform external gravity, ∇·(ρg_ext) = g_ext·∇ρ since ∇·g_ext = 0
+        if hasattr(self.sim, 'external_gravity'):
+            g_ext_x, g_ext_y = self.sim.external_gravity
+            if abs(g_ext_x) > 1e-10 or abs(g_ext_y) > 1e-10:
+                # For uniform external gravity field: ∇·(ρg) = g·∇ρ
+                grad_rho_x = np.zeros_like(self.sim.density)
+                grad_rho_y = np.zeros_like(self.sim.density)
+                
+                # Central differences for density gradient
+                grad_rho_x[1:-1, 1:-1] = (self.sim.density[1:-1, 2:] - self.sim.density[1:-1, :-2]) / (2 * dx)
+                grad_rho_y[1:-1, 1:-1] = (self.sim.density[2:, 1:-1] - self.sim.density[:-2, 1:-1]) / (2 * dx)
+                
+                # ∇·(ρg_ext) = g_ext·∇ρ
+                div_rho_g = g_ext_x * grad_rho_x + g_ext_y * grad_rho_y
+                
+                # Add to RHS (convert Pa to MPa)
+                rhs += div_rho_g / 1e6
 
-        # Solve Poisson
+        # Solve Poisson equation for pressure: ∇²P = RHS
         pressure = solve_pressure(rhs, dx)
 
         # Store & add persistent offsets (don't clip negative pressures!)
@@ -718,90 +753,13 @@ class FluidDynamics:
                 group_mask, dx, dy, force_magnitude, moved_mask, enclosed_fluids
             )
             
-            if not can_move:
+            if not success:
                 continue
-                
-            # Identify fluids contained within the rigid body
-            # Use flood fill from edges to identify exterior space/fluids
-            # Everything not reached is "contained"
-            from scipy import ndimage
-            exterior_mask = np.zeros((h, w), dtype=bool)
-            
-            # Start flood fill from all edges that are not rigid body
-            # Top and bottom edges
-            for x in range(w):
-                if not group_mask[0, x]:
-                    exterior_mask[0, x] = True
-                if not group_mask[h-1, x]:
-                    exterior_mask[h-1, x] = True
-            # Left and right edges
-            for y in range(h):
-                if not group_mask[y, 0]:
-                    exterior_mask[y, 0] = True
-                if not group_mask[y, w-1]:
-                    exterior_mask[y, w-1] = True
-            
-            # Flood fill to find all exterior non-rigid cells
-            structure = np.ones((3, 3), dtype=bool)  # 8-connectivity
-            exterior_mask = ndimage.binary_dilation(exterior_mask, structure=structure, 
-                                                   mask=~group_mask, iterations=-1)
-            
-            # Contained cells are non-rigid cells that are not exterior
-            contained_mask = ~group_mask & ~exterior_mask
-            
-            # Collect all cells to move (rigid body + contained fluids)
-            all_move_coords = []
-            all_move_materials = []
-            all_move_temps = []
-            all_move_ages = []
-            all_move_vx = []
-            all_move_vy = []
-            
-            # First add rigid body cells
-            for y, x in zip(*group_coords):
-                all_move_coords.append((y, x))
-                all_move_materials.append(mt[y, x])
-                all_move_temps.append(self.sim.temperature[y, x])
-                all_move_ages.append(self.sim.age[y, x])
-                all_move_vx.append(self.velocity_x[y, x])
-                all_move_vy.append(self.velocity_y[y, x])
-            
-            # Then add contained fluid cells
-            contained_coords = np.where(contained_mask)
-            for y, x in zip(*contained_coords):
-                all_move_coords.append((y, x))
-                all_move_materials.append(mt[y, x])
-                all_move_temps.append(self.sim.temperature[y, x])
-                all_move_ages.append(self.sim.age[y, x])
-                all_move_vx.append(self.velocity_x[y, x])
-                all_move_vy.append(self.velocity_y[y, x])
-                
-            # Clear all source positions (replace with space)
-            for y, x in all_move_coords:
-                mt[y, x] = MaterialType.SPACE
-                self.sim.temperature[y, x] = self.sim.space_temperature
-                self.velocity_x[y, x] = 0
-                self.velocity_y[y, x] = 0
-                moved_mask[y, x] = True
-                
-            # Place at target positions
-            for i, (y, x) in enumerate(all_move_coords):
-                ny, nx = y + dy, x + dx
-                if 0 <= ny < h and 0 <= nx < w:
-                    mt[ny, nx] = all_move_materials[i]
-                    self.sim.temperature[ny, nx] = all_move_temps[i]
-                    self.sim.age[ny, nx] = all_move_ages[i]
-                    self.velocity_x[ny, nx] = all_move_vx[i]
-                    self.velocity_y[ny, nx] = all_move_vy[i]
-                    moved_mask[ny, nx] = True
-                
-            # Mark properties dirty
-            self.sim._properties_dirty = True
             
             if getattr(self.sim, 'debug_rigid_bodies', False):
-                contained_count = np.sum(contained_mask)
-                total_moved = len(all_move_coords)
-                print(f"Moved rigid body group {group_id} ({group_size} rigid + {contained_count} contained = {total_moved} total cells) by ({dx}, {dy})")
+                enclosed_count = np.sum(enclosed_fluids) if enclosed_fluids is not None else 0
+                total_moved = group_size + enclosed_count
+                print(f"Moved rigid body group {group_id} ({group_size} rigid + {enclosed_count} contained = {total_moved} total cells) by ({dx}, {dy})")
     
     def _attempt_group_move(self, group_mask, vel_x, vel_y):
         """Attempt to move an entire group of cells based on velocity.

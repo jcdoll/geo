@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from geo_game import GeoGame
 from materials import MaterialType
-from tests.test_framework import TestScenario, ScenarioRunner
+from tests.framework.test_framework import TestScenario, ScenarioRunner
 
 class TestDonutWithWaterScenario(TestScenario):
     """Test a donut-shaped rock with water in the center falling under gravity."""

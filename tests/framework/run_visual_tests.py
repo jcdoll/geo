@@ -21,19 +21,35 @@ from typing import Dict, Type, Callable
 # Add parent directory to path
 sys.path.insert(0, '.')
 
-from tests.test_framework import TestScenario, ScenarioRunner
-from tests.test_visualizer import TestScenarioVisualizer
+from tests.framework.test_framework import TestScenario, ScenarioRunner
+from tests.framework.test_visualizer import TestScenarioVisualizer
 
-# Import scenario registries from consolidated test files
-from tests.test_magma import SCENARIOS as MAGMA_SCENARIOS
-from tests.test_water import SCENARIOS as WATER_SCENARIOS
-from tests.test_gravity_buoyancy import SCENARIOS as GRAVITY_BUOYANCY_SCENARIOS
+# Import scenario registries from organized test files
+from tests.scenarios.test_buoyancy import SCENARIOS as BUOYANCY_SCENARIOS
+from tests.scenarios.test_fluids import SCENARIOS as FLUIDS_SCENARIOS
+from tests.scenarios.test_rigid_body import SCENARIOS as RIGID_BODY_SCENARIOS
+from tests.scenarios.test_materials import SCENARIOS as MATERIALS_SCENARIOS
+
+# Legacy scenarios (for backward compatibility)
+from tests.legacy_scenarios.test_magma import SCENARIOS as LEGACY_MAGMA_SCENARIOS
+from tests.legacy_scenarios.test_water import SCENARIOS as LEGACY_WATER_SCENARIOS
+from tests.legacy_scenarios.test_gravity_buoyancy import SCENARIOS as LEGACY_GRAVITY_BUOYANCY_SCENARIOS
+from tests.legacy_scenarios.test_donut_displacement import SCENARIOS as LEGACY_DONUT_SCENARIOS
 
 # Combine all scenarios
 SCENARIOS: Dict[str, Callable[[], TestScenario]] = {}
-SCENARIOS.update(MAGMA_SCENARIOS)
-SCENARIOS.update(WATER_SCENARIOS)
-SCENARIOS.update(GRAVITY_BUOYANCY_SCENARIOS)
+
+# Organized scenarios (primary)
+SCENARIOS.update(BUOYANCY_SCENARIOS)
+SCENARIOS.update(FLUIDS_SCENARIOS)
+SCENARIOS.update(RIGID_BODY_SCENARIOS)
+SCENARIOS.update(MATERIALS_SCENARIOS)
+
+# Legacy scenarios (for backward compatibility)
+SCENARIOS.update(LEGACY_MAGMA_SCENARIOS)
+SCENARIOS.update(LEGACY_WATER_SCENARIOS)
+SCENARIOS.update(LEGACY_GRAVITY_BUOYANCY_SCENARIOS)
+SCENARIOS.update(LEGACY_DONUT_SCENARIOS)
 
 
 def list_scenarios():
@@ -43,9 +59,14 @@ def list_scenarios():
     
     # Group by category
     categories = {
-        'Magma': [k for k in SCENARIOS if k.startswith('magma') or k.startswith('granite')],
-        'Water': [k for k in SCENARIOS if k.startswith('water')],
-        'Gravity & Buoyancy': [k for k in SCENARIOS if k.startswith('gravity') or k.startswith('buoyancy') or k.startswith('rock_on')],
+        'Buoyancy': [k for k in BUOYANCY_SCENARIOS.keys()],
+        'Fluids': [k for k in FLUIDS_SCENARIOS.keys()],  
+        'Rigid Body': [k for k in RIGID_BODY_SCENARIOS.keys()],
+        'Materials': [k for k in MATERIALS_SCENARIOS.keys()],
+        'Legacy - Magma': [k for k in LEGACY_MAGMA_SCENARIOS.keys()],
+        'Legacy - Water': [k for k in LEGACY_WATER_SCENARIOS.keys()],
+        'Legacy - Gravity & Buoyancy': [k for k in LEGACY_GRAVITY_BUOYANCY_SCENARIOS.keys()],
+        'Legacy - Containers': [k for k in LEGACY_DONUT_SCENARIOS.keys()],
     }
     
     for category, names in categories.items():

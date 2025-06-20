@@ -1,200 +1,211 @@
 # Test Suite
 
-This directory contains physics simulation tests organized by category. Each test file contains both scenario definitions and pytest tests, allowing tests to be run headlessly (for CI/CD) or with real-time visualization for debugging.
+This directory contains a comprehensive test suite for the geological physics simulation, organized by test type and purpose.
 
-## Structure
+## Directory Structure
 
-### Scenario-Based Tests
-These files contain both test scenarios and pytest tests in a single file:
-
-- **`test_magma.py`** - Magma containment and stability tests
-- **`test_water.py`** - Water conservation, blob formation, and surface tension tests  
-- **`test_gravity_buoyancy.py`** - Gravitational attraction and buoyancy tests
-
-### Core Physics Tests
-Traditional unit tests for core simulation components:
-
-- **`test_poisson_solver.py`** - Gravity field solver
-- **`test_unified_kinematics.py`** - Fluid dynamics and material swapping
-- **`test_motion_physics.py`** - Force field and velocity calculations
-- **`test_materials.py`** - Material property calculations
-- **`test_self_gravity.py`** - Self-gravity calculations
-- **`test_velocity_projection.py`** - Velocity field projections
-
-### Integration Tests
-- **`test_integration.py`** - Complete simulation workflows
-- **`test_simulation_engine.py`** - Basic simulation operations
-- **`test_reset_simulation.py`** - Simulation state reset
-- **`test_space_integrity.py`** - Space cell conservation
-- **`test_material_cache_cleanup.py`** - Material cache management
-
-### Framework & Tools
-- **`test_framework.py`** - Base classes for scenario-based testing
-- **`test_visualizer.py`** - Test visualizer extension
-- **`test_visualizer_functionality.py`** - Visualizer unit tests
-- **`run_visual_tests.py`** - Command-line tool for visual test execution
-
-## Creating a New Test
-
-### For Scenario-Based Tests
-
-Add your scenario and test to one of the existing category files (`test_magma.py`, `test_water.py`, `test_chunk.py`) or create a new category file:
-
-```python
-"""
-My category tests with integrated scenarios.
-"""
-
-import numpy as np
-import pytest
-from typing import Dict, Any
-
-from tests.test_framework import TestScenario, ScenarioRunner
-from materials import MaterialType
-from geo_game import GeoGame
-
-
-# ============================================================================
-# SCENARIO DEFINITIONS
-# ============================================================================
-
-class MyTestScenario(TestScenario):
-    """Description of what this scenario tests."""
-    
-    def get_name(self) -> str:
-        return "my_test_scenario"
-    
-    def get_description(self) -> str:
-        return "Tests that my feature works correctly"
-    
-    def setup(self, sim: GeoGame) -> None:
-        """Set up initial conditions."""
-        sim.material_types[10, 10] = MaterialType.WATER
-        sim.temperature[10, 10] = 300.0
-        sim._update_material_properties()
-    
-    def evaluate(self, sim: GeoGame) -> Dict[str, Any]:
-        """Evaluate current state."""
-        success = check_my_conditions(sim)
-        
-        return {
-            'success': success,
-            'metrics': {'my_metric': calculate_metric(sim)},
-            'message': f"Test {'passed' if success else 'failed'}"
-        }
-
-
-# ============================================================================
-# PYTEST TESTS
-# ============================================================================
-
-def test_my_feature():
-    """Test my feature using the scenario."""
-    scenario = MyTestScenario()
-    runner = ScenarioRunner(scenario)
-    result = runner.run_headless(max_steps=100)
-    assert result['success'], f"Test failed: {result['message']}"
-
-
-# ============================================================================
-# SCENARIO REGISTRY FOR VISUAL RUNNER
-# ============================================================================
-
-SCENARIOS = {
-    'my_test': lambda: MyTestScenario(),
-}
+```
+tests/
+├── diagnostics/         # Debugging and analysis tools
+├── framework/          # Test infrastructure
+├── integration/        # Full system integration tests
+├── legacy_scenarios/   # Original scenario files for backward compatibility
+├── scenarios/          # Organized visual test scenarios
+└── unit/              # Pure unit tests
 ```
 
-Then import your scenarios in `run_visual_tests.py`:
+### Unit Tests (`unit/`)
+Pure functionality tests for individual components:
+- **Material Properties**: `test_materials.py`, `test_material_cache_cleanup.py`
+- **Physics Solvers**: `test_pressure_solver.py`, `test_poisson_solver.py`, `test_self_gravity.py`
+- **Fluid Dynamics**: `test_buoyancy_physics.py`, `test_surface_tension.py`, `test_velocity_projection.py`
+- **Rigid Body Mechanics**: `test_rigid_body_fall.py`, `test_rigid_body_fluid_container.py`, `test_simple_container_movement.py`
+- **Motion Physics**: `test_motion_physics.py`, `test_unified_kinematics.py`, `test_buoyancy_mechanics.py`
+- **Visualization**: `test_visualizer_functionality.py`
 
-```python
-from tests.test_my_category import SCENARIOS as MY_SCENARIOS
-SCENARIOS.update(MY_SCENARIOS)
-```
+### Integration Tests (`integration/`)
+Tests for complete system behavior:
+- `test_simulation_lifecycle.py` - Full simulation initialization, stepping, reset
+- `test_integration.py` - Complete workflow tests
+- `test_simulation_engine.py` - Engine integration
+- `test_reset_simulation.py` - Reset functionality
+- `test_space_integrity.py` - Conservation laws
+
+### Visual Scenarios (`scenarios/`)
+Interactive test scenarios that can be run with visualization:
+- **`test_buoyancy.py`** - Ice floating, density comparison, rigid body buoyancy
+- **`test_fluids.py`** - Water conservation, magma flow, surface tension
+- **`test_rigid_body.py`** - Falling rocks, container dynamics, donut displacement
+- **`test_materials.py`** - Magma containment, phase transitions, metamorphic gradients
+
+### Diagnostic Tools (`diagnostics/`)
+Specialized debugging utilities:
+- `test_acceleration_analysis.py` - Detailed motion and force tracking
+- `test_pressure_diagnosis.py` - Pressure field analysis and debugging
+
+### Framework (`framework/`)
+Test infrastructure:
+- `test_framework.py` - Base classes for scenario-based testing
+- `test_visualizer.py` - Visualization extension for test scenarios
+- `run_visual_tests.py` - Command-line runner for visual scenarios
+
+### Legacy Scenarios (`legacy_scenarios/`)
+Original test files preserved for backward compatibility:
+- `test_magma.py`, `test_water.py`, `test_gravity_buoyancy.py`, `test_donut_displacement.py`
 
 ## Running Tests
 
-### Headless (Pytest)
-
+### Run All Tests
 ```bash
-# Run all tests
-pytest tests/
+# Run complete test suite
+python tests/run_all_tests.py all
+
+# Run specific test categories
+python tests/run_all_tests.py unit
+python tests/run_all_tests.py integration
+python tests/run_all_tests.py scenarios --list
+```
+
+### Run Unit Tests with Pytest
+```bash
+# Run all unit tests
+pytest tests/unit/
 
 # Run specific test file
-pytest tests/test_my_feature.py
+pytest tests/unit/test_pressure_solver.py
 
 # Run with verbose output
-pytest -v tests/test_my_feature.py
+pytest -v tests/unit/
 ```
 
-### Visual Mode
-
+### Run Visual Scenarios
 ```bash
-# List all available scenarios
-python tests/run_visual_tests.py --list
+# From the project root directory:
 
-# Run a specific scenario
-python tests/run_visual_tests.py my_test
+# List all available scenarios
+python tests/framework/run_visual_tests.py --list
+
+# Run specific scenario
+python tests/framework/run_visual_tests.py ice_floating
 
 # Run with custom parameters
-python tests/run_visual_tests.py my_test --steps 500 --size 80 --scale 8
+python tests/framework/run_visual_tests.py water_conservation --steps 500 --size 80
 
-# Run scenario variant
-python tests/run_visual_tests.py magma_containment --variant large
-
-# Run with physics disabled
-python tests/run_visual_tests.py water_phase --disabled-phase fluid_dynamics
+# Alternative: use python -m from anywhere
+python -m tests.framework.run_visual_tests ice_floating
 ```
 
-## Available Scenarios
+## Available Visual Scenarios
 
-Run `python tests/run_visual_tests.py --list` to see all available scenarios.
+### Buoyancy Scenarios
+- `ice_floating` - Ice vs granite falling into water
+- `rock_donut_container` - Rock donut with magma preserving temperature
+- `density_comparison` - Multiple materials with different densities
+- `rigid_body_buoyancy` - Complete rigid body ice/granite test
 
-### Magma Tests (`test_magma.py`)
-- `magma_small`: Small magma containment test
-- `magma_large`: Large magma containment test  
-- `magma_no_physics`: Baseline with all physics disabled
-- `granite_vacuum`: Granite stability in vacuum
+### Fluid Scenarios
+- `water_conservation` - Water droplet volume conservation
+- `magma_flow` - Hot magma flowing and cooling
+- `surface_tension` - Water droplet coalescence
 
-### Water Tests (`test_water.py`)
-- `water_conservation`: Water conservation with surface cavities
-- `water_stress`: Aggressive conservation test
-- `water_blob`: Water bar condensing into blob
-- `water_blob_thin`: Thin water bar variant
-- `water_line`: Water line surface tension collapse
-- `water_droplet`: Water droplet formation
-- `water_diagnostic`: Water leakage diagnostics
+### Rigid Body Scenarios
+- `falling_rock` - Granite blocks falling as coherent units
+- `container_fall` - Container with water falling together
+- `donut_displacement` - Donut-shaped object displacing fluid
 
-### Gravity & Buoyancy Tests (`test_gravity_buoyancy.py`)
-- `gravity_water`: Water falls toward rock planet (currently failing)
-- `gravity_magma`: Magma falls toward rock planet (currently failing)
-- `rock_on_ice`: Rock falls through melting ice (currently failing)
-- `buoyancy_air_water`: Air bubble rises in water (skipped - not working)
-- `buoyancy_space_water`: Space bubble rises in water (skipped - not working)
-- `buoyancy_air_magma`: Air bubble rises in magma (skipped - not working)
+### Material Scenarios
+- `magma_containment` - Hot magma with metamorphic rock walls
+- `phase_transitions` - Ice melting, water freezing, magma solidifying
+- `metamorphic_gradient` - Rock metamorphism from heat source
 
-**Note**: Gravity and buoyancy tests are currently failing due to physics implementation issues. The gravity is realistically weak for small planets, and the force-based swapping requires velocity differences that prevent simple buoyancy from working.
+## Creating New Tests
+
+### Unit Test Template
+```python
+# tests/unit/test_my_component.py
+import numpy as np
+import pytest
+
+def test_my_feature():
+    """Test specific functionality"""
+    # Setup
+    data = create_test_data()
+    
+    # Execute
+    result = my_function(data)
+    
+    # Assert
+    assert result == expected_value
+```
+
+### Visual Scenario Template
+```python
+# tests/scenarios/test_my_category.py
+from tests.framework.test_framework import TestScenario
+from materials import MaterialType
+
+class MyScenario(TestScenario):
+    def get_name(self) -> str:
+        return "my_scenario"
+    
+    def get_description(self) -> str:
+        return "Tests my feature visually"
+    
+    def setup(self, sim):
+        """Set up initial conditions"""
+        sim.material_types[10, 10] = MaterialType.WATER
+        sim.temperature[10, 10] = 300.0
+    
+    def evaluate(self, sim, step):
+        """Evaluate success criteria"""
+        success = check_conditions(sim)
+        if step % 10 == 0:
+            print(f"Step {step}: Status update")
+        return success
+
+SCENARIOS = {
+    'my_scenario': lambda: MyScenario(),
+}
+```
+
+## Visual Test Controls
+
+When running visual tests:
+- **SPACE** - Play/Pause simulation
+- **LEFT/RIGHT** - Step backward/forward
+- **R** - Reset simulation
+- **H** - Show help/controls
+- **S** - Save screenshot
+- **ESC** - Exit
+
+## Test Organization Benefits
+
+1. **Clear Separation**: Unit tests vs integration tests vs visual scenarios
+2. **No Redundancy**: 9 buoyancy test files consolidated into 2 focused files
+3. **Easy Discovery**: Tests organized by type and purpose
+4. **Diagnostic Tools**: Specialized debugging utilities preserved
+5. **Backward Compatible**: Legacy scenarios still available
+
+## Physics Test Coverage
+
+- **Buoyancy**: Comprehensive tests for ice floating, density stratification
+- **Rigid Bodies**: Falling blocks, container dynamics, fluid displacement
+- **Fluids**: Conservation, flow, surface tension
+- **Materials**: Phase transitions, metamorphism, thermal properties
+- **Gravity**: Self-gravity fields, external gravity, pressure calculations
+- **Thermal**: Heat diffusion, radiation, material transitions
+
+## Known Issues
+
+- Buoyancy magnitude needs tuning for perfect floating equilibrium
+- Some legacy gravity tests are failing due to realistic weak gravity
+- Force-based swapping requires velocity differences that can prevent simple buoyancy
 
 ## Best Practices
 
-1. **Clear Success Criteria**: Define unambiguous pass/fail conditions
-2. **Meaningful Metrics**: Track quantitative values for debugging
-3. **Descriptive Messages**: Provide context about what went wrong
-4. **Visualization Hints**: Help users focus on relevant areas
-5. **Parameterization**: Make scenarios configurable for different cases
-
-## Debugging Tips
-
-1. **Start Paused**: Visual tests start paused - step through with 'R'
-2. **Use Screenshots**: Press 'S' to capture interesting states
-3. **Watch Metrics**: The right panel shows real-time metrics
-4. **Focus Regions**: Yellow boxes highlight areas of interest
-5. **Phase Testing**: Disable physics modules to isolate issues
-
-## Architecture Benefits
-
-- **Reusability**: Write once, run headless or visual
-- **Maintainability**: Consistent structure across all tests
-- **Debuggability**: See exactly what's happening in failing tests
-- **Documentation**: Scenarios self-document their purpose
-- **Flexibility**: Easy to add new scenarios or modify existing ones 
+1. **Unit Tests**: Test individual functions and calculations
+2. **Integration Tests**: Test complete workflows and system behavior
+3. **Visual Scenarios**: Test complex emergent behavior and physics interactions
+4. **Diagnostics**: Use for debugging specific physics issues
+5. **Clear Names**: Use descriptive test and scenario names
+6. **Documentation**: Comment complex test setups and assertions

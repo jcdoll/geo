@@ -18,7 +18,7 @@ except ModuleNotFoundError:
     pytest.skip("pygame/matplotlib not available – skipping GUI tests", allow_module_level=True)
 
 from visualizer import GeologyVisualizer
-from tests.test_framework import ScenarioRunner
+from tests.framework.test_framework import ScenarioRunner
 
 
 class TestScenarioVisualizer(GeologyVisualizer):

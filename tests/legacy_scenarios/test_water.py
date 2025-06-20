@@ -9,7 +9,7 @@ import pytest
 from typing import Dict, Any, Optional, List
 from scipy import ndimage
 
-from tests.test_framework import TestScenario, ScenarioRunner
+from tests.framework.test_framework import TestScenario, ScenarioRunner
 from materials import MaterialType
 from geo_game import GeoGame
 
