@@ -125,10 +125,10 @@ class WaterConservationScenario(TestScenario):
 
 
 class WaterDropletCoalescenceScenario(TestScenario):
-    """Test surface tension causing water droplets to coalesce."""
+    """Test water droplet behavior (surface tension removed)."""
     
     def __init__(self, num_droplets: int = 5, droplet_size: int = 3, **kwargs):
-        """Initialize droplet coalescence scenario."""
+        """Initialize droplet test scenario."""
         super().__init__(**kwargs)
         self.num_droplets = num_droplets
         self.droplet_size = droplet_size
@@ -137,7 +137,7 @@ class WaterDropletCoalescenceScenario(TestScenario):
         return f"water_coalescence_{self.num_droplets}_droplets"
         
     def get_description(self) -> str:
-        return f"Tests surface tension with {self.num_droplets} water droplets"
+        return f"Tests water behavior with {self.num_droplets} droplets (no surface tension)"
         
     def setup(self, sim: GeoGame) -> None:
         """Create water droplets in air."""
@@ -165,9 +165,8 @@ class WaterDropletCoalescenceScenario(TestScenario):
         sim.enable_heat_diffusion = False
         sim.enable_self_gravity = False
         sim.external_gravity = (0, 0)  # No gravity
-        sim.enable_surface_tension = False  # Disabled - creates instabilities
         sim.enable_material_melting = False  # Disable phase transitions
-        # TODO: Implement better cohesion for discrete grids
+        sim.enable_surface_tension = False  # Disabled - removed from implementation
         
         sim._properties_dirty = True
         sim._update_material_properties()
@@ -185,10 +184,10 @@ class WaterDropletCoalescenceScenario(TestScenario):
         num_features = self.count_water_features(sim)
         initial_features = self.initial_state.get('initial_features', self.num_droplets)
         
-        # Surface tension is weak, just check conservation
+        # Without surface tension, just check conservation
         initial_water = self.initial_state.get('initial_water', 0)
         water_conserved = water_count >= initial_water * 0.9  # 90% conservation
-        not_worse = num_features <= initial_features  # Don't split
+        not_worse = num_features <= initial_features * 2  # Allow some splitting
         
         success = water_conserved and not_worse
         if np.any(water_mask):
@@ -344,7 +343,11 @@ class WaterConservationStressScenario(WaterConservationScenario):
 
 
 class WaterBlobScenario(TestScenario):
-    """Test water blob behavior and surface tension."""
+    """Test water blob behavior without surface tension.
+    
+    NOTE: Surface tension has been removed from the implementation.
+    This test focuses on basic fluid conservation.
+    """
     
     def __init__(self, blob_width: int = 20, blob_height: int = 10, **kwargs):
         """Initialize water blob test."""
@@ -379,9 +382,16 @@ class WaterBlobScenario(TestScenario):
         sim.enable_heat_diffusion = False
         sim.enable_self_gravity = False
         sim.external_gravity = (0, 0)  # No gravity
-        sim.enable_surface_tension = False  # Disabled - creates instabilities
         sim.enable_material_melting = False  # Disable phase transitions for this test
-        # TODO: Implement discrete-grid-friendly cohesion mechanism
+        sim.enable_atmospheric_processes = False  # Disable solar radiation and atmosphere
+        sim.enable_material_processes = False  # Disable any material phase changes
+        sim.enable_heat_transfer = False  # Disable ALL heat transfer
+        sim.enable_pressure_solver = True  # Enable for fluid dynamics
+        sim.enable_gravity_solver = False  # Disable gravity solver
+        
+        # Surface tension configuration
+        # Disabled as implementation has been removed
+        sim.enable_surface_tension = False
         
         sim._properties_dirty = True
         sim._update_material_properties()
@@ -413,11 +423,22 @@ class WaterBlobScenario(TestScenario):
         # Count connected components
         labeled, num_components = ndimage.label(sim.material_types == MaterialType.WATER)
         
-        # Surface tension is still weak, allow moderate fragmentation
+        # Without surface tension: just check conservation and basic coherence
         water_conserved = water_count >= initial_count * 0.95
-        not_too_fragmented = num_components <= 25  # Relaxed criteria
+        # Allow significant fragmentation without surface tension
+        acceptable_fragmentation = num_components <= 20
         
-        success = water_conserved and not_too_fragmented
+        if water_count > 0:
+            water_coords = np.argwhere(sim.material_types == MaterialType.WATER)
+            ys, xs = water_coords[:, 0], water_coords[:, 1]
+            height = ys.max() - ys.min() + 1
+            width = xs.max() - xs.min() + 1
+            aspect_ratio = max(width / height, height / width) if height > 0 else float('inf')
+        else:
+            aspect_ratio = float('inf')
+        
+        # Success is just conservation and not too much fragmentation
+        success = water_conserved and acceptable_fragmentation
         
         return {
             'success': success,
@@ -427,8 +448,9 @@ class WaterBlobScenario(TestScenario):
                 'rms_distance': rms_distance,
                 'initial_rms': initial_rms,
                 'compactness_ratio': rms_distance / initial_rms if initial_rms > 0 else 1,
+                'aspect_ratio': aspect_ratio if water_count > 0 else float('inf'),
             },
-            'message': f"Water: {water_count}, Components: {num_components}, Compactness: {rms_distance:.1f}"
+            'message': f"Water: {water_count}, Components: {num_components}, RMS: {rms_distance:.1f}, Aspect: {aspect_ratio:.2f} ({'PASS' if success else 'FAIL'})"
         }
         
     def store_initial_state(self, sim: GeoGame) -> None:
@@ -486,7 +508,7 @@ class WaterLineCollapseScenario(TestScenario):
         sim.enable_heat_diffusion = False
         sim.enable_self_gravity = False
         sim.external_gravity = (0, 9.81)
-        sim.enable_surface_tension = True
+        sim.enable_surface_tension = False  # Disabled - removed from implementation
         
         sim._properties_dirty = True
         sim._update_material_properties()

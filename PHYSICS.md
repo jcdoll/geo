@@ -530,52 +530,140 @@ Where:
 
 ## SURFACE TENSION
 
-The simulation now follows the continuum surface-force (CSF) model.
+**IMPORTANT NOTE**: Surface tension implementation has been completely removed from the codebase. This section documents the theoretical approaches and explains why surface tension is fundamentally incompatible with geological-scale simulations.
 
-Notation (2-D slab):
+### THEORETICAL APPROACHES
 
-*  c(x,y)       smoothed colour function – 1 inside fluid, 0 outside
-*  n             interface normal   n = ∇c / |∇c|
-*  κ             curvature           κ = ∇·n (positive for convex fluid)
-*  σ             surface tension coefficient (N m⁻¹).  For water σ≈0.072 but we expose
-                 `surface_tension_scale` so tests may exaggerate it.
+#### 1. Continuum Surface Force (CSF) Model
 
-The volumetric force density acting only in the diffuse interface is
+The standard approach for computational fluid dynamics uses the CSF model, which treats surface tension as a volumetric force concentrated at interfaces:
 
 ```
-    f = σ κ n |∇c|
+f = σ κ n |∇c|
 ```
 
-Implementation steps (all vectorised):
+Where:
+- σ = surface tension coefficient (0.072 N/m for water)
+- κ = interface curvature (∇·n)
+- n = interface normal (∇c/|∇c|)
+- c = smoothed color function (1 in fluid, 0 outside)
 
-1.  Compute a **Gaussian-smoothed indicator** `c = gaussian_filter(mask, σ=1)`.
-    The 1-cell blur gives the interface a finite thickness so |∇c| ≈ δₛ.
-2.  Central differences → `dc/dx`, `dc/dy` then normal `n`.
-3.  Divergence of the normal → curvature κ.
-4.  Body-force arrays `fx, fy` are
-   `σ * κ * n_x * |∇c|` and `σ * κ * n_y * |∇c|`.
-5.  These forces are added **with opposite sign on the two sides of the
-    interface**, therefore the global momentum sum is identically zero; the
-    resulting motion is pure surface-energy minimisation.
+This approach works well for fine grids where interfaces can be resolved smoothly.
 
-No extra "surface-tension pressure" source is needed and has been removed –
-adding both would double count.
+#### 2. Young-Laplace Pressure Jump
 
-Practical notes
----------------
-
-*  The method works for any mixture of fluids.  We currently enable it for
-   WATER and MAGMA.  AIR is treated as part of the ambient phase; SPACE has
-   |∇c| = 0 so it exerts no forces of its own.
-*  Momentum conservation is automatic – the discrete
-   force field satisfies `Σ f ΔV = 0` up to round-off.
-*  The characteristic capillary time-step is
+Surface tension creates a pressure discontinuity across curved interfaces:
 
 ```
-    Δt_cap ≈ √(ρ Δx³ / σ)
+ΔP = σ κ = σ(1/R₁ + 1/R₂)
 ```
 
-  Keep the solver CFL clamp if you increase `surface_tension_scale` in tests.
+For 2D: ΔP = σ/R where R is the radius of curvature.
+
+#### 3. Energy Minimization Approach
+
+Surface tension minimizes the total surface energy:
+
+```
+E = σ ∫ dA
+```
+
+Forces are derived from the energy gradient: F = -∇E
+
+#### 4. Molecular Dynamics Perspective
+
+At the molecular level, surface tension arises from asymmetric intermolecular forces at interfaces. Molecules at the surface experience a net inward force due to missing neighbors on one side.
+
+### THE FUNDAMENTAL SCALE PROBLEM
+
+#### Physical Scale Mismatch
+
+Surface tension is a molecular phenomenon that becomes meaningless at geological scales:
+
+1. **Molecular scale**: Surface tension acts at ~10⁻⁹ m (nanometers)
+2. **Our grid scale**: Each cell is 50-100 m
+3. **Scale ratio**: Our cells are ~10¹⁰ times larger than molecular scales
+
+A single 50m × 50m × 50m water cell contains:
+- Volume: 125,000 m³
+- Mass: 125,000,000 kg of water
+- Molecules: ~10³³ water molecules
+
+#### Why Surface Tension Fails on Coarse Grids
+
+1. **No Meaningful Curvature**: 
+   - Real water droplets have smooth curves at mm-cm scales
+   - On a 50m grid, "curvature" is meaningless - interfaces are always step functions
+   - Computing κ = ∇·n on step functions produces numerical noise, not physics
+
+2. **Force Scaling Issues**:
+   - Surface tension force: F ∝ σL (proportional to perimeter)
+   - Inertial forces: F ∝ ρL³ (proportional to volume)
+   - As L increases, volume forces dominate: F_inertia/F_surface ∝ L²
+   - At 50m scales, inertia is ~10¹² times stronger than surface tension
+
+3. **Discrete Material Representation**:
+   - Materials are discrete enums (WATER, AIR, etc.)
+   - No partial filling or smooth interfaces possible
+   - Binary transitions create artificial "interfaces" everywhere
+
+4. **Energy Scales**:
+   - Surface energy: E_surface = σA ∝ L²
+   - Gravitational energy: E_gravity = mgh ∝ L⁴
+   - At geological scales, gravity completely dominates
+
+#### Attempted Solutions and Why They Failed
+
+1. **CSF with Heavy Smoothing**: Creates fractal spray patterns
+2. **Discrete Cohesion Forces**: Causes fragmentation into 20-50 pieces
+3. **Multi-scale Blurring**: Spreads instabilities over larger regions
+4. **Pressure-based Cohesion**: Cannot prevent material fragmentation
+5. **Velocity Constraints**: Keep velocities coherent but materials still fragment
+
+#### The Reality Check
+
+At 50m scales, asking for surface tension is like asking for:
+- Quantum effects in planetary orbits
+- Brownian motion of tectonic plates  
+- Van der Waals forces between mountains
+
+These are real phenomena, but utterly negligible at the scale of interest.
+
+### CONCLUSIONS AND RECOMMENDATIONS
+
+#### For Geological-Scale Simulations (cell_size ≥ 50m)
+
+1. **Do not implement surface tension** - it's physically meaningless
+2. **Use bulk fluid behavior instead**:
+   - Gravity-driven pooling
+   - Pressure-driven flow
+   - Incompressibility constraints
+   - These dominate at large scales anyway
+
+3. **Accept discrete representation artifacts**:
+   - Fluids may appear fragmented but behave correctly in bulk
+   - Focus on conserved quantities (mass, momentum) not appearance
+   - This is similar to how molecular dynamics appears "noisy" but averages are correct
+
+#### For Fine-Scale Simulations (cell_size ≤ 1m)
+
+Surface tension becomes relevant and can be implemented using:
+1. Standard CSF model with adequate smoothing
+2. Level-set or phase-field methods
+3. Height-function approach for 2D interfaces
+
+#### The Bottom Line
+
+Trying to implement surface tension on a 50m grid is like trying to simulate individual raindrops with a weather model that has 50km grid cells. The physics exists, but not at the scale of the simulation.
+
+Rather than forcing inappropriate physics, we embrace the scale-appropriate behavior: at geological scales, water behaves as a bulk fluid driven by gravity and pressure, not surface tension.
+
+**Remaining challenges**:
+- Heavy blurring can over-smooth small features
+- Force magnitude tuning still somewhat empirical
+- Computational cost of multiple Gaussian filters
+
+This approach represents a middle ground between pure continuum physics and discrete heuristics.
 
 ## HEAT TRANSFER PHYSICS
 

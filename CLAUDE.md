@@ -177,16 +177,8 @@ except ImportError:
 
 ## Known Issues
 
-### Surface Tension Implementation Issues
-- Fixed sign error (forces now point inward for convex droplets)
-- However, the continuum CSF model creates instabilities on discrete grids:
-  - Interface cells "dance" with fractal-like patterns
-  - Forces push water outward in unstable oscillations
-  - Curvature calculations are too noisy for 50m cells
-- Root cause: The continuum surface tension formula (f = σκn|∇c|) doesn't work well on coarse discrete grids
-- Possible solutions:
-  1. Use the simpler pressure-based approach in `_compute_surface_tension_pressure`
-  2. Implement nearest-neighbor cohesion forces
-  3. Use energy minimization approach
-  4. Add smoothing/damping to reduce noise
-- Current workaround: Surface tension disabled in tests, relaxed criteria allow some fragmentation
+### Surface Tension
+- **REMOVED FROM CODEBASE**: Surface tension is fundamentally incompatible with geological-scale grids (50m cells)
+- The scale mismatch is extreme - molecular forces (nanometers) vs geological cells (50 meters) 
+- See PHYSICS.md for detailed explanation of why surface tension cannot work at these scales
+- Water behaves correctly as a bulk fluid under gravity without surface tension

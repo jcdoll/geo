@@ -25,7 +25,7 @@ class FluidDynamics:
         # Expose velocity fields directly for UI compatibility (shared memory)
         self.velocity_x = self.sim.velocity_x
         self.velocity_y = self.sim.velocity_y
-        self.dv_thresh = 0.01  # m/s – velocity-difference threshold for swapping (reduced for surface tension)
+        self.dv_thresh = 0.01  # m/s – velocity-difference threshold for swapping
         # Scale binding force appropriately for cell size (100m cells = 1e6 m³ volume)
         # Rock cohesion ~1-10 MPa, so binding force density should be pressure / length scale
         # For 100m cells: 1 MPa / 100m = 1e6 Pa / 100m = 1e4 N/m³
@@ -122,7 +122,6 @@ class FluidDynamics:
         All material movement is now handled by:
         1. Force-based swapping (apply_force_based_swapping) - handles pressure/gravity forces
         2. Velocity-based swapping - ensures kinematic consistency  
-        3. Surface tension - handles fluid interface dynamics
         This aligns with PHYSICS.md documentation which avoids simple heuristic swapping.
         """
 
@@ -201,7 +200,6 @@ class FluidDynamics:
         self.apply_rigid_body_movements()
         
         # Then apply general force-based swapping for all material interactions
-        # Surface tension is now handled through forces in compute_force_field()
         self.apply_force_based_swapping()
         
         self.sim._perf_times["uk_force_swaps"] = _time.perf_counter() - _t_swap_force_start
@@ -211,6 +209,8 @@ class FluidDynamics:
             solid_mask = self.sim._get_solid_mask()
             self.velocity_x[solid_mask] *= 0.2
             self.velocity_y[solid_mask] *= 0.2
+        
+        
 
     # Velocity integration dispatch method
     def update_velocities(self, fx: np.ndarray, fy: np.ndarray, rho: np.ndarray, dt: float):
@@ -397,11 +397,12 @@ class FluidDynamics:
         # imbalance into a pressure field that pushes the light phase up.
         # Adding another (ρ_ref − ρ) g term would double-count the physics.
 
-        # Add surface tension forces if enabled
-        if getattr(self.sim, 'enable_surface_tension', False):
-            fx_st, fy_st = self._compute_surface_tension_forces()
-            fx += fx_st
-            fy += fy_st
+        
+        # Add bulk cohesion forces if enabled
+        if getattr(self.sim, 'enable_bulk_cohesion', False):
+            fx_coh, fy_coh = self._compute_bulk_cohesion_forces()
+            fx += fx_coh
+            fy += fy_coh
 
         # Store for any other module this macro-step
         self.sim.force_x = fx
@@ -527,6 +528,7 @@ class FluidDynamics:
                             cond_velocity = V_diff >= self.dv_thresh
                     else:
                         cond_velocity = True
+                    
                     
                     # Determine if source can overcome its own binding (solids)
                     if src_bind > 0:
@@ -846,75 +848,116 @@ class FluidDynamics:
             self.sim.age[y1, x1] = self.sim.age[y2, x2]
             self.sim.age[y2, x2] = age_temp
 
-    def _compute_surface_tension_forces(self):
-        """Return surface-tension force density arrays (fx, fy).
-
-        Method
-        ------
-        We treat the colour function *c* as a smoothed indicator (1 = fluid,
-        0 = ambient).  With
-
-            n  = ∇c / |∇c|                (interface normal, points outwards)
-            κ  = ∇·n                      (curvature)
-
-        the continuum force per unit volume is
-
-            **f** = σ κ n |∇c|
-
-        where |∇c|≈δ_s is non-zero only in the diffuse interface.  This form
-        guarantees equal-and-opposite forces on the two sides → net zero linear
-        momentum.  Everything is computed with central differences and NumPy
-        vectorisation – no Python loops.
+    
+    
+    def _apply_bulk_cohesion(self):
+        """Apply bulk fluid cohesion to prevent fragmentation.
+        
+        This is an alternative to surface tension that works better
+        at geological scales by treating fluids as coherent masses.
         """
-
+        try:
+            from .bulk_fluid_cohesion import apply_velocity_coherence, prevent_separation
+        except ImportError:
+            from bulk_fluid_cohesion import apply_velocity_coherence, prevent_separation
+        
         from materials import MaterialType
-        from scipy import ndimage
-
-        # ------------------------------------------------------------------
-        # Parameters
-        # ------------------------------------------------------------------
-        sigma_phys = 0.072                    # N m⁻¹ (water @ 20 °C)
-        boost = getattr(self.sim, "surface_tension_scale", 1.0)  # allow tests to exaggerate
-        sigma = sigma_phys * boost
-
-        mt = self.sim.material_types
-        fluid_mask = (mt == MaterialType.WATER) | (mt == MaterialType.MAGMA)
-
+        
+        # Define cohesive fluids (water and magma)
+        cohesive_fluids = {MaterialType.WATER, MaterialType.MAGMA}
+        
+        # Create fluid mask
+        fluid_mask = np.zeros(self.sim.material_types.shape, dtype=bool)
+        for mat in cohesive_fluids:
+            fluid_mask |= (self.sim.material_types == mat)
+        
+        if np.any(fluid_mask):
+            # Apply velocity coherence
+            self.velocity_x, self.velocity_y = apply_velocity_coherence(
+                self.velocity_x, self.velocity_y, fluid_mask
+            )
+            
+            # Prevent separation
+            self.velocity_x, self.velocity_y = prevent_separation(
+                self.velocity_x, self.velocity_y, fluid_mask,
+                1.0, self.sim.cell_size
+            )
+    
+    def _compute_bulk_cohesion_forces(self):
+        """Compute bulk cohesion forces for fluids.
+        
+        Returns force density arrays (fx, fy) that create
+        cohesive behavior in fluid bodies.
+        """
+        try:
+            from .bulk_fluid_cohesion import compute_cohesion_pressure
+        except ImportError:
+            from bulk_fluid_cohesion import compute_cohesion_pressure
+        
+        from materials import MaterialType
+        
+        # Define cohesive fluids
+        cohesive_fluids = {MaterialType.WATER, MaterialType.MAGMA}
+        
+        # Create fluid mask
+        fluid_mask = np.zeros(self.sim.material_types.shape, dtype=bool)
+        for mat in cohesive_fluids:
+            fluid_mask |= (self.sim.material_types == mat)
+        
         if not np.any(fluid_mask):
             z = np.zeros_like(self.sim.density)
             return z, z
-
-        # Smooth indicator 0…1 (Gaussian blur eliminates stair-step artefacts)
-        c = ndimage.gaussian_filter(fluid_mask.astype(float), sigma=1.0, mode="nearest")
-
-        dx = self.sim.cell_size
-
-        # Colour-function gradients → interface normals
-        dc_dy, dc_dx = np.gradient(c, dx)
-        mag = np.hypot(dc_dx, dc_dy) + 1e-12
-        nx = dc_dx / mag
-        ny = dc_dy / mag
-
-        # Curvature κ = ∂n_x/∂x + ∂n_y/∂y
-        dnxdx = np.gradient(nx, dx, axis=1)
-        dnydy = np.gradient(ny, dx, axis=0)
-        kappa = dnxdx + dnydy
-
-        # Surface-tension force density  f = -σ κ n |∇c|
-        # NEGATIVE sign because for a convex droplet (κ > 0), we want forces pointing INWARD
-        # The normal n points outward, so we need to negate to get inward forces
-        fx_st = -sigma * kappa * nx * mag
-        fy_st = -sigma * kappa * ny * mag
         
-        # KNOWN ISSUE: This continuum surface tension model creates instabilities
-        # on discrete grids with large cells (50m). The curvature calculation
-        # becomes very noisy, causing interface cells to "dance" with fractal patterns.
-        # TODO: Replace with discrete grid-friendly approach like:
-        # 1. Simple pressure-based method (_compute_surface_tension_pressure)
-        # 2. Nearest-neighbor cohesion forces
-        # 3. Energy minimization approach
-
-        return fx_st, fy_st
+        # Compute cohesion pressure field
+        cohesion_pressure = compute_cohesion_pressure(
+            fluid_mask, self.sim.cell_size, pressure_scale=1000.0  # Pa
+        )
+        
+        # Convert pressure to force via gradient
+        # F = -∇P (force points down pressure gradient)
+        fx = np.zeros_like(self.sim.density)
+        fy = np.zeros_like(self.sim.density)
+        
+        dx = self.sim.cell_size
+        
+        # Compute pressure gradients (force density N/m³)
+        fx[:, :-1] -= (cohesion_pressure[:, :-1] - cohesion_pressure[:, 1:]) / dx
+        fx[:, 1:]  += (cohesion_pressure[:, :-1] - cohesion_pressure[:, 1:]) / dx
+        
+        fy[:-1, :] -= (cohesion_pressure[:-1, :] - cohesion_pressure[1:, :]) / dx
+        fy[1:, :]  += (cohesion_pressure[:-1, :] - cohesion_pressure[1:, :]) / dx
+        
+        # Only apply forces to fluid cells
+        fx *= fluid_mask
+        fy *= fluid_mask
+        
+        return fx, fy
+    
+    def _apply_constraint_cohesion(self):
+        """Apply constraint-based cohesion to maintain fluid coherence.
+        
+        This method uses hard constraints rather than forces, which is
+        more stable for large grid cells.
+        """
+        try:
+            from .fluid_constraint_cohesion import apply_fluid_cohesion_constraints
+        except ImportError:
+            from fluid_constraint_cohesion import apply_fluid_cohesion_constraints
+        
+        from materials import MaterialType
+        
+        # Define cohesive fluids
+        cohesive_fluids = {MaterialType.WATER, MaterialType.MAGMA}
+        
+        # Apply constraints
+        self.velocity_x, self.velocity_y = apply_fluid_cohesion_constraints(
+            self.sim.material_types,
+            self.velocity_x,
+            self.velocity_y,
+            cohesive_fluids,
+            self.sim.cell_size,
+            1.0  # dt
+        )
     
     def detect_enclosed_fluids(self, rigid_body_mask):
         """Detect fluid regions that are topologically enclosed by a rigid body.
@@ -1150,47 +1193,3 @@ class FluidDynamics:
         
         return success
     
-    def _compute_surface_tension_pressure(self):
-        """Compute surface tension pressure source term for fluids at interfaces.
-        
-        Returns pressure source (Pa) that creates cohesive forces to minimize surface area.
-        """
-        from materials import MaterialType
-        
-        # Surface tension coefficient (Pa·m) - much stronger than real water for discrete cells
-        # Real water: ~0.072 N/m, but we need much stronger effect for discrete cells
-        sigma = 50000.0  # Pa·m (increased from 5000.0 for much stronger effect)
-        
-        dx = self.sim.cell_size
-        mt = self.sim.material_types
-        rho = self.sim.density
-        
-        # Define fluid materials that should have surface tension
-        fluid_types = {MaterialType.WATER, MaterialType.MAGMA}
-        
-        pressure_source = np.zeros_like(rho)
-        
-        # For each fluid cell, compute interface curvature and add cohesive pressure
-        for y in range(1, self.sim.height - 1):
-            for x in range(1, self.sim.width - 1):
-                if mt[y, x] not in fluid_types:
-                    continue
-                
-                # Count neighbors with significantly lower density (interface detection)
-                neighbors = [
-                    (y-1, x), (y+1, x), (y, x-1), (y, x+1)  # 4-connected
-                ]
-                
-                interface_count = 0
-                for ny, nx in neighbors:
-                    if rho[ny, nx] < 0.5 * rho[y, x]:  # Interface with much lighter material
-                        interface_count += 1
-                
-                # Add cohesive pressure proportional to interface exposure
-                # More exposed cells (more interfaces) get higher internal pressure
-                if interface_count > 0:
-                    # Pressure scales with interface count and surface tension
-                    # Factor of 2/dx gives correct dimensional scaling (Pa·m / m = Pa)
-                    pressure_source[y, x] = sigma * interface_count * 2.0 / dx
-        
-        return pressure_source
