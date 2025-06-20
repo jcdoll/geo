@@ -53,7 +53,7 @@ SCENARIO_GROUPS = {
 }
 
 # Register fluid scenarios
-SCENARIO_GROUPS['fluids'].add_scenario('water_conservation', WaterConservationScenario, grid_size=60)
+SCENARIO_GROUPS['fluids'].add_scenario('water_conservation', WaterConservationScenario)
 SCENARIO_GROUPS['fluids'].add_scenario('water_conservation_stress', WaterConservationStressScenario)
 SCENARIO_GROUPS['fluids'].add_scenario('water_coalescence', WaterDropletCoalescenceScenario, num_droplets=5)
 SCENARIO_GROUPS['fluids'].add_scenario('water_blob', WaterBlobScenario, blob_width=20, blob_height=10)

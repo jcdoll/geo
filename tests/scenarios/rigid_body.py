@@ -13,15 +13,13 @@ class RigidBodyWithEnclosedFluidScenario(TestScenario):
     
     def __init__(self, container_size: int = 15, wall_thickness: int = 2,
                  fluid_type: MaterialType = MaterialType.WATER,
-                 container_material: MaterialType = MaterialType.GRANITE,
-                 grid_size: int = 60, **kwargs):
+                 container_material: MaterialType = MaterialType.GRANITE, **kwargs):
         """Initialize rigid body with enclosed fluid test."""
         super().__init__(**kwargs)
         self.container_size = container_size
         self.wall_thickness = wall_thickness
         self.fluid_type = fluid_type
         self.container_material = container_material
-        self.grid_size = grid_size
         
     def get_name(self) -> str:
         return f"rigid_container_{self.fluid_type.name.lower()}"
@@ -159,13 +157,12 @@ class RigidBodyFluidDisplacementScenario(TestScenario):
     """Test rigid body displacing fluid (rock pushing water)."""
     
     def __init__(self, rock_size: int = 10, rock_material: MaterialType = MaterialType.GRANITE,
-                 fluid_depth: int = 20, grid_size: int = 60, **kwargs):
+                 fluid_depth: int = 20, **kwargs):
         """Initialize fluid displacement test."""
         super().__init__(**kwargs)
         self.rock_size = rock_size
         self.rock_material = rock_material
         self.fluid_depth = fluid_depth
-        self.grid_size = grid_size
         
     def get_name(self) -> str:
         return f"rigid_displacement_{self.rock_material.name.lower()}_in_water"
@@ -303,14 +300,12 @@ class RigidBodyRotationScenario(TestScenario):
     """Test rigid body rotation and angular momentum."""
     
     def __init__(self, shape: str = "L", size: int = 10,
-                 material: MaterialType = MaterialType.GRANITE,
-                 grid_size: int = 60, **kwargs):
+                 material: MaterialType = MaterialType.GRANITE, **kwargs):
         """Initialize rotation test."""
         super().__init__(**kwargs)
         self.shape = shape
         self.size = size
         self.material = material
-        self.grid_size = grid_size
         
     def get_name(self) -> str:
         return f"rigid_rotation_{self.shape}_shape"

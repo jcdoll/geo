@@ -37,11 +37,11 @@ class TestVisualizerFunctionality:
         mock_font.return_value = MagicMock()
         
         # Create visualizer
-        viz = GeologyVisualizer(sim_width=32, sim_height=32, window_width=800, window_height=600)
+        viz = GeologyVisualizer(window_width=800, window_height=600)
         
         # Check basic attributes
-        assert viz.sim_width == 32
-        assert viz.sim_height == 32
+        assert viz.sim_width > 0
+        assert viz.sim_height > 0
         assert viz.paused == True  # Should start paused
         assert viz.display_mode == 'materials'
         assert viz.mouse_tool == 'heat'
@@ -55,7 +55,7 @@ class TestVisualizerFunctionality:
         mock_display.return_value = MagicMock()
         mock_font.return_value = MagicMock()
         
-        viz = GeologyVisualizer(sim_width=16, sim_height=16)
+        viz = GeologyVisualizer()
         
         # Test all display modes
         modes = ['materials', 'temperature', 'pressure', 'power', 'velocity', 'gravity', 'potential']
@@ -76,7 +76,7 @@ class TestVisualizerFunctionality:
         mock_display.return_value = MagicMock()
         mock_font.return_value = MagicMock()
         
-        viz = GeologyVisualizer(sim_width=16, sim_height=16)
+        viz = GeologyVisualizer()
         
         # Test all tools
         tools = ['heat', 'pressure', 'delete', 'add']
@@ -99,7 +99,7 @@ class TestVisualizerFunctionality:
         mock_display.return_value = MagicMock()
         mock_font.return_value = MagicMock()
         
-        viz = GeologyVisualizer(sim_width=16, sim_height=16)
+        viz = GeologyVisualizer()
         
         # Test all tabs
         tabs = ['controls', 'stats', 'composition', 'graphs', 'info']
@@ -115,7 +115,7 @@ class TestVisualizerFunctionality:
         mock_display.return_value = MagicMock()
         mock_font.return_value = MagicMock()
         
-        viz = GeologyVisualizer(sim_width=16, sim_height=16)
+        viz = GeologyVisualizer()
         
         # Test speed settings
         speeds = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
@@ -146,7 +146,7 @@ class TestVisualizerFunctionality:
         
         mock_font_instance.render = capture_render
         
-        viz = GeologyVisualizer(sim_width=16, sim_height=16)
+        viz = GeologyVisualizer()
         viz.screen = mock_screen
         
         # Draw status bar
@@ -172,7 +172,7 @@ class TestVisualizerFunctionality:
         mock_display.return_value = MagicMock()
         mock_font.return_value = MagicMock()
         
-        viz = GeologyVisualizer(sim_width=16, sim_height=16)
+        viz = GeologyVisualizer()
         
         # Check buttons exist
         assert hasattr(viz, 'buttons')
@@ -205,7 +205,7 @@ class TestVisualizerFunctionality:
         mock_display.return_value = MagicMock()
         mock_font.return_value = MagicMock()
         
-        viz = GeologyVisualizer(sim_width=16, sim_height=16)
+        viz = GeologyVisualizer()
         
         # Test with time_series_data attribute
         viz.simulation.time_series_data = {

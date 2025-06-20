@@ -14,6 +14,7 @@ import argparse
 import sys
 import os
 from typing import Dict, Any
+import pygame
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,7 +25,7 @@ from tests.scenarios import SCENARIO_GROUPS, ALL_SCENARIOS
 
 
 class VisualScenarioRunner:
-    """Runs scenarios with visualization."""
+    """Runs scenarios with visualization using standard visualizer."""
     
     def __init__(self, scenario_name: str, **override_params):
         """Initialize visual runner with a scenario."""
@@ -34,11 +35,24 @@ class VisualScenarioRunner:
                            f"Available: {', '.join(ALL_SCENARIOS.keys())}")
         
         scenario_class, default_params = ALL_SCENARIOS[scenario_name]
+        
+        # Extract grid_size before merging params (it's for the runner, not the scenario)
+        grid_size = override_params.pop('grid_size', 60)
+        
+        # Now merge the remaining params
         params = {**default_params, **override_params}
-        self.scenario = scenario_class(**params)
+        
+        try:
+            self.scenario = scenario_class(**params)
+        except Exception as e:
+            print(f"Error creating scenario: {e}")
+            print(f"Scenario class: {scenario_class}")
+            print(f"Parameters: {params}")
+            import traceback
+            traceback.print_exc()
+            raise
         
         # Create simulation
-        grid_size = params.get('grid_size', 60)
         self.sim = GeoGame(
             grid_size, grid_size,
             cell_size=50.0,
@@ -51,81 +65,78 @@ class VisualScenarioRunner:
         print(f"\nRunning scenario: {self.scenario.get_name()}")
         print(f"Description: {self.scenario.get_description()}")
         print(f"Parameters: {params}")
+        print(f"Grid size: {grid_size}x{grid_size}")
         print("-" * 60)
         
-        self.scenario.setup(self.sim)
-        self.scenario.store_initial_state(self.sim)
+        try:
+            self.scenario.setup(self.sim)
+            self.scenario.store_initial_state(self.sim)
+        except Exception as e:
+            print(f"Error during setup: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
         
-        # Get visualization hints
-        self.viz_hints = self.scenario.get_visualization_hints()
-        
-        # Create visualizer
-        self.viz = GeologyVisualizer(self.sim)
+        # Create visualizer with our simulation - just use the standard one!
+        self.viz = GeologyVisualizer(simulation=self.sim)
         
         # Apply visualization hints
-        if 'preferred_display_mode' in self.viz_hints:
-            mode = self.viz_hints['preferred_display_mode']
-            if mode == 'temperature':
-                self.viz.display_mode = 1
-            elif mode == 'pressure':
-                self.viz.display_mode = 2
-            # Add more modes as needed
+        viz_hints = self.scenario.get_visualization_hints()
+        if 'preferred_display_mode' in viz_hints:
+            mode = viz_hints['preferred_display_mode']
+            if mode in ['materials', 'temperature', 'pressure']:
+                self.viz.display_mode = mode
                 
         self.step_count = 0
-        self.paused = True
         
-    def run(self):
-        """Run the visual simulation."""
-        print("\nControls:")
-        print("  SPACE: Play/Pause")
-        print("  RIGHT: Step forward")
-        print("  R: Reset scenario")
-        print("  M: Cycle display modes")
-        print("  ESC: Exit")
-        print()
+        # Store original reset function and replace with scenario reset
+        self.original_reset = self.viz.simulation.reset
+        self.viz.simulation.reset = self._reset_scenario
         
-        running = True
-        while running:
-            # Handle events
-            events = self.viz.handle_events()
-            
-            for event in events:
-                if event == 'quit':
-                    running = False
-                elif event == 'pause':
-                    self.paused = not self.paused
-                    print("Paused" if self.paused else "Playing")
-                elif event == 'reset':
-                    self.reset()
-                elif event == 'step':
-                    self.step()
-                    
-            # Auto-step if not paused
-            if not self.paused:
-                self.step()
-                
-            # Update display
-            self.viz.render()
-            
-            # Show evaluation metrics
-            if self.step_count % 10 == 0:
-                result = self.scenario.evaluate(self.sim)
-                print(f"Step {self.step_count}: {result['message']}")
-                if result.get('success'):
-                    print("  SUCCESS!")
-                    
-    def step(self):
-        """Advance simulation by one step."""
-        self.sim.step_forward()
+        # Store original step_forward and wrap it
+        self.original_step = self.viz.simulation.step_forward
+        self.viz.simulation.step_forward = self._wrapped_step_forward
+        
+    def _wrapped_step_forward(self):
+        """Wrap step_forward to track steps and print evaluation."""
+        # Call original step
+        self.original_step()
         self.step_count += 1
         
-    def reset(self):
-        """Reset the scenario."""
+        # Print evaluation every 10 steps
+        if self.step_count % 10 == 0:
+            result = self.scenario.evaluate(self.sim)
+            print(f"Step {self.step_count}: {result['message']}")
+            if result.get('success'):
+                print("  SUCCESS!")
+        
+    def _reset_scenario(self):
+        """Reset to scenario initial state."""
         print("\nResetting scenario...")
         self.scenario.setup(self.sim)
         self.scenario.store_initial_state(self.sim)
         self.step_count = 0
-        self.paused = True
+    
+    def run(self):
+        """Run the visualization with evaluation monitoring."""
+        print("\nScenario Controls:")
+        print("  R: Reset scenario")
+        print("  Evaluation printed every 10 steps")
+        print("\nUse standard visualizer controls (H for help)")
+        print()
+        
+        # Print initial evaluation
+        result = self.scenario.evaluate(self.sim)
+        print(f"Initial: {result['message']}")
+        
+        # Run the standard visualizer
+        try:
+            self.viz.print_controls()
+            self.viz.run()
+        except Exception as e:
+            print(f"Visualizer error: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 def list_scenarios():
@@ -210,6 +221,8 @@ def main():
         runner.run()
     except Exception as e:
         print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
         return 1
         
     return 0

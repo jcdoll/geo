@@ -83,13 +83,14 @@ class GeologyVisualizer:
         # For very small or very large use scientific notation with 1 digit
         return f"{value:.0e} m/s"
     
-    def __init__(self, sim_width: int = 128, sim_height: int = 128, window_width: int = 1200, window_height: int = 800):
+    def __init__(self, simulation=None, sim_width: int = 128, sim_height: int = 128, window_width: int = 1200, window_height: int = 800):
         """
         Initialize the visualizer
         
         Args:
-            sim_width: Simulation grid width
-            sim_height: Simulation grid height
+            simulation: Optional GeoGame instance to visualize. If None, creates a new one.
+            sim_width: Simulation grid width (ignored if simulation provided)
+            sim_height: Simulation grid height (ignored if simulation provided)
             window_width: Display window width
             window_height: Display window height
         """
@@ -106,8 +107,15 @@ class GeologyVisualizer:
             # Silently ignore if font sub-module absent (mocked pygame)
             pass
         
-        self.sim_width = sim_width
-        self.sim_height = sim_height
+        # Use provided simulation or extract dimensions
+        if simulation is not None:
+            self.simulation = simulation
+            self.sim_width = simulation.width
+            self.sim_height = simulation.height
+        else:
+            self.sim_width = sim_width
+            self.sim_height = sim_height
+            self.simulation = None  # Will be created later
         self.window_width = window_width
         self.window_height = window_height
         
@@ -144,8 +152,9 @@ class GeologyVisualizer:
             'yellow': (255, 255, 100)
         }
         
-        # Simulation state (start in INFO mode; press 'L' to toggle DEBUG)
-        self.simulation = GeoGame(sim_width, sim_height, log_level="INFO")
+        # Create simulation if not provided
+        if self.simulation is None:
+            self.simulation = GeoGame(self.sim_width, self.sim_height, log_level="INFO")
         self.running = True
         self.paused = True  # Start paused
         self.display_mode = 'materials'  # 'materials', 'temperature', 'pressure'

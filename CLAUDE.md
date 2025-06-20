@@ -2,6 +2,14 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## CRITICAL: Always Test Your Changes
+
+**Before considering any task complete, ALWAYS test your code changes:**
+1. For Python code: Run the affected files or tests to ensure no syntax/import errors
+2. For test code: Run at least one test to verify it works
+3. Check for basic errors like AttributeError, ImportError, etc.
+4. If you get an error, iterate and fix it - don't leave broken code
+
 ## Important: Read AGENTS.md First
 
 Before making any changes, **read `AGENTS.md`** which contains:
@@ -13,11 +21,12 @@ Before making any changes, **read `AGENTS.md`** which contains:
 
 ## Commands
 
-### Python Virtual Environment
-Before running any Python commands, activate the virtual environment:
+### CRITICAL: Python Virtual Environment
+**ALWAYS activate the virtual environment before running ANY Python commands:**
 ```bash
 source .venv/bin/activate
 ```
+**⚠️ IMPORTANT: All Python tools (pytest, python, pip) REQUIRE the venv to be activated first!**
 
 ### Running the Simulation
 ```bash
@@ -45,10 +54,13 @@ pytest --cov=. tests/
 python tests/run_visual_tests.py --list
 
 # Run specific scenario with visualization
-python tests/run_visual_tests.py magma_small
+python tests/run_visual_tests.py water_blob
 
 # Run scenario with custom parameters
 python tests/run_visual_tests.py water_conservation --steps 500 --size 80
+
+# Note: Visual tests require a display. For headless testing use pytest instead:
+# SDL_VIDEODRIVER=dummy may hang in pygame event loop
 ```
 
 ### Development
@@ -162,3 +174,19 @@ except ImportError:
 2. Add focus regions and metrics to scenario evaluation
 3. Disable specific physics phases to isolate issues
 4. Use screenshot capture for documenting bugs
+
+## Known Issues
+
+### Surface Tension Implementation Issues
+- Fixed sign error (forces now point inward for convex droplets)
+- However, the continuum CSF model creates instabilities on discrete grids:
+  - Interface cells "dance" with fractal-like patterns
+  - Forces push water outward in unstable oscillations
+  - Curvature calculations are too noisy for 50m cells
+- Root cause: The continuum surface tension formula (f = σκn|∇c|) doesn't work well on coarse discrete grids
+- Possible solutions:
+  1. Use the simpler pressure-based approach in `_compute_surface_tension_pressure`
+  2. Implement nearest-neighbor cohesion forces
+  3. Use energy minimization approach
+  4. Add smoothing/damping to reduce noise
+- Current workaround: Surface tension disabled in tests, relaxed criteria allow some fragmentation

@@ -36,16 +36,11 @@ class TestScenarioVisualizer(GeologyVisualizer):
         self.max_steps = max_steps
         self.test_completed = False
         
-        # Set simulation dimensions from runner
-        if 'sim_width' not in kwargs:
-            kwargs['sim_width'] = scenario_runner.sim_width
-        if 'sim_height' not in kwargs:
-            kwargs['sim_height'] = scenario_runner.sim_height
-            
-        super().__init__(**kwargs)
+        # Setup the scenario first
+        sim = self.scenario_runner.setup()
         
-        # Replace default simulation with test scenario
-        self.simulation = self.scenario_runner.setup()
+        # Pass the simulation to the visualizer
+        super().__init__(simulation=sim, **kwargs)
         
         # Get initial evaluation
         self._evaluate_and_print()

@@ -900,9 +900,19 @@ class FluidDynamics:
         dnydy = np.gradient(ny, dx, axis=0)
         kappa = dnxdx + dnydy
 
-        # Surface-tension force density  f = σ κ n |∇c|
-        fx_st = sigma * kappa * nx * mag
-        fy_st = sigma * kappa * ny * mag
+        # Surface-tension force density  f = -σ κ n |∇c|
+        # NEGATIVE sign because for a convex droplet (κ > 0), we want forces pointing INWARD
+        # The normal n points outward, so we need to negate to get inward forces
+        fx_st = -sigma * kappa * nx * mag
+        fy_st = -sigma * kappa * ny * mag
+        
+        # KNOWN ISSUE: This continuum surface tension model creates instabilities
+        # on discrete grids with large cells (50m). The curvature calculation
+        # becomes very noisy, causing interface cells to "dance" with fractal patterns.
+        # TODO: Replace with discrete grid-friendly approach like:
+        # 1. Simple pressure-based method (_compute_surface_tension_pressure)
+        # 2. Nearest-neighbor cohesion forces
+        # 3. Energy minimization approach
 
         return fx_st, fy_st
     

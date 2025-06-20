@@ -12,18 +12,16 @@ class MaterialStabilityScenario(TestScenario):
     """Test material stability in various conditions."""
     
     def __init__(self, test_material: MaterialType = MaterialType.GRANITE,
-                 environment: str = "vacuum", grid_size: int = 40, **kwargs):
+                 environment: str = "vacuum", **kwargs):
         """Initialize material stability test.
         
         Args:
             test_material: Material to test
             environment: "vacuum", "air", "water", or "magma"
-            grid_size: Size of simulation grid
         """
         super().__init__(**kwargs)
         self.test_material = test_material
         self.environment = environment
-        self.grid_size = grid_size
         
     def get_name(self) -> str:
         return f"material_stability_{self.test_material.name.lower()}_in_{self.environment}"
@@ -143,18 +141,16 @@ class MetamorphismScenario(TestScenario):
     """Test rock metamorphism under pressure and temperature."""
     
     def __init__(self, source_rock: MaterialType = MaterialType.SHALE,
-                 target_conditions: str = "high_pressure", grid_size: int = 60, **kwargs):
+                 target_conditions: str = "high_pressure", **kwargs):
         """Initialize metamorphism test.
         
         Args:
             source_rock: Starting rock type
             target_conditions: "high_pressure", "high_temp", or "both"
-            grid_size: Simulation grid size
         """
         super().__init__(**kwargs)
         self.source_rock = source_rock
         self.target_conditions = target_conditions
-        self.grid_size = grid_size
         
     def get_name(self) -> str:
         return f"metamorphism_{self.source_rock.name.lower()}_{self.target_conditions}"
@@ -277,12 +273,11 @@ class PhaseTransitionScenario(TestScenario):
     """Test phase transitions (melting, freezing, vaporization)."""
     
     def __init__(self, material: MaterialType = MaterialType.ICE,
-                 transition_type: str = "melting", grid_size: int = 60, **kwargs):
+                 transition_type: str = "melting", **kwargs):
         """Initialize phase transition test."""
         super().__init__(**kwargs)
         self.material = material
         self.transition_type = transition_type
-        self.grid_size = grid_size
         
     def get_name(self) -> str:
         return f"phase_transition_{self.material.name.lower()}_{self.transition_type}"

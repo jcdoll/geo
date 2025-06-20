@@ -11,13 +11,11 @@ from geo_game import GeoGame
 class GravityFallScenario(TestScenario):
     """Test objects falling under gravity."""
     
-    def __init__(self, object_size: int = 5, object_material: MaterialType = MaterialType.BASALT,
-                 grid_size: int = 60, **kwargs):
+    def __init__(self, object_size: int = 5, object_material: MaterialType = MaterialType.BASALT, **kwargs):
         """Initialize gravity fall scenario."""
         super().__init__(**kwargs)
         self.object_size = object_size
         self.object_material = object_material
-        self.grid_size = grid_size
         
     def get_name(self) -> str:
         return f"gravity_fall_{self.object_material.name.lower()}"
@@ -113,13 +111,12 @@ class BuoyancyScenario(TestScenario):
     
     def __init__(self, fluid_type: MaterialType = MaterialType.WATER,
                  object_type: MaterialType = MaterialType.ICE,
-                 object_size: int = 5, grid_size: int = 60, **kwargs):
+                 object_size: int = 5, **kwargs):
         """Initialize buoyancy scenario."""
         super().__init__(**kwargs)
         self.fluid_type = fluid_type
         self.object_type = object_type
         self.object_size = object_size
-        self.grid_size = grid_size
         
     def get_name(self) -> str:
         return f"buoyancy_{self.object_type.name.lower()}_in_{self.fluid_type.name.lower()}"
@@ -234,11 +231,10 @@ class BuoyancyScenario(TestScenario):
 class HydrostaticPressureScenario(TestScenario):
     """Test hydrostatic pressure gradients in fluids."""
     
-    def __init__(self, fluid_depth: int = 40, grid_size: int = 60, **kwargs):
+    def __init__(self, fluid_depth: int = 40, **kwargs):
         """Initialize hydrostatic pressure scenario."""
         super().__init__(**kwargs)
         self.fluid_depth = fluid_depth
-        self.grid_size = grid_size
         
     def get_name(self) -> str:
         return f"hydrostatic_pressure_depth_{self.fluid_depth}"
