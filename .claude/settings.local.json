@@ -32,7 +32,8 @@
       "Bash(mv:*)",
       "Bash(ls:*)",
       "Bash(echo:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(true)"
     ],
     "deny": []
   }

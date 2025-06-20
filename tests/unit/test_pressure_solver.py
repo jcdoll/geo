@@ -11,7 +11,7 @@ def test_pressure_solver_basic():
     ny, nx = 10, 10
     dx = 1.0
     
-    # Uniform RHS = 1 should give P = (x²+y²)/4 - boundary terms
+    # Uniform RHS = 1 with ∇²P = rhs should give negative bowl-shaped pressure
     rhs = np.ones((ny, nx))
     pressure = solve_pressure(rhs, dx)
     
@@ -22,11 +22,12 @@ def test_pressure_solver_basic():
     assert np.allclose(pressure[:, -1], 0), "Right boundary should be zero"
     
     # Check that interior has reasonable values
-    interior_max = np.max(pressure[1:-1, 1:-1])
-    assert interior_max > 0, "Interior pressure should be positive for positive RHS"
+    # For ∇²P = rhs with positive rhs, pressure should be negative (bowl shape)
+    interior_min = np.min(pressure[1:-1, 1:-1])
+    assert interior_min < 0, "Interior pressure should be negative for positive RHS"
     
     print(f"Basic pressure solver test passed")
-    print(f"  Max interior pressure: {interior_max:.6f}")
+    print(f"  Min interior pressure: {interior_min:.6f}")
 
 
 def test_pressure_solver_zero_rhs():
@@ -55,19 +56,19 @@ def test_pressure_solver_point_source():
     
     pressure = solve_pressure(rhs, dx)
     
-    # Should have maximum at or near the point source
-    max_y, max_x = np.unravel_index(np.argmax(pressure), pressure.shape)
+    # Should have minimum at or near the point source (negative for positive source)
+    min_y, min_x = np.unravel_index(np.argmin(pressure), pressure.shape)
     center_y, center_x = ny//2, nx//2
     
-    # Maximum should be near the center
-    distance_from_center = np.sqrt((max_y - center_y)**2 + (max_x - center_x)**2)
-    assert distance_from_center <= 2, "Maximum should be near point source"
+    # Minimum should be near the center
+    distance_from_center = np.sqrt((min_y - center_y)**2 + (min_x - center_x)**2)
+    assert distance_from_center <= 2, "Minimum should be near point source"
     
-    # Values should decay away from source
+    # Values should increase (become less negative) away from source
     center_value = pressure[center_y, center_x]
     corner_value = pressure[1, 1]  # Near corner but not on boundary
     
-    assert center_value > corner_value, "Pressure should be higher near source"
+    assert center_value < corner_value, "Pressure should be more negative near positive source"
     
     print(f"Point source test passed")
     print(f"  Center pressure: {center_value:.6f}")

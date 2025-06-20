@@ -33,18 +33,28 @@ def test_material_properties():
         density=1000.0,
         thermal_conductivity=0.6,
         specific_heat=4186.0,
-        melting_point=273.15,
-        boiling_point=373.15,
-        viscosity=1e-3
+        strength=50.0,
+        porosity=0.1,
+        color_rgb=(100, 100, 100),
+        emissivity=0.9,
+        albedo=0.3,
+        thermal_expansion=1e-5,
+        kinematic_viscosity=1e-6,
+        rigidity_coeff=0.0
     )
     
     # Check all properties are accessible
     assert props.density == 1000.0
     assert props.thermal_conductivity == 0.6
     assert props.specific_heat == 4186.0
-    assert props.melting_point == 273.15
-    assert props.boiling_point == 373.15
-    assert props.viscosity == 1e-3
+    assert props.strength == 50.0
+    assert props.porosity == 0.1
+    assert props.color_rgb == (100, 100, 100)
+    assert props.emissivity == 0.9
+    assert props.albedo == 0.3
+    assert props.thermal_expansion == 1e-5
+    assert props.kinematic_viscosity == 1e-6
+    assert props.rigidity_coeff == 0.0
     
     print(f"MaterialProperties test passed")
 
@@ -64,13 +74,14 @@ def test_material_database():
         assert props.thermal_conductivity > 0, f"Thermal conductivity must be positive for {material_type}"
         assert props.specific_heat > 0, f"Specific heat must be positive for {material_type}"
         
-        # Temperature checks
-        if props.melting_point is not None:
-            assert props.melting_point > 0, f"Melting point must be positive for {material_type}"
-        if props.boiling_point is not None:
-            assert props.boiling_point > 0, f"Boiling point must be positive for {material_type}"
-            if props.melting_point is not None:
-                assert props.boiling_point > props.melting_point, f"Boiling point must exceed melting point for {material_type}"
+        # Check color is valid RGB
+        assert len(props.color_rgb) == 3, f"Color must be RGB tuple for {material_type}"
+        assert all(0 <= c <= 255 for c in props.color_rgb), f"RGB values must be 0-255 for {material_type}"
+        
+        # Check other physical properties
+        assert 0 <= props.porosity <= 1, f"Porosity must be between 0 and 1 for {material_type}"
+        assert 0 <= props.emissivity <= 1, f"Emissivity must be between 0 and 1 for {material_type}"
+        assert 0 <= props.albedo <= 1, f"Albedo must be between 0 and 1 for {material_type}"
     
     print(f"MaterialDatabase completeness test passed")
     print(f"  Verified properties for {len(MaterialType)} materials")
@@ -134,31 +145,38 @@ def test_thermal_properties():
 
 
 def test_phase_transition_temperatures():
-    """Test phase transition temperatures are realistic"""
+    """Test that materials have proper transition rules"""
     db = MaterialDatabase()
     
     # Water phase transitions
     water_props = db.get_properties(MaterialType.WATER)
     ice_props = db.get_properties(MaterialType.ICE)
     
-    # Ice should melt around 273K
-    if ice_props.melting_point is not None:
-        assert 270 < ice_props.melting_point < 280, f"Ice melting point should be ~273K, got {ice_props.melting_point}"
+    # Check that water and ice have transition rules
+    assert len(water_props.transitions) > 0, "Water should have transition rules"
+    assert len(ice_props.transitions) > 0, "Ice should have transition rules"
     
-    # Water should boil around 373K
-    if water_props.boiling_point is not None:
-        assert 370 < water_props.boiling_point < 380, f"Water boiling point should be ~373K, got {water_props.boiling_point}"
+    # Check ice->water transition exists
+    ice_to_water_found = False
+    for transition in ice_props.transitions:
+        if transition.target == MaterialType.WATER:
+            ice_to_water_found = True
+            # Check temperature range is reasonable (around 0°C)
+            assert -10 < transition.min_temp < 10, f"Ice->water transition should happen near 0°C"
+            
+    assert ice_to_water_found, "Ice should have transition to water"
     
-    # Magma should have high melting point
-    magma_props = db.get_properties(MaterialType.MAGMA)
-    if magma_props.melting_point is not None:
-        assert magma_props.melting_point > 1000, "Magma should have high melting point"
+    # Check water->ice transition exists
+    water_to_ice_found = False
+    for transition in water_props.transitions:
+        if transition.target == MaterialType.ICE:
+            water_to_ice_found = True
+            
+    assert water_to_ice_found, "Water should have transition to ice"
     
     print(f"Phase transition test passed")
-    if ice_props.melting_point:
-        print(f"  Ice melting point: {ice_props.melting_point:.1f} K")
-    if water_props.boiling_point:
-        print(f"  Water boiling point: {water_props.boiling_point:.1f} K")
+    print(f"  Water has {len(water_props.transitions)} transitions")
+    print(f"  Ice has {len(ice_props.transitions)} transitions")
 
 
 if __name__ == "__main__":

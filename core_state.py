@@ -136,6 +136,21 @@ class CoreState:
         # ---------- caches / book-keeping ---------------------------------
         self._material_props_cache: Dict[MaterialType, Tuple[float, float, float]] = {}
         self._properties_dirty = True
+        
+        # ---------- physics toggles ---------------------------------------
+        self.enable_self_gravity = True
+        self.external_gravity = (0, 0)  # External gravity field (m/s²)
+        
+        # Control flags for physics modules
+        self.enable_internal_heating = True
+        self.enable_solar_heating = True
+        self.enable_radiative_cooling = True
+        self.enable_heat_diffusion = True
+        self.enable_material_processes = True
+        self.enable_atmospheric_processes = True
+        self.enable_weathering = True
+        self.enable_solid_drag = True
+        self.debug_rigid_bodies = False
 
         self._setup_neighbors()
         self._update_material_properties()

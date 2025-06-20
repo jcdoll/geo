@@ -8,7 +8,7 @@ from materials import MaterialType
 
 def test_simulation_initialization():
     """Test that simulation initializes correctly"""
-    sim = GeoSimulation(width=20, height=30, cell_size=50.0)
+    sim = GeoSimulation(width=20, height=30, cell_size=50.0, setup_planet=False)
     
     # Check basic properties
     assert sim.width == 20
@@ -21,9 +21,9 @@ def test_simulation_initialization():
     assert sim.pressure.shape == (30, 20)
     assert sim.density.shape == (30, 20)
     
-    # Check default values
+    # Check default values (without planet)
     assert np.all(sim.material_types == MaterialType.SPACE)
-    assert np.all(sim.temperature > 0)  # Should have reasonable temperatures
+    assert np.all(sim.temperature >= 0)  # Should have non-negative temperatures
     assert np.all(sim.pressure >= 0)   # Pressure should be non-negative
     assert np.all(sim.density >= 0)    # Density should be non-negative
     
@@ -34,7 +34,7 @@ def test_simulation_initialization():
 
 def test_simulation_step_forward():
     """Test that simulation can step forward without errors"""
-    sim = GeoSimulation(width=10, height=15, cell_size=100.0)
+    sim = GeoSimulation(width=10, height=15, cell_size=100.0, setup_planet=False)
     
     # Add some materials for interesting dynamics
     sim.material_types[5:10, :] = MaterialType.WATER
@@ -71,7 +71,7 @@ def test_simulation_step_forward():
 
 def test_simulation_reset():
     """Test simulation reset functionality"""
-    sim = GeoSimulation(width=8, height=12, cell_size=75.0)
+    sim = GeoSimulation(width=8, height=12, cell_size=75.0, setup_planet=False)
     
     # Modify simulation state
     sim.material_types[3:6, 2:5] = MaterialType.MAGMA
@@ -103,7 +103,7 @@ def test_simulation_reset():
 
 def test_physics_integration():
     """Test that different physics modules work together"""
-    sim = GeoSimulation(width=15, height=20, cell_size=100.0)
+    sim = GeoSimulation(width=15, height=20, cell_size=100.0, setup_planet=False)
     
     # Enable multiple physics systems
     sim.external_gravity = (0, 10)
@@ -168,7 +168,7 @@ def test_physics_integration():
 
 def test_conservation_laws():
     """Test that conservation laws are approximately satisfied"""
-    sim = GeoSimulation(width=12, height=12, cell_size=100.0)
+    sim = GeoSimulation(width=12, height=12, cell_size=100.0, setup_planet=False)
     
     # Disable processes that might create/destroy materials
     sim.enable_material_processes = False

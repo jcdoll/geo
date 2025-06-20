@@ -49,6 +49,7 @@ class GeoGame(CoreState, CoreToolsMixin):
         cell_depth: Optional[float] = None,
         quality: int = 1,
         log_level: str | int = "INFO",
+        setup_planet: bool = True,
     ) -> None:
         super().__init__(width, height, cell_size=cell_size, cell_depth=cell_depth, quality=quality, log_level=log_level)
 
@@ -71,7 +72,8 @@ class GeoGame(CoreState, CoreToolsMixin):
         self.enable_surface_tension = True  # Now uses proper force-based implementation
 
         # Populate with a crude basalt-magma sphere so the visualiser shows something
-        self._setup_initial_planet()
+        if setup_planet:
+            self._setup_initial_planet()
 
     # ------------------------------------------------------------------
     # Initial planet seeding (very rough – replaces legacy _setup_planetary_conditions)
