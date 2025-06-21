@@ -27,11 +27,11 @@ class FluidDynamics:
         self.velocity_y = self.sim.velocity_y
         self.dv_thresh = 0.01  # m/s – velocity-difference threshold for swapping
         # Scale binding force appropriately for cell size (100m cells = 1e6 m³ volume)
-        # Rock cohesion ~1-10 MPa, so binding force density should be pressure / length scale
+        # Rock binding ~1-10 MPa, so binding force density should be pressure / length scale
         # For 100m cells: 1 MPa / 100m = 1e6 Pa / 100m = 1e4 N/m³
         # But we need to scale by actual cell size
         # For 50m cells with proper scaling: reduced to allow motion
-        self.solid_binding_force = 1e-2  # N/m³ – reference cohesion force density between solid voxels
+        self.solid_binding_force = 1e-2  # N/m³ – reference binding force density between solid voxels
         self.velocity_clamp = True # Enable/disable velocity clamping (enable if instability)
         self.velocity_threshold = True  # Enable/disable velocity threshold for swapping
 
@@ -398,11 +398,6 @@ class FluidDynamics:
         # Adding another (ρ_ref − ρ) g term would double-count the physics.
 
         
-        # Add bulk cohesion forces if enabled
-        if getattr(self.sim, 'enable_bulk_cohesion', False):
-            fx_coh, fy_coh = self._compute_bulk_cohesion_forces()
-            fx += fx_coh
-            fy += fy_coh
 
         # Store for any other module this macro-step
         self.sim.force_x = fx
@@ -417,11 +412,6 @@ class FluidDynamics:
         idx_a = self._mat_index[mt_a]
         idx_b = self._mat_index[mt_b]
         base_th = self._binding_matrix[idx_a, idx_b]
-        
-        # No special-case water/space or magma/space glue.
-        # Cohesion of fluids is provided by surface-tension forces, not by an
-        # artificial static binding threshold.  Therefore we leave `base_th`
-        # as defined in the pre-computed binding matrix.
         
         # Temperature weakening only affects bonds where at least one side is solid
         if np.isfinite(base_th) and base_th > 0:
@@ -504,7 +494,7 @@ class FluidDynamics:
                     
                     # For solid materials, check if source can overcome its own binding
                     # For fluid materials, binding is typically 0
-                    # Check material's self-binding (internal cohesion)
+                    # Check material's self-binding
                     src_bind = self._binding_threshold(mt[y, x], mt[y, x], temp[y, x])
                     
                     # Directional force projection (force of source along neighbour direction)
@@ -850,114 +840,6 @@ class FluidDynamics:
 
     
     
-    def _apply_bulk_cohesion(self):
-        """Apply bulk fluid cohesion to prevent fragmentation.
-        
-        This is an alternative to surface tension that works better
-        at geological scales by treating fluids as coherent masses.
-        """
-        try:
-            from .bulk_fluid_cohesion import apply_velocity_coherence, prevent_separation
-        except ImportError:
-            from bulk_fluid_cohesion import apply_velocity_coherence, prevent_separation
-        
-        from materials import MaterialType
-        
-        # Define cohesive fluids (water and magma)
-        cohesive_fluids = {MaterialType.WATER, MaterialType.MAGMA}
-        
-        # Create fluid mask
-        fluid_mask = np.zeros(self.sim.material_types.shape, dtype=bool)
-        for mat in cohesive_fluids:
-            fluid_mask |= (self.sim.material_types == mat)
-        
-        if np.any(fluid_mask):
-            # Apply velocity coherence
-            self.velocity_x, self.velocity_y = apply_velocity_coherence(
-                self.velocity_x, self.velocity_y, fluid_mask
-            )
-            
-            # Prevent separation
-            self.velocity_x, self.velocity_y = prevent_separation(
-                self.velocity_x, self.velocity_y, fluid_mask,
-                1.0, self.sim.cell_size
-            )
-    
-    def _compute_bulk_cohesion_forces(self):
-        """Compute bulk cohesion forces for fluids.
-        
-        Returns force density arrays (fx, fy) that create
-        cohesive behavior in fluid bodies.
-        """
-        try:
-            from .bulk_fluid_cohesion import compute_cohesion_pressure
-        except ImportError:
-            from bulk_fluid_cohesion import compute_cohesion_pressure
-        
-        from materials import MaterialType
-        
-        # Define cohesive fluids
-        cohesive_fluids = {MaterialType.WATER, MaterialType.MAGMA}
-        
-        # Create fluid mask
-        fluid_mask = np.zeros(self.sim.material_types.shape, dtype=bool)
-        for mat in cohesive_fluids:
-            fluid_mask |= (self.sim.material_types == mat)
-        
-        if not np.any(fluid_mask):
-            z = np.zeros_like(self.sim.density)
-            return z, z
-        
-        # Compute cohesion pressure field
-        cohesion_pressure = compute_cohesion_pressure(
-            fluid_mask, self.sim.cell_size, pressure_scale=1000.0  # Pa
-        )
-        
-        # Convert pressure to force via gradient
-        # F = -∇P (force points down pressure gradient)
-        fx = np.zeros_like(self.sim.density)
-        fy = np.zeros_like(self.sim.density)
-        
-        dx = self.sim.cell_size
-        
-        # Compute pressure gradients (force density N/m³)
-        fx[:, :-1] -= (cohesion_pressure[:, :-1] - cohesion_pressure[:, 1:]) / dx
-        fx[:, 1:]  += (cohesion_pressure[:, :-1] - cohesion_pressure[:, 1:]) / dx
-        
-        fy[:-1, :] -= (cohesion_pressure[:-1, :] - cohesion_pressure[1:, :]) / dx
-        fy[1:, :]  += (cohesion_pressure[:-1, :] - cohesion_pressure[1:, :]) / dx
-        
-        # Only apply forces to fluid cells
-        fx *= fluid_mask
-        fy *= fluid_mask
-        
-        return fx, fy
-    
-    def _apply_constraint_cohesion(self):
-        """Apply constraint-based cohesion to maintain fluid coherence.
-        
-        This method uses hard constraints rather than forces, which is
-        more stable for large grid cells.
-        """
-        try:
-            from .fluid_constraint_cohesion import apply_fluid_cohesion_constraints
-        except ImportError:
-            from fluid_constraint_cohesion import apply_fluid_cohesion_constraints
-        
-        from materials import MaterialType
-        
-        # Define cohesive fluids
-        cohesive_fluids = {MaterialType.WATER, MaterialType.MAGMA}
-        
-        # Apply constraints
-        self.velocity_x, self.velocity_y = apply_fluid_cohesion_constraints(
-            self.sim.material_types,
-            self.velocity_x,
-            self.velocity_y,
-            cohesive_fluids,
-            self.sim.cell_size,
-            1.0  # dt
-        )
     
     def detect_enclosed_fluids(self, rigid_body_mask):
         """Detect fluid regions that are topologically enclosed by a rigid body.

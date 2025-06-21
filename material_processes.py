@@ -283,7 +283,7 @@ class MaterialProcesses:
         """Create material binding matrix for force-based swapping calculations.
         
         Args:
-            solid_binding_force: Reference cohesion force density between solid voxels (N/m³)
+            solid_binding_force: Reference binding force density between solid voxels (N/m³)
             
         Returns:
             Tuple of (binding_matrix, material_index_map)

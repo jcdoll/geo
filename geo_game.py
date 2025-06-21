@@ -68,8 +68,6 @@ class GeoGame(CoreState, CoreToolsMixin):
         # Flag to enable/disable pressure calculation
         self.enable_pressure = True
         
-        # Flag to enable/disable surface tension
-        self.enable_surface_tension = True  # Now uses proper force-based implementation
 
         # Populate with a crude basalt-magma sphere so the visualiser shows something
         if setup_planet:

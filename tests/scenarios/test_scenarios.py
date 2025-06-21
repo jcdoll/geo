@@ -66,30 +66,6 @@ def test_water_conservation(grid_size):
         assert abs(metrics['percent_change']) < 5.0, \
             f"Water loss too high: {metrics['percent_change']:.1f}%"
 
-
-def test_water_droplet_coalescence():
-    """Test that surface tension causes water droplets to merge."""
-    scenario = WaterDropletCoalescenceScenario(
-        num_droplets=3,
-        droplet_size=3,
-        grid_size=40,
-        timeout=20
-    )
-    runner = ScenarioRunner(scenario, sim_width=40, sim_height=40)
-    result = runner.run_headless(max_steps=50)
-    
-    # With surface tension fixed, expect coalescence and conservation
-    metrics = result.get('metrics', {})
-    water_count = metrics.get('water_count', 0)
-    initial_features = metrics.get('initial_features', 3)
-    final_features = metrics.get('num_features', 3)
-    
-    assert water_count > 0, "All water disappeared"
-    # Surface tension is weak, don't require full coalescence
-    # Just check it doesn't get worse
-    assert final_features <= initial_features, f"Droplets split: {initial_features} → {final_features}"
-
-
 def test_magma_flow_and_cooling():
     """Test that magma flows downhill and cools to basalt."""
     scenario = MagmaFlowScenario(
@@ -120,8 +96,8 @@ def test_water_conservation_stress():
 
 
 @pytest.mark.parametrize("width,height", [(20, 10), (10, 20), (15, 15)])
-def test_water_blob_cohesion(width, height):
-    """Test water blob surface tension and cohesion."""
+def test_water_blob_behavior(width, height):
+    """Test water blob behavior."""
     scenario = WaterBlobScenario(
         blob_width=width,
         blob_height=height,
@@ -134,7 +110,7 @@ def test_water_blob_cohesion(width, height):
     assert result['success'], f"Water blob test failed: {result['message']}"
     
     metrics = result.get('metrics', {})
-    # Surface tension still weak, allow moderate fragmentation
+
     assert metrics.get('num_components', 50) <= 25, f"Water blob fragmented too much: {metrics.get('num_components')} components"
 
 

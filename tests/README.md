@@ -28,7 +28,6 @@ tests/
 #### Fluid Dynamics (`fluids.py`)
 - `WaterConservationScenario` - Water volume conservation during flow
 - `WaterConservationStressScenario` - Aggressive conservation test
-- `WaterDropletCoalescenceScenario` - Surface tension droplet merging
 - `WaterBlobScenario` - Blob cohesion and shape evolution
 - `WaterLineCollapseScenario` - Tall water column collapse
 - `MagmaFlowScenario` - Magma flow and cooling to basalt
@@ -53,7 +52,7 @@ tests/
 Pure functionality tests for individual components:
 - **Material Properties**: `test_materials.py`, `test_material_cache_cleanup.py`
 - **Physics Solvers**: `test_pressure_solver.py`, `test_poisson_solver.py`
-- **Fluid Dynamics**: `test_buoyancy_physics.py`, `test_surface_tension.py`
+- **Fluid Dynamics**: `test_buoyancy_physics.py`
 - **Rigid Bodies**: `test_rigid_body_fall.py`, `test_rigid_body_fluid_container.py`
 - **Visualization**: `test_visualizer_functionality.py`
 
@@ -115,9 +114,8 @@ When running visual tests:
 
 ## Test Categories
 
-### Fluids (7 scenarios)
+### Fluids (6 scenarios)
 - Water conservation (basic & stress test)
-- Surface tension and coalescence
 - Fluid collapse and flow
 - Magma dynamics
 - Gravitational fluid behavior
@@ -214,8 +212,7 @@ pytest tests/scenarios/ -v
 Current failing tests indicate real physics problems to fix:
 1. **Solids not falling** - Gravity not affecting solid materials properly
 2. **Water conservation** - Fluid volume not conserved during flow
-3. **Surface tension** - Water droplets fragmenting instead of coalescing
-4. **Material transitions** - Phase changes not occurring at correct conditions
+3. **Material transitions** - Phase changes not occurring at correct conditions
 
 ## Migration Status
 

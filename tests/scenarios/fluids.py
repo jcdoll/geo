@@ -123,102 +123,6 @@ class WaterConservationScenario(TestScenario):
             'show_metrics': ['water_count', 'percent_change'],
         }
 
-
-class WaterDropletCoalescenceScenario(TestScenario):
-    """Test water droplet behavior (surface tension removed)."""
-    
-    def __init__(self, num_droplets: int = 5, droplet_size: int = 3, **kwargs):
-        """Initialize droplet test scenario."""
-        super().__init__(**kwargs)
-        self.num_droplets = num_droplets
-        self.droplet_size = droplet_size
-        
-    def get_name(self) -> str:
-        return f"water_coalescence_{self.num_droplets}_droplets"
-        
-    def get_description(self) -> str:
-        return f"Tests water behavior with {self.num_droplets} droplets (no surface tension)"
-        
-    def setup(self, sim: GeoGame) -> None:
-        """Create water droplets in air."""
-        # Clear to air
-        sim.material_types[:] = MaterialType.AIR
-        sim.temperature[:] = 290.0
-        
-        # Create droplets at random positions
-        rng = np.random.RandomState(42)
-        margin = self.droplet_size + 5
-        
-        for i in range(self.num_droplets):
-            cx = rng.randint(margin, sim.width - margin)
-            cy = rng.randint(margin, sim.height - margin)
-            
-            # Create circular droplet
-            for dy in range(-self.droplet_size, self.droplet_size + 1):
-                for dx in range(-self.droplet_size, self.droplet_size + 1):
-                    if dx*dx + dy*dy <= self.droplet_size * self.droplet_size:
-                        y, x = cy + dy, cx + dx
-                        if 0 <= y < sim.height and 0 <= x < sim.width:
-                            sim.material_types[y, x] = MaterialType.WATER
-        
-        # Enable physics
-        sim.enable_heat_diffusion = False
-        sim.enable_self_gravity = False
-        sim.external_gravity = (0, 0)  # No gravity
-        sim.enable_material_melting = False  # Disable phase transitions
-        sim.enable_surface_tension = False  # Disabled - removed from implementation
-        
-        sim._properties_dirty = True
-        sim._update_material_properties()
-        
-    def count_water_features(self, sim: GeoGame) -> int:
-        """Count number of disconnected water features."""
-        water_mask = sim.material_types == MaterialType.WATER
-        labeled, num_features = ndimage.label(water_mask)
-        return num_features
-        
-    def evaluate(self, sim: GeoGame) -> Dict[str, Any]:
-        """Check if droplets are coalescing."""
-        water_mask = sim.material_types == MaterialType.WATER
-        water_count = np.sum(water_mask)
-        num_features = self.count_water_features(sim)
-        initial_features = self.initial_state.get('initial_features', self.num_droplets)
-        
-        # Without surface tension, just check conservation
-        initial_water = self.initial_state.get('initial_water', 0)
-        water_conserved = water_count >= initial_water * 0.9  # 90% conservation
-        not_worse = num_features <= initial_features * 2  # Allow some splitting
-        
-        success = water_conserved and not_worse
-        if np.any(water_mask):
-            water_coords = np.argwhere(water_mask)
-            center_y = np.mean(water_coords[:, 0])
-            center_x = np.mean(water_coords[:, 1])
-            distances = np.sqrt(np.sum((water_coords - [center_y, center_x])**2, axis=1))
-            avg_distance = np.mean(distances)
-        else:
-            avg_distance = 0
-            
-        water_count = np.sum(water_mask)
-        
-        return {
-            'success': success,
-            'metrics': {
-                'num_features': num_features,
-                'initial_features': initial_features,
-                'avg_distance': avg_distance,
-                'water_count': int(water_count),
-            },
-            'message': f"Water features: {initial_features} → {num_features}, compactness: {avg_distance:.1f}"
-        }
-        
-    def store_initial_state(self, sim: GeoGame) -> None:
-        """Store initial feature count."""
-        super().store_initial_state(sim)
-        self.initial_state['initial_features'] = self.count_water_features(sim)
-        self.initial_state['initial_water'] = np.sum(sim.material_types == MaterialType.WATER)
-
-
 class MagmaFlowScenario(TestScenario):
     """Test magma flow and cooling behavior."""
     
@@ -343,11 +247,7 @@ class WaterConservationStressScenario(WaterConservationScenario):
 
 
 class WaterBlobScenario(TestScenario):
-    """Test water blob behavior without surface tension.
-    
-    NOTE: Surface tension has been removed from the implementation.
-    This test focuses on basic fluid conservation.
-    """
+    """Test water blob behavior."""
     
     def __init__(self, blob_width: int = 20, blob_height: int = 10, **kwargs):
         """Initialize water blob test."""
@@ -359,7 +259,7 @@ class WaterBlobScenario(TestScenario):
         return f"water_blob_{self.blob_width}x{self.blob_height}"
         
     def get_description(self) -> str:
-        return f"Tests water blob ({self.blob_width}x{self.blob_height}) cohesion"
+        return f"Tests water blob ({self.blob_width}x{self.blob_height}) behavior"
         
     def setup(self, sim: GeoGame) -> None:
         """Create rectangular water blob in air."""
@@ -389,15 +289,12 @@ class WaterBlobScenario(TestScenario):
         sim.enable_pressure_solver = True  # Enable for fluid dynamics
         sim.enable_gravity_solver = False  # Disable gravity solver
         
-        # Surface tension configuration
-        # Disabled as implementation has been removed
-        sim.enable_surface_tension = False
         
         sim._properties_dirty = True
         sim._update_material_properties()
         
     def evaluate(self, sim: GeoGame) -> Dict[str, Any]:
-        """Check blob cohesion and shape evolution."""
+        """Check blob behavior and shape evolution."""
         water_count = np.sum(sim.material_types == MaterialType.WATER)
         initial_count = self.initial_state.get('initial_water', 0)
         
@@ -423,9 +320,10 @@ class WaterBlobScenario(TestScenario):
         # Count connected components
         labeled, num_components = ndimage.label(sim.material_types == MaterialType.WATER)
         
-        # Without surface tension: just check conservation and basic coherence
+        # Check conservation and basic coherence
         water_conserved = water_count >= initial_count * 0.95
-        # Allow significant fragmentation without surface tension
+        
+        # Allow significant fragmentation
         acceptable_fragmentation = num_components <= 20
         
         if water_count > 0:
@@ -508,7 +406,6 @@ class WaterLineCollapseScenario(TestScenario):
         sim.enable_heat_diffusion = False
         sim.enable_self_gravity = False
         sim.external_gravity = (0, 9.81)
-        sim.enable_surface_tension = False  # Disabled - removed from implementation
         
         sim._properties_dirty = True
         sim._update_material_properties()

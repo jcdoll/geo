@@ -1,7 +1,4 @@
-"""Test fluid cohesion behavior (formerly surface tension)
-
-Note: Surface tension implementation has been removed from fluid_dynamics.py
-This test file now focuses on basic fluid conservation and cohesion behaviors.
+"""Test fluid behavior
 """
 
 import numpy as np
@@ -100,14 +97,6 @@ def test_fluid_falls_under_gravity():
     assert final_y_center > initial_y_center + 2, f"Water didn't fall enough: {initial_y_center:.1f} -> {final_y_center:.1f}"
 
 
-def test_surface_tension_flag_exists():
-    """Test that surface tension flag exists (implementation removed)"""
-    sim = GeoSimulation(width=10, height=10, cell_size=100, setup_planet=False)
-    
-    # The flag exists but the implementation has been removed from fluid_dynamics.py
-    # The flag is set to True by default but has no effect
-    surface_tension_flag = hasattr(sim, 'enable_surface_tension')
-    assert surface_tension_flag, "Surface tension flag should exist for backward compatibility"
 
 
 if __name__ == "__main__":
@@ -117,6 +106,4 @@ if __name__ == "__main__":
     test_fluid_blob_stability()
     print("\n" + "="*50 + "\n")
     test_fluid_falls_under_gravity()
-    print("\n" + "="*50 + "\n")
-    test_surface_tension_flag_exists()
     print("\nAll tests passed!")

@@ -1,10 +1,10 @@
 """Test scenarios that can run in both headless and visual modes.
 
 This package contains all test scenarios organized by category:
-- fluids.py: Water conservation, magma flow, surface tension
-- mechanics.py: Gravity, buoyancy, pressure
-- materials.py: Phase transitions, metamorphism (TODO)
-- rigid_body.py: Rigid body physics (TODO)
+- fluids.py: Water conservation, magma flow, fluid gravity
+- rigid_body.py: Rigid body with enclosed fluid, rigid body fluid displacement, rigid body rotation
+- mechanics.py: Gravity fall, buoyancy, hydrostatic pressure
+- materials.py: Material stability, metamorphism, phase transitions
 
 Each scenario can be:
 1. Run via pytest using test_scenarios.py
@@ -19,7 +19,6 @@ from .base import TestScenario, ScenarioGroup
 from .fluids import (
     WaterConservationScenario,
     WaterConservationStressScenario,
-    WaterDropletCoalescenceScenario,
     WaterBlobScenario,
     WaterLineCollapseScenario,
     MagmaFlowScenario,

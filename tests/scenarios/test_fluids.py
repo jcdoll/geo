@@ -143,7 +143,6 @@ class SurfaceTensionScenario(TestScenario):
         sim.external_gravity = (0, 3)  # Light gravity
         sim.enable_self_gravity = False
         sim.enable_solid_drag = True
-        sim.enable_surface_tension = True  # Key feature
         
         # Minimal other processes to isolate surface tension
         sim.enable_heat_diffusion = False

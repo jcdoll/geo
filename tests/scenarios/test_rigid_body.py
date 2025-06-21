@@ -11,7 +11,7 @@ class FallingRockScenario(TestScenario):
     def __init__(self):
         super().__init__()
         self.name = "Falling Rock"
-        self.description = "Granite blocks falling and maintaining cohesion as rigid bodies"
+        self.description = "Granite blocks falling and maintaining shape as rigid bodies"
         
     def setup(self, sim):
         """Set up falling rock test"""

@@ -39,8 +39,8 @@ Gravity:
 - Introducing a blob of material into a gravity field (e.g. adding a rock to space around a planet) will result in the blob falling into the gravity field
 
 Surface tension:
-- A blob of water tends to remain together, particular if it is introduced in zero gravity, e.g. a blob of water introduced into empty space wiil remain together and not fragment
-- Surface tension will tend to minimize the surface area of fluids, e.g. a long line of water introduced into empty space will transform into a circle over time
+- We do not model surface tension or fluid cohesion, because this is a large scale simulation where small surface effects are negligible
+- Fluids are affected by gravity and will pool, but if a blob of water is placed in space, it may fragment into multiple pieces
 
 Rigid body mechanics:
 - Icebergs float on water and maintain their shape unless melting or high force collisions occur
@@ -498,172 +498,134 @@ AIDEV-TODO: IS THERE A MORE GENERAL WAY TO DO THIS? FOR EXAMPLE BY JUST APPLYING
 
 ---
 
-## PRESSURE CALCULATIONS
+## PRESSURE PHYSICS
 
-### Pressure Distribution
+### THEORY
 
-Space: `P = 0` (vacuum)
+The pressure field is computed by solving the full Poisson equation with variable density, starting from hydrostatic balance:
 
-Atmospheric pressure (exponential decay):
 ```
-P_atmo = P_surface × exp(-h/H)
+∇P = ρg
 ```
-Where:
-- `P_surface = 0.1 MPa`
-- `h` = height above surface (m)
-- `H = 8400 m` (scale height)
 
-Hydrostatic pressure (fluids):
-```
-P_fluid = max(P_surface, ρ_fluid × g × depth / 10⁶)
-```
-Where:
-- `ρ_fluid = 2000 kg/m³`
-- `g = 9.81 m/s²`
+Taking the divergence and rearranging:
 
-Lithostatic pressure (solids):
 ```
-P_solid = max(P_surface, ρ_solid × g × depth / 10⁶)
+∇²P = ∇·(ρg)
 ```
-Where:
-- `ρ_solid = 3000 kg/m³`
+
+This must be expanded properly for variable density:
+```
+∇·(ρg) = ρ(∇·g) + g·(∇ρ)
+```
+
+For self-gravity with variable density:
+```
+∇²P = ρ(∇·g_self) + g_self·(∇ρ)
+```
+Where ∇·g_self = -4πGρ from the gravitational Poisson equation. 
+
+Why the second term is currently omitted for self-gravity:
+1. **Historical reason**: Implementation started with simplified case
+2. **This is a significant bug**: Our density variations are extreme (granite ~2700 kg/m³ to air ~1 kg/m³)
+3. **Impact**: Missing ~99.96% density jumps at rock/air interfaces!
+
+With density ratios of 2700:1, the g·∇ρ term is NOT negligible:
+- At a granite/air interface: ∇ρ ≈ 2700 kg/m³ over one cell
+- This creates massive pressure gradients that we're currently ignoring
+- The omission likely causes incorrect pressure fields near all material boundaries
+
+**Must be fixed**: This is not an optimization but a fundamental physics error that affects:
+- Pressure discontinuities at all material interfaces  
+- Force calculations that depend on pressure gradients
+- Material stability and fluid flow near boundaries
+
+For external gravity (uniform field), since ∇·g_ext = 0:
+```
+∇²P = g_ext·(∇ρ)
+```
+
+This formulation correctly handles:
+- Variable density fields (compositional/thermal variations)
+- Arbitrary geometries and material distributions
+- Both self-gravity and external gravity contributions
+- Proper boundary conditions (P = 0 in vacuum/space cells)
+
+### IMPLEMENTATION
+
+The pressure field is solved using a geometric multigrid method with V-cycle:
+
+1. **Multigrid Solver** (`pressure_solver.py`):
+   - Classical V-cycle with red-black Gauss-Seidel smoothing
+   - Full-weighting restriction and bilinear prolongation
+   - Handles rectangular grids and odd dimensions
+   - Converges in ~10-20 V-cycles for typical grids
+
+2. **Right-Hand Side Construction**:
+   - First compute gravity field (if self-gravity enabled)
+   - Calculate divergence of gravity: ∇·g
+   - Calculate density gradient: ∇ρ
+   - Build RHS combining both terms:
+   
+   ```python
+   # Self-gravity contribution (simplified - only first term)
+   div_g = (∂gx/∂x + ∂gy/∂y)
+   rhs = -ρ * div_g / 1e6  # Convert Pa to MPa
+   
+   # External gravity contribution (full term)
+   grad_rho_x = ∂ρ/∂x
+   grad_rho_y = ∂ρ/∂y
+   rhs += (g_ext_x * grad_rho_x + g_ext_y * grad_rho_y) / 1e6
+   ```
+
+3. **Boundary Conditions**:
+   - Dirichlet P = 0 at grid boundaries
+   - Space/vacuum cells forced to P = 0
+   - Pressure offset can be added for absolute pressure
+
+The solver exactly reproduces analytical hydrostatic profiles when density is uniform, and correctly captures pressure variations in heterogeneous media.
+
+Note: Future work should incorporate velocity divergence (∇·v) into the pressure calculation for more accurate fluid dynamics.
 
 ## SURFACE TENSION
 
-**IMPORTANT NOTE**: Surface tension implementation has been completely removed from the codebase. This section documents the theoretical approaches and explains why surface tension is fundamentally incompatible with geological-scale simulations.
+Surface tension has been removed from the codebase because it is physically meaningless at geological scales.
 
 ### THEORETICAL APPROACHES
 
-#### 1. Continuum Surface Force (CSF) Model
+1. Continuum Surface Force (CSF) Model: `f = σ κ n |∇c|`
+   - σ = surface tension coefficient (0.072 N/m for water)
+   - κ = interface curvature
+   - n = interface normal
+   - c = smoothed color function
 
-The standard approach for computational fluid dynamics uses the CSF model, which treats surface tension as a volumetric force concentrated at interfaces:
+2. Young-Laplace Pressure: `ΔP = σ/R` (2D)
 
-```
-f = σ κ n |∇c|
-```
+3. Energy Minimization: `E = σ ∫ dA`
 
-Where:
-- σ = surface tension coefficient (0.072 N/m for water)
-- κ = interface curvature (∇·n)
-- n = interface normal (∇c/|∇c|)
-- c = smoothed color function (1 in fluid, 0 outside)
+### DIMENSIONAL ANALYSIS
 
-This approach works well for fine grids where interfaces can be resolved smoothly.
+The key insight is that surface tension becomes negligible at large scales:
 
-#### 2. Young-Laplace Pressure Jump
+- Surface forces: F_surface ∝ σL (scales with perimeter)
+- Inertial forces: F_inertia ∝ ρL³ (scales with volume)
+- Force ratio: F_inertia/F_surface ∝ L²
 
-Surface tension creates a pressure discontinuity across curved interfaces:
+At 50m grid cells:
+- Scale ratio: ~10¹⁰ times larger than molecular scales
+- Inertia dominates surface tension by ~10¹² 
 
-```
-ΔP = σ κ = σ(1/R₁ + 1/R₂)
-```
+### WHY IT FAILS ON COARSE GRIDS
 
-For 2D: ΔP = σ/R where R is the radius of curvature.
+1. No meaningful curvature: 50m cells create step-function interfaces
+2. Discrete materials: Binary WATER/AIR transitions, no smooth interfaces
+3. Numerical instability: Curvature calculations on discrete grids produce noise
 
-#### 3. Energy Minimization Approach
+### RECOMMENDATIONS
 
-Surface tension minimizes the total surface energy:
-
-```
-E = σ ∫ dA
-```
-
-Forces are derived from the energy gradient: F = -∇E
-
-#### 4. Molecular Dynamics Perspective
-
-At the molecular level, surface tension arises from asymmetric intermolecular forces at interfaces. Molecules at the surface experience a net inward force due to missing neighbors on one side.
-
-### THE FUNDAMENTAL SCALE PROBLEM
-
-#### Physical Scale Mismatch
-
-Surface tension is a molecular phenomenon that becomes meaningless at geological scales:
-
-1. **Molecular scale**: Surface tension acts at ~10⁻⁹ m (nanometers)
-2. **Our grid scale**: Each cell is 50-100 m
-3. **Scale ratio**: Our cells are ~10¹⁰ times larger than molecular scales
-
-A single 50m × 50m × 50m water cell contains:
-- Volume: 125,000 m³
-- Mass: 125,000,000 kg of water
-- Molecules: ~10³³ water molecules
-
-#### Why Surface Tension Fails on Coarse Grids
-
-1. **No Meaningful Curvature**: 
-   - Real water droplets have smooth curves at mm-cm scales
-   - On a 50m grid, "curvature" is meaningless - interfaces are always step functions
-   - Computing κ = ∇·n on step functions produces numerical noise, not physics
-
-2. **Force Scaling Issues**:
-   - Surface tension force: F ∝ σL (proportional to perimeter)
-   - Inertial forces: F ∝ ρL³ (proportional to volume)
-   - As L increases, volume forces dominate: F_inertia/F_surface ∝ L²
-   - At 50m scales, inertia is ~10¹² times stronger than surface tension
-
-3. **Discrete Material Representation**:
-   - Materials are discrete enums (WATER, AIR, etc.)
-   - No partial filling or smooth interfaces possible
-   - Binary transitions create artificial "interfaces" everywhere
-
-4. **Energy Scales**:
-   - Surface energy: E_surface = σA ∝ L²
-   - Gravitational energy: E_gravity = mgh ∝ L⁴
-   - At geological scales, gravity completely dominates
-
-#### Attempted Solutions and Why They Failed
-
-1. **CSF with Heavy Smoothing**: Creates fractal spray patterns
-2. **Discrete Cohesion Forces**: Causes fragmentation into 20-50 pieces
-3. **Multi-scale Blurring**: Spreads instabilities over larger regions
-4. **Pressure-based Cohesion**: Cannot prevent material fragmentation
-5. **Velocity Constraints**: Keep velocities coherent but materials still fragment
-
-#### The Reality Check
-
-At 50m scales, asking for surface tension is like asking for:
-- Quantum effects in planetary orbits
-- Brownian motion of tectonic plates  
-- Van der Waals forces between mountains
-
-These are real phenomena, but utterly negligible at the scale of interest.
-
-### CONCLUSIONS AND RECOMMENDATIONS
-
-#### For Geological-Scale Simulations (cell_size ≥ 50m)
-
-1. **Do not implement surface tension** - it's physically meaningless
-2. **Use bulk fluid behavior instead**:
-   - Gravity-driven pooling
-   - Pressure-driven flow
-   - Incompressibility constraints
-   - These dominate at large scales anyway
-
-3. **Accept discrete representation artifacts**:
-   - Fluids may appear fragmented but behave correctly in bulk
-   - Focus on conserved quantities (mass, momentum) not appearance
-   - This is similar to how molecular dynamics appears "noisy" but averages are correct
-
-#### For Fine-Scale Simulations (cell_size ≤ 1m)
-
-Surface tension becomes relevant and can be implemented using:
-1. Standard CSF model with adequate smoothing
-2. Level-set or phase-field methods
-3. Height-function approach for 2D interfaces
-
-#### The Bottom Line
-
-Trying to implement surface tension on a 50m grid is like trying to simulate individual raindrops with a weather model that has 50km grid cells. The physics exists, but not at the scale of the simulation.
-
-Rather than forcing inappropriate physics, we embrace the scale-appropriate behavior: at geological scales, water behaves as a bulk fluid driven by gravity and pressure, not surface tension.
-
-**Remaining challenges**:
-- Heavy blurring can over-smooth small features
-- Force magnitude tuning still somewhat empirical
-- Computational cost of multiple Gaussian filters
-
-This approach represents a middle ground between pure continuum physics and discrete heuristics.
+- Geological scales (≥50m): Use bulk fluid behavior (gravity, pressure)
+- Fine scales (≤1m): Surface tension can be implemented with CSF/level-set methods
+- Accept visual artifacts: Fluids may fragment but behave correctly in bulk
 
 ## HEAT TRANSFER PHYSICS
 
