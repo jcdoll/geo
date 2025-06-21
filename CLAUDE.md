@@ -83,7 +83,7 @@ The codebase has been refactored from a monolithic engine to a modular architect
 
 ### Physics Modules
 Each physics domain is isolated in its own module:
-- `heat_transfer.py` - Heat diffusion calculations
+- `heat_transfer.py` - Heat diffusion calculations (now uses material-based heat generation)
 - `fluid_dynamics.py` - Fluid flow and material swapping
 - `gravity_solver.py` - Gravitational field calculations using Poisson solver
 - `pressure_solver.py` - Pressure field calculations
@@ -92,8 +92,9 @@ Each physics domain is isolated in its own module:
 
 ### Materials System
 - `materials.py` - Material types, properties, and metamorphic transitions
-- MaterialType enum covers igneous, sedimentary, metamorphic rocks plus fluids (water, magma, air, space)
-- MaterialDatabase provides physical properties (density, thermal conductivity, melting points)
+- MaterialType enum covers igneous, sedimentary, metamorphic rocks plus fluids (water, magma, air, space) and uranium
+- MaterialDatabase provides physical properties (density, thermal conductivity, melting points, heat generation)
+- Uranium material provides radioactive heat generation (no phase transitions)
 
 ### Visualization
 - `visualizer.py` - Interactive pygame-based visualization with multiple display modes

@@ -39,6 +39,7 @@ class MaterialType(Enum):
     WATER_VAPOR = "water_vapor"
     AIR = "air"
     SPACE = "space"
+    URANIUM = "uranium"
 
     # ------------------------------------------------------------------
     # Enable ordering so that high-level numpy helpers like np.unique can
@@ -83,6 +84,7 @@ class MaterialProperties:
     rigidity_coeff: float = 0.0  # >0 for solids to suppress flow (1/s)
     transitions: List[TransitionRule] = field(default_factory=list)  # All possible transitions for this material
     is_solid: bool = True  # Whether rocks cannot fall through this material (default: solid)
+    heat_generation: float = 0.0  # W/m³ - volumetric heat generation rate (for radioactive materials)
     
     def get_applicable_transition(self, temperature: float, pressure: float) -> Optional[TransitionRule]:
         """Find the first applicable transition for given P-T conditions"""
@@ -393,6 +395,16 @@ class MaterialDatabase:
                 color_rgb=(0, 0, 0),  # Black - vacuum of space
                 transitions=[],  # Space doesn't transition to anything
                 is_solid=False  # Vacuum - rocks fall through it infinitely fast
+            ),
+            MaterialType.URANIUM: MaterialProperties(
+                density=19000, thermal_conductivity=27.0, specific_heat=116,  # Dense metallic properties
+                strength=400, porosity=0.01,
+                emissivity=0.8, albedo=0.10,  # Metallic surface properties
+                thermal_expansion=4.2e-5,  # Volumetric expansion coefficient for uranium metal
+                color_rgb=(0, 255, 0),  # Bright green for visibility
+                transitions=[],  # No phase transitions - remains uranium forever
+                is_solid=True,  # Solid material
+                heat_generation=5e-4  # 0.5 mW/m³ - enhanced for simulation visibility
             )
         }
     

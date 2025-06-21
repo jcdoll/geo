@@ -1056,36 +1056,37 @@ This approach provides the best combination of stability, accuracy, and performa
 
 ### THEORY
 
-Internal planet heat sources are computed as:
-
-Q_internal = Q_crust + Q_core
-
-where crust heating may arise from tidal forces and core heating from radioactive decay.
+Internal heat generation is now entirely material-based, eliminating the previous planetary geometry assumptions. Each material can have its own volumetric heat generation rate.
 
 ```
-Q_crust(d) = q0_crust * exp(-(1 − d)/λ_crust)
+Q_internal = q_material
 ```
 
-where
-- `d` = relative depth (0 at surface, 1 at centre)
-- `q0_crust`, `λ_crust` = tunable parameters defined in `heat_transfer.py`.
+where `q_material` is the heat generation rate (W/m³) specified in the material properties.
 
-Q_core(d) = q0_core * exp(−(d/σ_core)²)
-
-where
-- `q0_core` = core heating rate at the center (W/m³)
-- `σ_core` = core heating decay length (m)
-
-Design decision: Internal heating is now material-driven. Each `MaterialProperties` entry may specify a volumetric heating rate `q_internal` (W m⁻³). Radio-active isotopes in granite therefore provide crustal heating automatically, while metallic iron has `q_internal = 0`. The deprecated depth-profile parameters `q0_crust`, `λ_crust`, `q0_core`, `σ_core` remain for back-compatibility but are ignored when per-material rates are present.
+This approach:
+- Works for arbitrary geometries (not just spherical planets)
+- Allows localized heat sources (uranium deposits, radioactive materials)
+- Preserves heat generation through the simulation (no dependency on position)
 
 ### IMPLEMENTATION
-AIDEV-TODO
 
-`heat_transfer.py::_compute_internal_heating()` caches a lookup table `q_internal[material_id]` (float32) and broadcasts it across the grid each macro-step. Heating power is converted to temperature change via
-```
-ΔT = q_internal * dt / (ρ cp)
-```
-and added after the diffusion and radiation sub-steps.
+The material-based heating is implemented in `heat_transfer.py::_calculate_internal_heating_source()`:
+
+1. **Material Property Lookup**: Each material type has a `heat_generation` property (W/m³)
+2. **Grid Application**: For each cell, the heat generation rate is determined by its material type
+3. **Temperature Conversion**: Heat generation is converted to temperature change:
+   ```
+   dT/dt = q_material / (ρ × cp)
+   ```
+4. **Time Integration**: The temperature change is multiplied by the timestep
+
+Example materials:
+- **Uranium**: 5×10⁻⁴ W/m³ (enhanced for simulation visibility)
+- **Regular rocks**: 0 W/m³ (no intrinsic heat generation)
+- **Future materials**: Can add other radioactive materials with appropriate heat generation rates
+
+The previous depth-based heating model (crustal and core heating based on distance from planet center) has been completely removed.
 
 ---
 

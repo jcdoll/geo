@@ -113,7 +113,6 @@ class CoreState:
         self.temperature_decay_constant = 2.0
         self.melting_temperature = 1200 + 273.15
         self.hot_solid_temperature_threshold = 1200.0
-        self.core_heating_depth_scale = 0.5
         self.surface_pressure = 0.1  # MPa
         self.atmospheric_scale_height = 8400  # m
         self.average_gravity = (0, 0) # m/s^2 for external sources

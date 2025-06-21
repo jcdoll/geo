@@ -376,7 +376,7 @@ class HeatTransfer:
         return working_temp
     
     def _calculate_internal_heating_source(self, non_space_mask: np.ndarray) -> np.ndarray:
-        """Calculate internal heating source term Q/(ρcp).
+        """Calculate internal heating source term Q/(ρcp) from radioactive materials.
 
         Returns the instantaneous temperature change rate in K/s which will
         subsequently be multiplied by the global time-step (``self.sim.dt``)
@@ -388,36 +388,16 @@ class HeatTransfer:
         if not np.any(non_space_mask):
             return source_term
         
-        # ------------------------------------------------------------------
-        # Match the original two-component heating model:
-        #   1.  **Crustal radiogenic heating** concentrated near the surface
-        #       with an exponential fall-off.
-        #   2.  **Core / primordial heating** represented by a Gaussian
-        #       centred at the planetary core.
-        # This reproduces the behaviour of
-        # ``simulation_engine_original._calculate_internal_heating_source``.
-        # ------------------------------------------------------------------
-
-        distances = self.sim._get_distances_from_center()
-        planet_radius = self.sim._get_planet_radius()
-
-        # Relative depth: 0 at surface, 1 at centre.
-        relative_depth = np.clip(1.0 - distances / planet_radius, 0.0, 1.0)
-
-        # ---- 1. Radiogenic crustal heating ---------------------------------
-        CRUSTAL_SURFACE_RATE = 3e-6          # W/m³ at the surface-adjacent crust
-        crust_decay_length = 0.1             # characteristic thickness (fraction of radius)
-        crustal_heating_rate = CRUSTAL_SURFACE_RATE * np.exp(-(1.0 - relative_depth) / crust_decay_length)
-
-        # ---- 2. Core / primordial heating ----------------------------------
-        CORE_CENTRE_RATE = 10e-6             # W/m³ at the very centre
-        core_sigma = max(1e-3, self.sim.core_heating_depth_scale)  # avoid σ=0
-        core_heating_rate = CORE_CENTRE_RATE * np.exp(-(relative_depth / core_sigma) ** 2)
-
-        # Optional visibility boost (kept for pedagogical scaling parity)
-        internal_boost = getattr(self.sim, "internal_heating_boost", 1.0)
-
-        heating_rate = (crustal_heating_rate + core_heating_rate) * internal_boost  # W/m³
+        # Calculate heat generation from radioactive materials
+        heating_rate = np.zeros_like(self.sim.temperature)
+        
+        # Get heat generation rate for each material type
+        for y in range(self.sim.height):
+            for x in range(self.sim.width):
+                if non_space_mask[y, x]:
+                    mat_type = self.sim.material_types[y, x]
+                    mat_props = self.sim.material_db.get_properties(mat_type)
+                    heating_rate[y, x] = mat_props.heat_generation  # W/m³
         
         # Convert to temperature change rate
         valid_cells = non_space_mask & (self.sim.density > 0) & (self.sim.specific_heat > 0)

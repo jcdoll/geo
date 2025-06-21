@@ -77,19 +77,25 @@ class GeoGame(CoreState, CoreToolsMixin):
     # Initial planet seeding (very rough – replaces legacy _setup_planetary_conditions)
     # ------------------------------------------------------------------
     def _setup_initial_planet(self):
-        """Fill the grid with a simple rocky planet + molten core."""
+        """Fill the grid with a simple rocky planet + uranium-enriched core."""
         # Spherical planet parameters in grid units
         radius = int(min(self.width, self.height) * 0.35)
         core_radius = int(radius * 0.4)
+        uranium_radius = int(radius * 0.25)  # Uranium concentrated in inner core
         cx, cy = self.planet_center
 
         yy, xx = np.ogrid[:self.height, :self.width]
         dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
 
-        # Molten core
-        core_mask = dist <= core_radius
+        # Uranium-enriched inner core for heat generation
+        uranium_mask = dist <= uranium_radius
+        self.material_types[uranium_mask] = MaterialType.URANIUM
+        self.temperature[uranium_mask] = self.core_temperature + 200.0  # hot inner core
+        
+        # Molten outer core
+        core_mask = (dist > uranium_radius) & (dist <= core_radius)
         self.material_types[core_mask] = MaterialType.MAGMA
-        self.temperature[core_mask] = self.core_temperature + 200.0  # a bit hotter than default core temp
+        self.temperature[core_mask] = self.core_temperature + 100.0  # slightly cooler than uranium core
 
         # Solid basalt mantle/crust
         mantle_mask = (dist > core_radius) & (dist <= radius)
