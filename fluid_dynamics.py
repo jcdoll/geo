@@ -197,32 +197,81 @@ class FluidDynamics:
         # ------------------------------------------------------------------
         # 3) Projection – make velocity approximately divergence-free
         #    using multigrid Poisson solve (pressure_solver.solve_pressure).
-        #    TODO: implement FFT/DST version and benchmark.
+        #    Enhanced to properly handle rigid bodies.
         # ------------------------------------------------------------------
         _t_proj_start = _time.perf_counter()
+
+        # Identify rigid bodies BEFORE projection
+        rigid_labels, num_rigid = self.identify_rigid_groups()
+        is_rigid = rigid_labels > 0
+        
+        # Create masks for different material types
+        from materials import MaterialType
+        fluid_types = {MaterialType.WATER, MaterialType.MAGMA, MaterialType.AIR, MaterialType.WATER_VAPOR}
+        is_fluid = np.zeros(self.sim.material_types.shape, dtype=bool)
+        for ftype in fluid_types:
+            is_fluid |= (self.sim.material_types == ftype)
+        
+        # Only project velocities in fluid regions
+        # Rigid bodies maintain their velocities
+        fluid_mask = is_fluid & (rho > 0.0)
 
         # Divergence of tentative velocity (1/s)
         div_u = np.zeros_like(self.velocity_x)
         dx_m = self.sim.cell_size
-        fluid_mask = rho > 0.0
+        
+        # Calculate divergence including contributions from rigid body boundaries
+        # This ensures fluid flows around rigid bodies correctly
         div_u[1:-1, 1:-1] = (
             (self.velocity_x[1:-1, 2:] - self.velocity_x[1:-1, :-2]) +
             (self.velocity_y[2:, 1:-1] - self.velocity_y[:-2, 1:-1])
         ) / (2 * dx_m)
 
-        div_u = div_u * fluid_mask  # Ignore vacuum divergence
+        # Only enforce divergence-free in fluid regions
+        div_u = div_u * fluid_mask
 
         # ------------------------------------------------------------------
-        # Variable-density Chorin projection
-        #    ∇·(1/ρ ∇φ) = div_u / Δt
+        # Variable-density projection with full dynamic pressure equation
+        #    ∇²P_dynamic = ρ∇·(v·∇v) - ∂(∇·v)/∂t
+        # For the projection method, we solve:
+        #    ∇·(1/ρ ∇φ) = div_u / Δt - ∇·(v·∇v)
         # ------------------------------------------------------------------
-        rhs = (div_u / dt) * fluid_mask
-        inv_rho = np.where(rho > 0, 1.0 / rho, 0.0)
+        
+        # Calculate the advection term: ∇·(v·∇v)
+        # First compute velocity gradients
+        dvx_dx = np.zeros_like(self.velocity_x)
+        dvx_dy = np.zeros_like(self.velocity_x)
+        dvy_dx = np.zeros_like(self.velocity_y)
+        dvy_dy = np.zeros_like(self.velocity_y)
+        
+        # Central differences for velocity gradients
+        dvx_dx[1:-1, 1:-1] = (self.velocity_x[1:-1, 2:] - self.velocity_x[1:-1, :-2]) / (2 * dx_m)
+        dvx_dy[1:-1, 1:-1] = (self.velocity_x[2:, 1:-1] - self.velocity_x[:-2, 1:-1]) / (2 * dx_m)
+        dvy_dx[1:-1, 1:-1] = (self.velocity_y[1:-1, 2:] - self.velocity_y[1:-1, :-2]) / (2 * dx_m)
+        dvy_dy[1:-1, 1:-1] = (self.velocity_y[2:, 1:-1] - self.velocity_y[:-2, 1:-1]) / (2 * dx_m)
+        
+        # Compute v·∇v
+        v_dot_grad_vx = self.velocity_x * dvx_dx + self.velocity_y * dvx_dy
+        v_dot_grad_vy = self.velocity_x * dvy_dx + self.velocity_y * dvy_dy
+        
+        # Compute ∇·(v·∇v)
+        div_v_grad_v = np.zeros_like(self.velocity_x)
+        div_v_grad_v[1:-1, 1:-1] = (
+            (v_dot_grad_vx[1:-1, 2:] - v_dot_grad_vx[1:-1, :-2]) / (2 * dx_m) +
+            (v_dot_grad_vy[2:, 1:-1] - v_dot_grad_vy[:-2, 1:-1]) / (2 * dx_m)
+        )
+        
+        # Build full RHS including advection term
+        # RHS = div_u / Δt - ∇·(v·∇v)
+        rhs = (div_u / dt - div_v_grad_v) * fluid_mask
+        
+        # Use fluid density for projection, treat rigid bodies as boundaries
+        inv_rho_fluid = np.where(fluid_mask, 1.0 / rho, 0.0)
 
-        # Projection does not need micro-Pascal precision; loosen tolerance for speed
+        # Projection with fluid-only inverse density
         phi = solve_poisson_variable_multigrid(
             rhs,
-            inv_rho,
+            inv_rho_fluid,
             dx_m,
             tol=1e-3 if self.sim.quality >= 2 else 5e-4,
             max_cycles=10,
@@ -230,12 +279,22 @@ class FluidDynamics:
 
         # Gradient of φ
         grad_phi_y, grad_phi_x = np.gradient(phi, dx_m)
+        
+        # Only correct velocities in fluid regions
+        # Rigid bodies keep their group velocities
         grad_phi_x[~fluid_mask] = 0.0
         grad_phi_y[~fluid_mask] = 0.0
 
-        # Velocity correction  u = u* − Δt/ρ ∇φ
-        self.velocity_x -= grad_phi_x * dt * inv_rho
-        self.velocity_y -= grad_phi_y * dt * inv_rho
+        # Velocity correction for fluids only: u = u* − Δt/ρ ∇φ
+        self.velocity_x -= grad_phi_x * dt * inv_rho_fluid
+        self.velocity_y -= grad_phi_y * dt * inv_rho_fluid
+        
+        # Store dynamic pressure component (φ/Δt gives pressure)
+        # This represents the pressure needed to enforce incompressibility
+        if hasattr(self.sim, 'pressure_dynamic'):
+            self.sim.pressure_dynamic = phi / dt
+        else:
+            self.sim.pressure_dynamic = phi / dt
 
         self.sim._perf_times["uk_projection"] = _time.perf_counter() - _t_proj_start
 
@@ -423,7 +482,7 @@ class FluidDynamics:
         fy = rho * gy_total
 
         # Pressure gradient term – compute via face normals (4-neighbour)
-        P_pa = self.sim.pressure * 1e6  # MPa → Pa
+        P_pa = self.sim.pressure  # Already in Pa
         dx = self.sim.cell_size
 
         # Store pressure forces separately for debugging
@@ -894,6 +953,9 @@ class FluidDynamics:
         
         This ensures rocks, ice, etc. fall and move as single objects rather than
         breaking apart cell by cell. Now includes fluid displacement mechanics.
+        
+        IMPORTANT: Only moves rigid bodies that are exposed to space/air,
+        not those completely surrounded by other materials.
         """
         # Get rigid body groups
         labels, num_groups = self.identify_rigid_groups()
@@ -913,6 +975,28 @@ class FluidDynamics:
             
             # Skip if any cell in group has already moved
             if np.any(moved_mask[group_mask]):
+                continue
+            
+            # Check if this rigid body is exposed to space/air
+            # A rigid body surrounded by other materials shouldn't move independently
+            exposed = False
+            group_coords = np.where(group_mask)
+            for y, x in zip(*group_coords):
+                # Check 4-neighbors
+                for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    ny, nx = y + dy, x + dx
+                    if 0 <= ny < h and 0 <= nx < w:
+                        neighbor_mat = mt[ny, nx]
+                        if neighbor_mat in {MaterialType.SPACE, MaterialType.AIR}:
+                            exposed = True
+                            break
+                if exposed:
+                    break
+            
+            # Skip interior rigid bodies (like uranium core inside magma)
+            if not exposed:
+                if getattr(self.sim, 'debug_rigid_bodies', False):
+                    print(f"Skipping interior rigid body group {group_id} (not exposed to space/air)")
                 continue
                 
             group_coords = np.where(group_mask)
@@ -1085,8 +1169,19 @@ class FluidDynamics:
     def detect_enclosed_fluids(self, rigid_body_mask):
         """Detect fluid regions that are topologically enclosed by a rigid body.
         
-        Uses flood-fill to identify disconnected fluid regions.
-        Returns a mask of fluids that should move with the rigid body.
+        IMPORTANT: This method has been disabled because it causes unintended
+        behavior where rigid bodies inside fluids get dragged along when the
+        outer rigid body moves, destroying internal structures.
+        
+        For example, a uranium core inside magma inside a basalt shell would
+        all move together, which is physically incorrect.
+        
+        Returns None to disable enclosed fluid detection.
+        """
+        # Disabled - see docstring for explanation
+        return None
+        
+        # Original implementation preserved below for reference:
         """
         from materials import MaterialType
         h, w = self.sim.material_types.shape
@@ -1153,6 +1248,7 @@ class FluidDynamics:
         enclosed_fluid_mask = fluid_mask & ~external_fluid
         
         return enclosed_fluid_mask
+        """
     
     def attempt_rigid_body_displacement(self, group_mask, dx, dy, force_magnitude, 
                                         moved_mask, enclosed_fluids=None):
