@@ -44,6 +44,11 @@ class FluidDynamics:
     
     def calculate_planetary_pressure(self):
         """Multigrid solve for pressure using both self-gravity and external gravity fields."""
+        
+        # On first call, preserve initial pressure as offset
+        if not hasattr(self, '_pressure_initialized'):
+            self.sim.pressure_offset[:] = self.sim.pressure
+            self._pressure_initialized = True
 
         # Build total gravity field (self-gravity + external gravity)
         gx_total = np.zeros_like(self.sim.density, dtype=np.float64)
@@ -70,7 +75,8 @@ class FluidDynamics:
         ) / (2 * dx)
 
         # Build RHS for Poisson equation
-        # Full expansion: ∇²P = ∇·(ρg) = ρ(∇·g) + g·(∇ρ)
+        # From force balance: ∇P = ρg, taking divergence: ∇²P = ∇·(ρg)
+        # Full expansion: ∇²P = ρ(∇·g) + g·(∇ρ)
         # This handles arbitrary geometries correctly
         rhs = np.zeros_like(self.sim.density)
         
@@ -84,36 +90,71 @@ class FluidDynamics:
         
         # Self-gravity contribution: ρ(∇·g_self) + g_self·(∇ρ)
         if self.sim.enable_self_gravity:
-            # First term: ρ∇·g
-            rhs -= (self.sim.density * div_g) / 1e6   # Pa → MPa (negative for attractive gravity)
+            # First term: ρ(∇·g)
+            # Note: ∇·g is negative for attractive gravity (from Gauss's law)
+            # This creates negative RHS at planet center
+            rhs += (self.sim.density * div_g) / 1e6   # Pa → MPa
             
-            # Second term: g·∇ρ (using total gravity field which includes self-gravity)
+            # Second term: g·∇ρ
             g_dot_grad_rho = gx_total * grad_rho_x + gy_total * grad_rho_y
-            rhs -= g_dot_grad_rho / 1e6  # Pa → MPa
+            rhs += g_dot_grad_rho / 1e6  # Pa → MPa
         
         # External gravity contribution: g_ext·∇ρ (since ∇·g_ext = 0)
         if hasattr(self.sim, 'external_gravity'):
             g_ext_x, g_ext_y = self.sim.external_gravity
             if abs(g_ext_x) > 1e-10 or abs(g_ext_y) > 1e-10:
-                # For uniform external gravity field: ∇·(ρg) = g·∇ρ
+                # For uniform external gravity field: ∇²P = ∇·(ρg) = g·∇ρ
                 div_rho_g = g_ext_x * grad_rho_x + g_ext_y * grad_rho_y
                 
                 # Add to RHS (convert Pa to MPa)
                 rhs += div_rho_g / 1e6
 
         # Solve Poisson equation for pressure: ∇²P = RHS
-        pressure = solve_pressure(rhs, dx)
+        # Use Neumann BC to avoid artificial negative pressure at boundaries
+        pressure = solve_pressure(rhs, dx, bc_type='neumann')
         
         # Debug: print RHS statistics
-        if False:  # Enable for debugging
+        debug_pressure = False  # Enable for debugging initial pressure
+        if debug_pressure:
             print(f"RHS min: {np.min(rhs):.6f}, max: {np.max(rhs):.6f}, mean: {np.mean(rhs):.6f}")
+            print(f"Density range: {np.min(self.sim.density):.1f} to {np.max(self.sim.density):.1f} kg/m³")
+            # Check specific values
+            non_zero = rhs[rhs != 0]
+            if len(non_zero) > 0:
+                print(f"Non-zero RHS values: {len(non_zero)}, max abs: {np.max(np.abs(non_zero)):.6f}")
+            
+            # Check gravity magnitudes
+            g_mag = np.sqrt(gx_total**2 + gy_total**2)
+            print(f"Gravity magnitude range: {np.min(g_mag):.3f} to {np.max(g_mag):.3f} m/s²")
+        
+        # Mixed boundary conditions approach:
+        # 1. Neumann BC at computational boundaries prevents artificial negative pressure there
+        # 2. Dirichlet BC (P=0) in vacuum regions enforces physical reality
         
         # Force space/vacuum cells to zero pressure
         space_mask = self.sim.material_types == MaterialType.SPACE
         pressure[space_mask] = 0.0
+        
+        # Also force near-vacuum (very low density) to zero
+        # This prevents Laplace equation interpolation in vacuum regions
+        vacuum_threshold = 0.1  # kg/m³ - anything less is effectively vacuum
+        vacuum_mask = self.sim.density < vacuum_threshold
+        pressure[vacuum_mask] = 0.0
+        
+        # With Neumann BC and proper vacuum handling, we shouldn't need to clip
+        # Check if any negative pressures remain (for debugging)
+        negative_pressure_count = np.sum(pressure < 0)
+        if negative_pressure_count > 0 and False:  # Enable for debugging
+            print(f"Warning: {negative_pressure_count} cells have negative pressure after Neumann BC")
+            
+        # Clip any remaining negative pressures to zero
+        # These can occur at material-vacuum boundaries due to numerical errors
+        # Physical pressure cannot be negative (no tension in fluids at this scale)
+        pressure = np.maximum(pressure, 0.0)
 
         # Store & add persistent offsets (don't clip negative pressures!)
-        self.sim.pressure[:] = pressure + self.sim.pressure_offset
+        # Pressure from solver is in MPa, store as Pa
+        self.sim.pressure[:] = pressure * 1e6 + self.sim.pressure_offset
     
     def apply_unified_kinematics(self, dt: float) -> None:
         """Move solids, liquids and gases in one deterministic pass.
@@ -454,7 +495,7 @@ class FluidDynamics:
                 return base_th
         return base_th
 
-    def apply_force_based_swapping(self):
+    def apply_force_based_swapping_slow(self):
         """Swap neighbouring cells that overcome their binding threshold.
 
         Implements the rule from PHYSICS.md Section *Cell-Swapping Mechanics*.
@@ -572,6 +613,178 @@ class FluidDynamics:
             
             if len(src_y):
                 self._perform_material_swaps(src_y, src_x, tgt_y, tgt_x)
+    
+    def apply_force_based_swapping(self):
+        """Optimized vectorized version of force-based swapping.
+        
+        Uses numpy array operations instead of nested loops for better performance.
+        Falls back to slow version if vectorization fails.
+        """
+        try:
+            # Try the optimized version first
+            self._apply_force_based_swapping_vectorized()
+        except Exception as e:
+            # Fall back to slow version if there's an issue
+            print(f"Warning: Vectorized swapping failed, using slow version: {e}")
+            self.apply_force_based_swapping_slow()
+    
+    def _apply_force_based_swapping_vectorized(self):
+        """Vectorized implementation of force-based swapping."""
+        fx = getattr(self.sim, 'force_x', None)
+        fy = getattr(self.sim, 'force_y', None)
+        if fx is None or fy is None:
+            fx, fy = self.compute_force_field()
+        
+        vx = self.velocity_x
+        vy = self.velocity_y
+        mt = self.sim.material_types
+        temp = self.sim.temperature
+        h, w = mt.shape
+        
+        # Get rigid body labels
+        labels, _ = self.identify_rigid_groups()
+        
+        # Process all 4 directions at once using shifted arrays
+        # This is much faster than nested loops
+        
+        # Create shifted versions of all arrays (padding with edge values)
+        # Up neighbors (shift down)
+        fx_up = np.vstack([fx[0:1, :], fx[:-1, :]])
+        fy_up = np.vstack([fy[0:1, :], fy[:-1, :]])
+        vx_up = np.vstack([vx[0:1, :], vx[:-1, :]])
+        vy_up = np.vstack([vy[0:1, :], vy[:-1, :]])
+        labels_up = np.vstack([labels[0:1, :], labels[:-1, :]])
+        
+        # Down neighbors (shift up)
+        fx_down = np.vstack([fx[1:, :], fx[-1:, :]])
+        fy_down = np.vstack([fy[1:, :], fy[-1:, :]])
+        vx_down = np.vstack([vx[1:, :], vx[-1:, :]])
+        vy_down = np.vstack([vy[1:, :], vy[-1:, :]])
+        labels_down = np.vstack([labels[1:, :], labels[-1:, :]])
+        
+        # Left neighbors (shift right)
+        fx_left = np.hstack([fx[:, 0:1], fx[:, :-1]])
+        fy_left = np.hstack([fy[:, 0:1], fy[:, :-1]])
+        vx_left = np.hstack([vx[:, 0:1], vx[:, :-1]])
+        vy_left = np.hstack([vy[:, 0:1], vy[:, :-1]])
+        labels_left = np.hstack([labels[:, 0:1], labels[:, :-1]])
+        
+        # Right neighbors (shift left)
+        fx_right = np.hstack([fx[:, 1:], fx[:, -1:]])
+        fy_right = np.hstack([fy[:, 1:], fy[:, -1:]])
+        vx_right = np.hstack([vx[:, 1:], vx[:, -1:]])
+        vy_right = np.hstack([vy[:, 1:], vy[:, -1:]])
+        labels_right = np.hstack([labels[:, 1:], labels[:, -1:]])
+        
+        # Create masks for valid swaps in each direction
+        # Valid sources: not in rigid body
+        valid_src = labels == 0
+        
+        # Boundary masks (can't swap across boundaries)
+        can_swap_up = np.ones((h, w), dtype=bool)
+        can_swap_up[0, :] = False
+        can_swap_down = np.ones((h, w), dtype=bool)
+        can_swap_down[-1, :] = False
+        can_swap_left = np.ones((h, w), dtype=bool)
+        can_swap_left[:, 0] = False
+        can_swap_right = np.ones((h, w), dtype=bool)
+        can_swap_right[:, -1] = False
+        
+        # Process each direction
+        swap_candidates = []
+        
+        # Up direction
+        valid_tgt_up = (labels_up == 0) | (labels_up == labels)
+        F_net_up = np.sqrt((fx - fx_up)**2 + (fy - fy_up)**2)
+        V_diff_up = np.sqrt((vx - vx_up)**2 + (vy - vy_up)**2)
+        proj_up = -fy  # Projection in up direction (negative y)
+        
+        mask_up = (valid_src & valid_tgt_up & can_swap_up & 
+                   (proj_up > 0) & (V_diff_up > 0.001) & (F_net_up > 0.1))
+        
+        # Down direction
+        valid_tgt_down = (labels_down == 0) | (labels_down == labels)
+        F_net_down = np.sqrt((fx - fx_down)**2 + (fy - fy_down)**2)
+        V_diff_down = np.sqrt((vx - vx_down)**2 + (vy - vy_down)**2)
+        proj_down = fy  # Projection in down direction (positive y)
+        
+        mask_down = (valid_src & valid_tgt_down & can_swap_down & 
+                     (proj_down > 0) & (V_diff_down > 0.001) & (F_net_down > 0.1))
+        
+        # Left direction
+        valid_tgt_left = (labels_left == 0) | (labels_left == labels)
+        F_net_left = np.sqrt((fx - fx_left)**2 + (fy - fy_left)**2)
+        V_diff_left = np.sqrt((vx - vx_left)**2 + (vy - vy_left)**2)
+        proj_left = -fx  # Projection in left direction (negative x)
+        
+        mask_left = (valid_src & valid_tgt_left & can_swap_left & 
+                     (proj_left > 0) & (V_diff_left > 0.001) & (F_net_left > 0.1))
+        
+        # Right direction
+        valid_tgt_right = (labels_right == 0) | (labels_right == labels)
+        F_net_right = np.sqrt((fx - fx_right)**2 + (fy - fy_right)**2)
+        V_diff_right = np.sqrt((vx - vx_right)**2 + (vy - vy_right)**2)
+        proj_right = fx  # Projection in right direction (positive x)
+        
+        mask_right = (valid_src & valid_tgt_right & can_swap_right & 
+                      (proj_right > 0) & (V_diff_right > 0.001) & (F_net_right > 0.1))
+        
+        # Collect all swap candidates with priorities
+        # Up swaps
+        y_up, x_up = np.where(mask_up)
+        if len(y_up) > 0:
+            for i in range(len(y_up)):
+                swap_candidates.append((F_net_up[y_up[i], x_up[i]], 
+                                       y_up[i], x_up[i], y_up[i]-1, x_up[i]))
+        
+        # Down swaps
+        y_down, x_down = np.where(mask_down)
+        if len(y_down) > 0:
+            for i in range(len(y_down)):
+                swap_candidates.append((F_net_down[y_down[i], x_down[i]], 
+                                       y_down[i], x_down[i], y_down[i]+1, x_down[i]))
+        
+        # Left swaps
+        y_left, x_left = np.where(mask_left)
+        if len(y_left) > 0:
+            for i in range(len(y_left)):
+                swap_candidates.append((F_net_left[y_left[i], x_left[i]], 
+                                       y_left[i], x_left[i], y_left[i], x_left[i]-1))
+        
+        # Right swaps
+        y_right, x_right = np.where(mask_right)
+        if len(y_right) > 0:
+            for i in range(len(y_right)):
+                swap_candidates.append((F_net_right[y_right[i], x_right[i]], 
+                                       y_right[i], x_right[i], y_right[i], x_right[i]+1))
+        
+        # Process candidates
+        if swap_candidates:
+            # Sort by priority (force magnitude)
+            swap_candidates.sort(reverse=True, key=lambda x: x[0])
+            
+            # Deduplicate
+            swapped = np.zeros((h, w), dtype=bool)
+            final_src_y = []
+            final_src_x = []
+            final_tgt_y = []
+            final_tgt_x = []
+            
+            for _, sy, sx, ty, tx in swap_candidates:
+                if not swapped[sy, sx] and not swapped[ty, tx]:
+                    final_src_y.append(sy)
+                    final_src_x.append(sx)
+                    final_tgt_y.append(ty)
+                    final_tgt_x.append(tx)
+                    swapped[sy, sx] = True
+                    swapped[ty, tx] = True
+            
+            # Perform swaps
+            if final_src_y:
+                self._perform_material_swaps(
+                    np.array(final_src_y), np.array(final_src_x),
+                    np.array(final_tgt_y), np.array(final_tgt_x)
+                )
 
     def identify_rigid_groups(self):
         """Identify connected components of rigid materials (any non-fluid materials).

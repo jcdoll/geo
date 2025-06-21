@@ -147,6 +147,7 @@ class CoreState:
         self.enable_heat_diffusion = True
         self.enable_material_processes = True
         self.enable_atmospheric_processes = True
+        self.enable_pressure = True  # Enable pressure calculation
         self.enable_weathering = True
         self.enable_solid_drag = True
         self.debug_rigid_bodies = False
@@ -392,7 +393,7 @@ class CoreState:
     # ------------------------------------------------------------------
     #  Derived material properties
     # ------------------------------------------------------------------
-    def _update_material_properties(self, force: bool = False):
+    def _update_material_properties_slow(self, force: bool = False):
         """Synchronise density / k / cp arrays with `material_types`.
 
         Recomputes only when `_properties_dirty` is True **or** the caller
@@ -427,6 +428,16 @@ class CoreState:
         # calculations (and several unit-tests) see the updated mass
         # distribution immediately after a manual material modification.
         self._calculate_center_of_mass()
+    
+    def _update_material_properties(self, force: bool = False):
+        """Optimized version of material properties update.
+        
+        Key optimizations:
+        - Use the existing slow version which is actually quite efficient
+        - The np.unique on object arrays is slower than the mask-based approach
+        """
+        # Just use the slow version - it's actually faster for object arrays
+        self._update_material_properties_slow(force=force)
 
     # ------------------------------------------------------------------
     #  Solid mask utility
@@ -461,7 +472,8 @@ class CoreState:
     def _save_state(self):
         if len(self.history) >= self.max_history:
             self.history.pop(0)
-        self.history.append({
+        
+        state_dict = {
             "material_types": self.material_types.copy(),
             "temperature": self.temperature.copy(),
             "pressure": self.pressure.copy(),
@@ -469,10 +481,17 @@ class CoreState:
             "age": self.age.copy(),
             "time": self.time,
             "power_density": self.power_density.copy(),
-        })
+        }
+        
+        # Also save velocity fields if they exist
+        if hasattr(self, "fluid_dynamics"):
+            state_dict["velocity_x"] = self.fluid_dynamics.velocity_x.copy()
+            state_dict["velocity_y"] = self.fluid_dynamics.velocity_y.copy()
+        
+        self.history.append(state_dict)
 
     # Time-series stub (modules may record)
-    def _record_time_series_data(self):
+    def _record_time_series_data_slow(self):
         """Record comprehensive time-series data for analytics and graphing"""
         # Skip recording if time hasn't advanced
         if len(self.time_series_data['time']) > 0 and self.time == self.time_series_data['time'][-1]:
@@ -553,6 +572,98 @@ class CoreState:
         for key in self.time_series_data:
             if len(self.time_series_data[key]) > self.max_time_series_length:
                 self.time_series_data[key] = self.time_series_data[key][-self.max_time_series_length:]
+    
+    def _record_time_series_data(self):
+        """Optimized version of time series data recording.
+        
+        Key optimizations:
+        - Single pass over non-space mask
+        - Vectorized operations where possible
+        - Avoid repeated calculations
+        - More efficient data structures
+        """
+        # Skip recording if time hasn't advanced
+        if len(self.time_series_data['time']) > 0 and self.time == self.time_series_data['time'][-1]:
+            return
+        
+        # Get non-space mask once
+        non_space_mask = self.material_types != MaterialType.SPACE
+        has_matter = np.any(non_space_mask)
+        
+        if has_matter:
+            # Get all non-space data in one go
+            temps_non_space = self.temperature[non_space_mask]
+            pressures_non_space = self.pressure[non_space_mask]
+            densities_non_space = self.density[non_space_mask]
+            spec_heat_non_space = self.specific_heat[non_space_mask]
+            
+            # Temperature stats - vectorized
+            avg_temp = float(np.mean(temps_non_space))
+            max_temp = float(np.max(temps_non_space))
+            min_temp = float(np.min(temps_non_space))
+            
+            # Pressure stats - vectorized
+            avg_pressure = float(np.mean(pressures_non_space))
+            max_pressure = float(np.max(pressures_non_space))
+            min_pressure = float(np.min(pressures_non_space))
+            
+            # Thermal energy calculation - single vectorized operation
+            cell_volume = self.cell_size ** 2 * self.cell_depth
+            thermal_energy = np.sum(densities_non_space * spec_heat_non_space * temps_non_space)
+            total_energy = float(thermal_energy * cell_volume)
+            
+            # Planet radius - more efficient calculation
+            # Instead of calculating distance for every cell, use bounding box
+            non_space_y, non_space_x = np.where(non_space_mask)
+            if len(non_space_y) > 0:
+                # Get extremes relative to center of mass
+                cx, cy = self.center_of_mass
+                dx = np.abs(non_space_x - cx)
+                dy = np.abs(non_space_y - cy)
+                max_dist = np.sqrt(np.max(dx)**2 + np.max(dy)**2)
+                planet_radius = float(max_dist * self.cell_size)
+            else:
+                planet_radius = 0.0
+        else:
+            # No matter - use defaults
+            avg_temp = max_temp = min_temp = self.space_temperature
+            avg_pressure = max_pressure = min_pressure = 0.0
+            total_energy = planet_radius = 0.0
+        
+        # Material counts - more efficient with unique
+        unique_materials, counts = np.unique(self.material_types, return_counts=True)
+        material_counts = {mat.value: int(count) for mat, count in zip(unique_materials, counts)}
+        
+        # Atmospheric mass - single calculation
+        atmospheric_types = [MaterialType.AIR, MaterialType.WATER_VAPOR]
+        atmospheric_mask = np.isin(self.material_types, atmospheric_types)
+        atmospheric_mass = float(np.sum(self.density[atmospheric_mask])) if np.any(atmospheric_mask) else 0.0
+        
+        # Append data - consider using numpy arrays instead of lists for better performance
+        data = self.time_series_data
+        data['time'].append(self.time)
+        data['avg_temperature'].append(avg_temp)
+        data['max_temperature'].append(max_temp)
+        data['min_temperature'].append(min_temp)
+        data['avg_pressure'].append(avg_pressure)
+        data['max_pressure'].append(max_pressure)
+        data['min_pressure'].append(min_pressure)
+        data['thermal_flux_solar'].append(self.thermal_fluxes.get('solar_input', 0.0))
+        data['thermal_flux_radiative'].append(self.thermal_fluxes.get('radiative_output', 0.0))
+        data['thermal_flux_internal'].append(self.thermal_fluxes.get('internal_heating', 0.0))
+        data['thermal_flux_net'].append(self.thermal_fluxes.get('net_flux', 0.0))
+        data['material_counts'].append(material_counts)
+        data['center_of_mass_x'].append(self.center_of_mass[0])
+        data['center_of_mass_y'].append(self.center_of_mass[1])
+        data['planet_radius'].append(planet_radius)
+        data['atmospheric_mass'].append(atmospheric_mass)
+        data['total_energy'].append(total_energy)
+        
+        # Efficient trimming - do it less frequently
+        if len(data['time']) % 100 == 0:  # Only trim every 100 steps
+            for key in data:
+                if len(data[key]) > self.max_time_series_length:
+                    data[key] = data[key][-self.max_time_series_length:]
 
     def _get_mobile_mask(self, temperature_threshold: float | None = None) -> np.ndarray:
         """Get mask for mobile (liquid/gas) materials"""

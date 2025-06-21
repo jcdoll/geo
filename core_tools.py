@@ -196,8 +196,8 @@ class CoreToolsMixin:
             'max_thermal_diffusivity': getattr(self, '_max_thermal_diffusivity', 0.0),
             'avg_temperature': float(np.mean(self.temperature) - 273.15),  # °C
             'max_temperature': float(np.max(self.temperature) - 273.15),   # °C
-            'avg_pressure': float(np.mean(self.pressure)),  # MPa
-            'max_pressure': float(np.max(self.pressure)),
+            'avg_pressure': float(np.mean(self.pressure) / 1e6),  # Convert Pa to MPa
+            'max_pressure': float(np.max(self.pressure) / 1e6),   # Convert Pa to MPa
             'material_composition': sorted_materials,
             'history_length': len(getattr(self, 'history', [])),
         }

@@ -29,9 +29,9 @@ class GravityFallScenario(TestScenario):
         sim.material_types[:] = MaterialType.AIR
         sim.temperature[:] = 290.0
         
-        # Create ground at bottom
+        # Create ground at bottom (use granite for ground to distinguish from falling object)
         ground_height = sim.height - 5
-        sim.material_types[ground_height:, :] = MaterialType.BASALT
+        sim.material_types[ground_height:, :] = MaterialType.GRANITE
         
         # Create falling object near top
         obj_y = 10
@@ -49,6 +49,18 @@ class GravityFallScenario(TestScenario):
         sim.enable_self_gravity = False
         sim.external_gravity = (0, 9.81)
         sim.enable_heat_diffusion = False
+        
+        # Use a reasonable timestep for mechanical motion
+        # Default timestep (10,000s) is for geological processes
+        # For gravity tests, use 0.1 seconds
+        sim.dt = 0.1
+        
+        # With smaller timestep, we can keep velocity clamping enabled
+        sim.fluid_dynamics.velocity_clamp = True
+        
+        # Disable rigid body grouping for simple gravity fall test
+        # We want individual cells to fall, not rigid bodies
+        sim.fluid_dynamics.identify_rigid_groups = lambda: (np.zeros_like(sim.material_types, dtype=int), 0)
         
         sim._properties_dirty = True
         sim._update_material_properties()
@@ -162,6 +174,10 @@ class BuoyancyScenario(TestScenario):
         sim.external_gravity = (0, 9.81)
         sim.enable_heat_diffusion = True if self.object_type == MaterialType.ICE else False
         
+        # Use reasonable timestep for fluid dynamics
+        sim.dt = 0.1
+        sim.fluid_dynamics.velocity_clamp = True
+        
         sim._properties_dirty = True
         sim._update_material_properties()
         
@@ -268,6 +284,10 @@ class HydrostaticPressureScenario(TestScenario):
         # Zero initial velocities
         sim.velocity_x[:] = 0
         sim.velocity_y[:] = 0
+        
+        # Use reasonable timestep
+        sim.dt = 0.1
+        sim.fluid_dynamics.velocity_clamp = True
         
         sim._properties_dirty = True
         sim._update_material_properties()

@@ -1,9 +1,12 @@
 """pressure_solver.py – multigrid Poisson solver for pressure.
 
-Solves ∇²P = rhs with homogeneous Dirichlet boundary conditions (P = 0 at
-the outer boundary).  The implementation is a classical V-cycle with red-
-black Gauss–Seidel smoothing, restriction by full-weighting and bilinear
-prolongation.  It is dimension-agnostic (handles rectangular grids).
+Solves ∇²P = rhs with either:
+- Homogeneous Dirichlet boundary conditions (P = 0 at the outer boundary), or
+- Homogeneous Neumann boundary conditions (∂P/∂n = 0 at the outer boundary).
+
+The implementation is a classical V-cycle with red-black Gauss–Seidel 
+smoothing, restriction by full-weighting and bilinear prolongation.  
+It is dimension-agnostic (handles rectangular grids).
 
 Designed to be *self-contained* (NumPy only) so it can be unit-tested or
 re-used outside the main simulation engine.
@@ -14,10 +17,42 @@ from typing import Tuple
 import numpy as np
 
 # -----------------------------------------------------------------------------
+# Boundary condition helpers
+# -----------------------------------------------------------------------------
+
+def _apply_neumann_bc(phi: np.ndarray):
+    """Apply homogeneous Neumann BC: ∂P/∂n = 0 at all boundaries.
+    
+    Uses ghost cell approach where boundary values are set equal to their
+    nearest interior neighbor, ensuring zero gradient at the boundary.
+    """
+    # Top and bottom boundaries: ∂P/∂y = 0
+    phi[0, :] = phi[1, :]      # Top boundary
+    phi[-1, :] = phi[-2, :]    # Bottom boundary
+    
+    # Left and right boundaries: ∂P/∂x = 0
+    phi[:, 0] = phi[:, 1]      # Left boundary
+    phi[:, -1] = phi[:, -2]    # Right boundary
+    
+    # Corners (average of two neighbors to ensure consistency)
+    phi[0, 0] = 0.5 * (phi[1, 0] + phi[0, 1])
+    phi[0, -1] = 0.5 * (phi[1, -1] + phi[0, -2])
+    phi[-1, 0] = 0.5 * (phi[-2, 0] + phi[-1, 1])
+    phi[-1, -1] = 0.5 * (phi[-2, -1] + phi[-1, -2])
+
+def _apply_dirichlet_bc(phi: np.ndarray):
+    """Apply homogeneous Dirichlet BC: P = 0 at all boundaries."""
+    phi[0, :] = 0.0
+    phi[-1, :] = 0.0
+    phi[:, 0] = 0.0
+    phi[:, -1] = 0.0
+
+# -----------------------------------------------------------------------------
 # Red-black Gauss–Seidel smoother (in-place)
 # -----------------------------------------------------------------------------
 
-def _gauss_seidel_rb(phi: np.ndarray, rhs: np.ndarray, dx: float, iterations: int = 3):
+def _gauss_seidel_rb(phi: np.ndarray, rhs: np.ndarray, dx: float, iterations: int = 3, 
+                     bc_type: str = 'dirichlet'):
     ny, nx = phi.shape
     h2 = dx * dx
     for _ in range(iterations):
@@ -29,6 +64,12 @@ def _gauss_seidel_rb(phi: np.ndarray, rhs: np.ndarray, dx: float, iterations: in
                     phi[:-2, 1:-1] + phi[2:, 1:-1] - h2 * rhs[1:-1, 1:-1]
                 ) / 4.0
             )[((np.indices((ny-2, nx-2)).sum(axis=0) & 1) == color)]
+        
+        # Apply boundary conditions after each sweep
+        if bc_type == 'neumann':
+            _apply_neumann_bc(phi)
+        elif bc_type == 'dirichlet':
+            _apply_dirichlet_bc(phi)
 
 # -----------------------------------------------------------------------------
 # Restriction (full weighting) & prolongation (bilinear)
@@ -110,9 +151,10 @@ def _prolong(coarse: np.ndarray, shape: Tuple[int, int]) -> np.ndarray:
 # V-cycle
 # -----------------------------------------------------------------------------
 
-def _v_cycle(phi: np.ndarray, rhs: np.ndarray, dx: float, level: int, max_level: int):
+def _v_cycle(phi: np.ndarray, rhs: np.ndarray, dx: float, level: int, max_level: int, 
+             bc_type: str = 'dirichlet'):
     # Pre-smooth
-    _gauss_seidel_rb(phi, rhs, dx, iterations=3)
+    _gauss_seidel_rb(phi, rhs, dx, iterations=3, bc_type=bc_type)
 
     ny, nx = phi.shape
     if level < max_level and min(ny, nx) > 3:
@@ -124,7 +166,7 @@ def _v_cycle(phi: np.ndarray, rhs: np.ndarray, dx: float, level: int, max_level:
         # Restrict residual to coarse grid
         res_c = _restrict(res)
         phi_c = np.zeros_like(res_c)
-        _v_cycle(phi_c, res_c, dx * 2, level + 1, max_level)
+        _v_cycle(phi_c, res_c, dx * 2, level + 1, max_level, bc_type=bc_type)
         # Prolong error and correct
         corr = _prolong(phi_c, phi.shape)
         if corr.shape != phi.shape:
@@ -135,20 +177,40 @@ def _v_cycle(phi: np.ndarray, rhs: np.ndarray, dx: float, level: int, max_level:
         else:
             phi += corr
         # Post-smooth
-        _gauss_seidel_rb(phi, rhs, dx, iterations=3)
+        _gauss_seidel_rb(phi, rhs, dx, iterations=3, bc_type=bc_type)
 
 # -----------------------------------------------------------------------------
 # Public API
 # -----------------------------------------------------------------------------
 
-def solve_pressure(rhs: np.ndarray, dx: float, *, tol: float = 1e-6, max_cycles: int = 50) -> np.ndarray:
-    """Return P solving ∇²P = rhs (Dirichlet 0 at boundary)."""
+def solve_pressure(rhs: np.ndarray, dx: float, *, tol: float = 1e-6, max_cycles: int = 50, 
+                   bc_type: str = 'dirichlet') -> np.ndarray:
+    """Return P solving ∇²P = rhs with specified boundary conditions.
+    
+    Parameters
+    ----------
+    rhs : ndarray
+        Right-hand side of Poisson equation
+    dx : float
+        Grid spacing
+    tol : float
+        Convergence tolerance
+    max_cycles : int
+        Maximum number of V-cycles
+    bc_type : str
+        Boundary condition type: 'dirichlet' (P=0) or 'neumann' (∂P/∂n=0)
+    
+    Returns
+    -------
+    P : ndarray
+        Solution to Poisson equation
+    """
     ny, nx = rhs.shape
 
     # ------------------------------------------------------------------
-    # Pad to EVEN sizes so each coarsening step halves cleanly. Adds at most
-    # one row/column of zeros (Dirichlet 0) which does not affect interior
-    # solution but removes off-by-one shape issues.
+    # Pad to EVEN sizes so each coarsening step halves cleanly. 
+    # For Neumann BC, padding doesn't affect solution since gradient is zero.
+    # For Dirichlet BC, padding with zeros maintains BC.
     # ------------------------------------------------------------------
     ny_pad = ny + (ny & 1)
     nx_pad = nx + (nx & 1)
@@ -163,7 +225,7 @@ def solve_pressure(rhs: np.ndarray, dx: float, *, tol: float = 1e-6, max_cycles:
     phi_pad = np.zeros_like(rhs_pad)
 
     for _ in range(max_cycles):
-        _v_cycle(phi_pad, rhs_pad, dx, 0, max_level)
+        _v_cycle(phi_pad, rhs_pad, dx, 0, max_level, bc_type=bc_type)
         # Compute residual norm
         res = np.zeros_like(rhs_pad)
         res[1:-1, 1:-1] = rhs_pad[1:-1, 1:-1] - (
@@ -172,6 +234,12 @@ def solve_pressure(rhs: np.ndarray, dx: float, *, tol: float = 1e-6, max_cycles:
         err = np.linalg.norm(res[:ny, :nx]) / (ny * nx)
         if err < tol:
             break
+    
+    # For Neumann BC, the solution is only determined up to a constant
+    # We can set the mean to zero or fix one point
+    if bc_type == 'neumann':
+        phi_pad -= np.mean(phi_pad[:ny, :nx])
+    
     return phi_pad[:ny, :nx]
 
 # -----------------------------------------------------------------------------
@@ -245,8 +313,9 @@ def solve_poisson_variable(rhs: np.ndarray, k: np.ndarray, dx: float, *, tol: fl
 # millisecond for 128² grids.
 # =====================================================================
 
-def _gauss_seidel_rb_var(phi: np.ndarray, rhs: np.ndarray, k: np.ndarray, dx: float, iters: int = 2):
-    """Red/black Gauss-Seidel smoother for ∇·(k∇φ)=rhs (Dirichlet 0)."""
+def _gauss_seidel_rb_var(phi: np.ndarray, rhs: np.ndarray, k: np.ndarray, dx: float, iters: int = 2,
+                         bc_type: str = 'dirichlet'):
+    """Red/black Gauss-Seidel smoother for ∇·(k∇φ)=rhs with specified BC."""
     ny, nx = phi.shape
     dx2 = dx * dx
 
@@ -274,6 +343,12 @@ def _gauss_seidel_rb_var(phi: np.ndarray, rhs: np.ndarray, k: np.ndarray, dx: fl
             phi_new = (k_e*phi_e + k_w*phi_w + k_n*phi_n + k_s*phi_s - dx2*rhs_c) / denom
 
             phi_c[mask] = phi_new[mask]
+        
+        # Apply boundary conditions after each sweep
+        if bc_type == 'neumann':
+            _apply_neumann_bc(phi)
+        elif bc_type == 'dirichlet':
+            _apply_dirichlet_bc(phi)
 
 
 def _restrict_var(arr: np.ndarray) -> np.ndarray:
@@ -309,8 +384,9 @@ def _restrict_var(arr: np.ndarray) -> np.ndarray:
     return result
 
 
-def _v_cycle_var(phi: np.ndarray, rhs: np.ndarray, k: np.ndarray, dx: float, level: int, max_level: int):
-    _gauss_seidel_rb_var(phi, rhs, k, dx, iters=3)
+def _v_cycle_var(phi: np.ndarray, rhs: np.ndarray, k: np.ndarray, dx: float, level: int, max_level: int,
+                 bc_type: str = 'dirichlet'):
+    _gauss_seidel_rb_var(phi, rhs, k, dx, iters=3, bc_type=bc_type)
 
     ny, nx = phi.shape
     if level < max_level and min(ny, nx) > 3:
@@ -339,17 +415,35 @@ def _v_cycle_var(phi: np.ndarray, rhs: np.ndarray, k: np.ndarray, dx: float, lev
         res_c = _restrict_var(res)
         k_cg = _restrict_var(k)
         phi_cg = np.zeros_like(res_c)
-        _v_cycle_var(phi_cg, res_c, k_cg, dx*2, level+1, max_level)
+        _v_cycle_var(phi_cg, res_c, k_cg, dx*2, level+1, max_level, bc_type=bc_type)
 
         # Prolong correction (bilinear) using existing _prolong
         corr = _prolong(phi_cg, phi.shape)
         phi += corr
 
-        _gauss_seidel_rb_var(phi, rhs, k, dx, iters=3)
+        _gauss_seidel_rb_var(phi, rhs, k, dx, iters=3, bc_type=bc_type)
 
 
-def solve_poisson_variable_multigrid(rhs: np.ndarray, k: np.ndarray, dx: float, *, tol: float = 1e-4, max_cycles: int = 20) -> np.ndarray:
-    """Multigrid V-cycle solver for ∇·(k∇φ)=rhs (Dirichlet 0)."""
+def solve_poisson_variable_multigrid(rhs: np.ndarray, k: np.ndarray, dx: float, *, 
+                                    tol: float = 1e-4, max_cycles: int = 20, 
+                                    bc_type: str = 'dirichlet') -> np.ndarray:
+    """Multigrid V-cycle solver for ∇·(k∇φ)=rhs with specified BC.
+    
+    Parameters
+    ----------
+    rhs : ndarray
+        Right-hand side of equation
+    k : ndarray  
+        Variable coefficient field (e.g., 1/ρ)
+    dx : float
+        Grid spacing
+    tol : float
+        Convergence tolerance
+    max_cycles : int
+        Maximum number of V-cycles
+    bc_type : str
+        Boundary condition type: 'dirichlet' or 'neumann'
+    """
     ny, nx = rhs.shape
 
     # Pad to even sizes for clean coarsening
@@ -365,13 +459,17 @@ def solve_poisson_variable_multigrid(rhs: np.ndarray, k: np.ndarray, dx: float, 
     max_level = max(0, max_level)
 
     for _ in range(max_cycles):
-        _v_cycle_var(phi, rhs_p, k_p, dx, 0, max_level)
+        _v_cycle_var(phi, rhs_p, k_p, dx, 0, max_level, bc_type=bc_type)
 
         # Residual norm
         res = rhs_p.copy()
-        _gauss_seidel_rb_var(res, rhs_p - res, k_p, dx, iters=0)  # quick compute
+        _gauss_seidel_rb_var(res, rhs_p - res, k_p, dx, iters=0, bc_type=bc_type)  # quick compute
         err = np.linalg.norm(res[:ny, :nx]) / (ny*nx)
         if err < tol:
             break
+    
+    # For Neumann BC, remove arbitrary constant
+    if bc_type == 'neumann':
+        phi -= np.mean(phi[:ny, :nx])
 
     return phi[:ny, :nx] 

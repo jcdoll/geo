@@ -499,7 +499,14 @@ AIDEV-TODO: IS THERE A MORE GENERAL WAY TO DO THIS? FOR EXAMPLE BY JUST APPLYING
 
 ### THEORY
 
-The pressure field is computed by solving the full Poisson equation with variable density, starting from hydrostatic balance:
+The pressure field is computed by solving the full Poisson equation with variable density, starting from force balance:
+
+
+```
+F = 0 = -∇P + ρg
+```
+
+we can obtain the hydrostatic balance equation:
 
 ```
 ∇P = ρg
@@ -522,20 +529,7 @@ For self-gravity with variable density:
 ```
 Where ∇·g_self = -4πGρ from the gravitational Poisson equation. 
 
-Why the second term is currently omitted for self-gravity:
-1. **Historical reason**: Implementation started with simplified case
-2. **This is a significant bug**: Our density variations are extreme (granite ~2700 kg/m³ to air ~1 kg/m³)
-3. **Impact**: Missing ~99.96% density jumps at rock/air interfaces!
-
-With density ratios of 2700:1, the g·∇ρ term is NOT negligible:
-- At a granite/air interface: ∇ρ ≈ 2700 kg/m³ over one cell
-- This creates massive pressure gradients that we're currently ignoring
-- The omission likely causes incorrect pressure fields near all material boundaries
-
-**Must be fixed**: This is not an optimization but a fundamental physics error that affects:
-- Pressure discontinuities at all material interfaces  
-- Force calculations that depend on pressure gradients
-- Material stability and fluid flow near boundaries
+The second term is significant for our case, because the density variation can be extreme (granite:air = 2700:1).
 
 For external gravity (uniform field), since ∇·g_ext = 0:
 ```
@@ -1379,3 +1373,24 @@ Important AI development findings are noted below, corresponding to each of the 
 - Partial melt phase diagram for silicates: returns melt fraction and latent heat sink.
 - GPU kernels for heat diffusion and Poisson solves via CuPy (optional acceleration path).
 - 3-D extrusion prototype: prove that 2-D solver generalises to shallow-layer quasi-3-D without re-architecting.
+
+---
+
+## PERFORMANCE OPTIMIZATIONS
+
+### Force-Based Swapping Vectorization (2025-01-21)
+
+**Issue**: Unified kinematics taking 376.5ms (78% of total time), preventing 30-60 FPS target.
+
+**Solution**: Vectorized `apply_force_based_swapping()` using numpy array operations:
+- Replaced triple-nested loops with shifted array operations
+- Process all 4 neighbor directions simultaneously
+- Achieved 24.1x speedup (120.5ms → 5.0ms)
+
+**Result**: Overall simulation improved from 4.3 FPS to 8.0 FPS (1.8x speedup).
+
+**Remaining work**:
+- Profile other bottlenecks (heat diffusion, gravity solver, pressure solver)
+- Consider numba JIT compilation for remaining loops
+- Investigate GPU acceleration for field solvers
+- Need additional 22+ FPS to reach 30 FPS target

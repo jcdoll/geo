@@ -51,6 +51,21 @@ class GeologyVisualizer:
     _SECONDS_PER_DAY = 86_400.0
     _SECONDS_PER_YEAR = 365.25 * 24 * 3600.0
 
+    def _format_pressure_smart(self, pressure_pa: float) -> str:
+        """Smart formatting of pressure values with appropriate units"""
+        abs_pressure = abs(pressure_pa)
+        
+        if abs_pressure == 0:
+            return "0 Pa"
+        elif abs_pressure < 1e3:
+            return f"{pressure_pa:.1f} Pa"
+        elif abs_pressure < 1e6:
+            return f"{pressure_pa / 1e3:.1f} kPa"
+        elif abs_pressure < 1e9:
+            return f"{pressure_pa / 1e6:.1f} MPa"
+        else:
+            return f"{pressure_pa / 1e9:.1f} GPa"
+    
     def _format_time_smart(self, time_seconds: float) -> str:
         """Return human-readable time string with adaptive unit.
 
@@ -594,7 +609,7 @@ class GeologyVisualizer:
         # Get tile data
         material = self.simulation.material_types[y, x]
         temp = self.simulation.temperature[y, x] - 273.15  # Convert to Celsius
-        pressure = self.simulation.pressure[y, x]
+        pressure = self.simulation.pressure[y, x]  # Keep in Pa for smart formatter
         age = self.simulation.age[y, x]
         
         # Calculate power for this tile (convert from power density W/m³ to power W)
@@ -624,7 +639,7 @@ class GeologyVisualizer:
             f"Position: ({x}, {y})",
             f"Material: {material.name}",
             f"Temperature: {temp:.1f}°C", 
-            f"Pressure: {pressure:.2f} MPa",
+            f"Pressure: {self._format_pressure_smart(pressure)}",
             f"Power: {power_formatted}",
             f"Velocity: {velocity_info}",
             f"Age: {age:.0f} years"
@@ -678,10 +693,31 @@ class GeologyVisualizer:
                                (bar_x + bar_width, bar_y + bar_height - i - 1))
                 
         elif self.display_mode == 'pressure':
-            pressure = self.simulation.pressure
+            pressure = self.simulation.pressure  # In Pa
             min_val = np.min(pressure)
             max_val = np.max(pressure)
-            unit = "MPa"
+            
+            # Choose appropriate unit based on max pressure
+            if max_val < 1e3:
+                unit = "Pa"
+                display_min = min_val
+                display_max = max_val
+            elif max_val < 1e6:
+                unit = "kPa"
+                display_min = min_val / 1e3
+                display_max = max_val / 1e3
+            elif max_val < 1e9:
+                unit = "MPa"
+                display_min = min_val / 1e6
+                display_max = max_val / 1e6
+            else:
+                unit = "GPa"
+                display_min = min_val / 1e9
+                display_max = max_val / 1e9
+            
+            # Override min_val and max_val for display
+            min_val = display_min
+            max_val = display_max
             
             # Draw gradient bar (black to green for pressure)
             for i in range(bar_height):

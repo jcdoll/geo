@@ -114,7 +114,56 @@ class GeoGame(CoreState, CoreToolsMixin):
         # Mark derived properties dirty and refresh immediately
         self._properties_dirty = True
         self._update_material_properties()
+        
+        # Calculate initial pressure distribution in hydrostatic equilibrium
+        self._calculate_initial_pressure()
 
+    def _calculate_initial_pressure(self):
+        """Calculate initial pressure distribution in hydrostatic equilibrium.
+        
+        For a planet in hydrostatic equilibrium, pressure should satisfy:
+        ∇P = ρg (force balance)
+        
+        This gives us the Poisson equation: ∇²P = ∇·(ρg)
+        """
+        # First calculate gravity field
+        self.calculate_self_gravity()
+        
+        # Add any external gravity
+        gx_total = self.gravity_x.copy()
+        gy_total = self.gravity_y.copy()
+        if hasattr(self, 'external_gravity'):
+            g_ext_x, g_ext_y = self.external_gravity
+            if g_ext_x != 0.0 or g_ext_y != 0.0:
+                gx_total += g_ext_x
+                gy_total += g_ext_y
+        
+        # Use fluid dynamics module to calculate pressure
+        # This ensures consistency with the simulation's pressure calculation
+        self.fluid_dynamics.calculate_planetary_pressure()
+        
+        # Log initial pressure statistics
+        planet_mask = self.material_types != MaterialType.SPACE
+        if np.any(planet_mask):
+            p_min = np.min(self.pressure[planet_mask]) / 1e6  # Convert to MPa
+            p_max = np.max(self.pressure[planet_mask]) / 1e6
+            p_mean = np.mean(self.pressure[planet_mask]) / 1e6
+            
+            # Estimate pressure at center (should be highest)
+            cx, cy = self.planet_center
+            cx, cy = int(cx), int(cy)
+            if 0 <= cx < self.width and 0 <= cy < self.height:
+                p_center = self.pressure[cy, cx] / 1e6
+            else:
+                p_center = p_max
+                
+            if hasattr(self, 'logger') and self.logger:
+                self.logger.info(f"Initial pressure distribution:")
+                self.logger.info(f"  Min: {p_min:.1f} MPa")
+                self.logger.info(f"  Max: {p_max:.1f} MPa") 
+                self.logger.info(f"  Mean: {p_mean:.1f} MPa")
+                self.logger.info(f"  Center: {p_center:.1f} MPa")
+    
     # ------------------------------------------------------------------
     # Self-gravity
     # ------------------------------------------------------------------
@@ -279,6 +328,32 @@ class GeoGame(CoreState, CoreToolsMixin):
         self.age[:] = state["age"]
         self.time = state["time"]
         self.power_density[:] = state["power_density"]
+        
+        # Mark properties as dirty to trigger material property recalculation
+        self._properties_dirty = True
+        
+        # Regenerate derived fields that depend on the restored state
+        # 1. Update material properties (density etc.)
+        if hasattr(self, "_update_material_properties"):
+            self._update_material_properties()
+        
+        # 2. Recalculate gravity field (depends on density)
+        if hasattr(self, "calculate_self_gravity"):
+            self.calculate_self_gravity()
+        
+        # 3. Recalculate pressure field (depends on density and gravity)
+        if self.enable_pressure and hasattr(self, "fluid_dynamics"):
+            self.fluid_dynamics.calculate_planetary_pressure()
+        
+        # 4. Restore velocity fields if they were saved
+        if hasattr(self, "fluid_dynamics"):
+            if "velocity_x" in state and "velocity_y" in state:
+                self.fluid_dynamics.velocity_x[:] = state["velocity_x"]
+                self.fluid_dynamics.velocity_y[:] = state["velocity_y"]
+            else:
+                # Reset velocities to zero if we don't have historical data
+                self.fluid_dynamics.velocity_x.fill(0.0)
+                self.fluid_dynamics.velocity_y.fill(0.0)
 
     # ------------------------------------------------------------------
     # Complete reset (used by visualiser key *R*)

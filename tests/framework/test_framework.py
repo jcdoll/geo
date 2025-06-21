@@ -149,6 +149,10 @@ class ScenarioRunner:
         if self.sim is None:
             raise RuntimeError("Must call setup() before step()")
             
+        # Call step_callback if scenario has one
+        if hasattr(self.scenario, 'step_callback'):
+            self.scenario.step_callback(self.sim, self.step_count)
+            
         # Step simulation
         self.sim.step_forward()
         self.step_count += 1

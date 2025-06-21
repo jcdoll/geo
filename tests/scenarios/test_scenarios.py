@@ -167,7 +167,7 @@ def test_gravity_fall(material):
         timeout=20
     )
     runner = ScenarioRunner(scenario, sim_width=60, sim_height=60)
-    result = runner.run_headless(max_steps=50)
+    result = runner.run_headless(max_steps=300)  # More steps for falling with 0.1s timestep
     
     assert result['success'], f"Gravity test failed for {material.name}: {result['message']}"
     
