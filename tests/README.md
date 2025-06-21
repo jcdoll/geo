@@ -2,6 +2,36 @@
 
 This directory contains a comprehensive test suite for the geological physics simulation, organized by test type and purpose.
 
+## 🚀 Quick Start - Running Tests
+
+**IMPORTANT: A Makefile has been created to make running tests easy. From the project root:**
+
+```bash
+# Run all tests with verbose output
+make test
+
+# Run only previously failed tests
+make test-failed
+
+# Run tests stopping at first failure (quick debugging)
+make test-quick
+
+# Get a summary count of passed/failed tests
+make test-summary
+
+# Run specific test suites
+make test-unit        # Only unit tests
+make test-scenarios   # Only scenario tests
+make test-integration # Only integration tests
+```
+
+**Alternative: Use the bash script directly:**
+```bash
+./tests/run_all_tests.sh
+```
+
+**Note:** Both methods automatically activate the virtual environment and set PYTHONPATH.
+
 ## Directory Structure
 
 ```
