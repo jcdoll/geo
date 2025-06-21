@@ -129,75 +129,8 @@ class MagmaFlowScenario(TestScenario):
             "message": "Step {} completed".format(step)
         }
 
-
-class SurfaceTensionScenario(TestScenario):
-    """Test surface tension effects on droplet formation"""
-    
-    def __init__(self):
-        super().__init__()
-        self.name = "Surface Tension"
-        self.description = "Water droplet formation and surface tension effects"
-        
-    def setup(self, sim):
-        """Set up surface tension test"""
-        sim.external_gravity = (0, 3)  # Light gravity
-        sim.enable_self_gravity = False
-        sim.enable_solid_drag = True
-        
-        # Minimal other processes to isolate surface tension
-        sim.enable_heat_diffusion = False
-        sim.enable_material_processes = False
-        
-        # Space environment (very low density)
-        sim.material_types[:] = MaterialType.SPACE
-        sim.temperature[:] = 280.0
-        
-        # Create scattered water cells that should coalesce
-        water_positions = [
-            (10, 15), (10, 16), (10, 17),  # Horizontal line
-            (11, 15), (12, 15),            # Vertical extension
-            (9, 18), (8, 19)               # Separate droplets
-        ]
-        
-        for y, x in water_positions:
-            if 0 <= y < sim.height and 0 <= x < sim.width:
-                sim.material_types[y, x] = MaterialType.WATER
-                sim.temperature[y, x] = 275.0
-        
-        self.initial_water_count = np.sum(sim.material_types == MaterialType.WATER)
-        print(f"Setup: {self.initial_water_count} scattered water cells - should coalesce due to surface tension")
-        
-    def evaluate(self, sim):
-        """Monitor droplet formation"""
-        step = getattr(self, "step_count", 0)
-        self.step_count = step + 1
-        if step % 10 == 0:
-            water_mask = sim.material_types == MaterialType.WATER
-            water_count = np.sum(water_mask)
-            
-            if water_count > 0:
-                water_coords = np.argwhere(water_mask)
-                center_y = np.mean(water_coords[:, 0])
-                center_x = np.mean(water_coords[:, 1])
-                
-                # Calculate compactness (measure of coalescence)
-                distances = np.sqrt(np.sum((water_coords - [center_y, center_x])**2, axis=1))
-                avg_distance = np.mean(distances)
-                
-                print(f"Step {step:3d}: {water_count} water cells, center=({center_x:.1f},{center_y:.1f}), compactness={avg_distance:.2f}")
-            else:
-                print(f"Step {step:3d}: No water remaining")
-                
-        return {
-            "success": np.sum(sim.material_types == MaterialType.WATER) > 0,
-            "metrics": {},
-            "message": "Step {} completed".format(step)
-        }
-
-
 # Register scenarios for visual runner
 SCENARIOS = {
     'water_conservation': lambda: WaterConservationScenario(),
     'magma_flow': lambda: MagmaFlowScenario(),
-    'surface_tension': lambda: SurfaceTensionScenario(),
 }

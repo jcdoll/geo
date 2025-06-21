@@ -70,28 +70,32 @@ class FluidDynamics:
         ) / (2 * dx)
 
         # Build RHS for Poisson equation
-        # For external gravity, we need to solve: ∇²P = ∇·(ρg)
+        # Full expansion: ∇²P = ∇·(ρg) = ρ(∇·g) + g·(∇ρ)
         # This handles arbitrary geometries correctly
         rhs = np.zeros_like(self.sim.density)
         
-        # Self-gravity contribution: -ρ∇·g_self (if enabled)
-        if self.sim.enable_self_gravity:
-            rhs -= (self.sim.density * div_g) / 1e6   # Pa → MPa (negative for attractive gravity)
+        # Calculate density gradient (needed for both self and external gravity)
+        grad_rho_x = np.zeros_like(self.sim.density)
+        grad_rho_y = np.zeros_like(self.sim.density)
         
-        # External gravity contribution: ∇·(ρg_ext)
-        # For uniform external gravity, ∇·(ρg_ext) = g_ext·∇ρ since ∇·g_ext = 0
+        # Central differences for density gradient
+        grad_rho_x[1:-1, 1:-1] = (self.sim.density[1:-1, 2:] - self.sim.density[1:-1, :-2]) / (2 * dx)
+        grad_rho_y[1:-1, 1:-1] = (self.sim.density[2:, 1:-1] - self.sim.density[:-2, 1:-1]) / (2 * dx)
+        
+        # Self-gravity contribution: ρ(∇·g_self) + g_self·(∇ρ)
+        if self.sim.enable_self_gravity:
+            # First term: ρ∇·g
+            rhs -= (self.sim.density * div_g) / 1e6   # Pa → MPa (negative for attractive gravity)
+            
+            # Second term: g·∇ρ (using total gravity field which includes self-gravity)
+            g_dot_grad_rho = gx_total * grad_rho_x + gy_total * grad_rho_y
+            rhs -= g_dot_grad_rho / 1e6  # Pa → MPa
+        
+        # External gravity contribution: g_ext·∇ρ (since ∇·g_ext = 0)
         if hasattr(self.sim, 'external_gravity'):
             g_ext_x, g_ext_y = self.sim.external_gravity
             if abs(g_ext_x) > 1e-10 or abs(g_ext_y) > 1e-10:
                 # For uniform external gravity field: ∇·(ρg) = g·∇ρ
-                grad_rho_x = np.zeros_like(self.sim.density)
-                grad_rho_y = np.zeros_like(self.sim.density)
-                
-                # Central differences for density gradient
-                grad_rho_x[1:-1, 1:-1] = (self.sim.density[1:-1, 2:] - self.sim.density[1:-1, :-2]) / (2 * dx)
-                grad_rho_y[1:-1, 1:-1] = (self.sim.density[2:, 1:-1] - self.sim.density[:-2, 1:-1]) / (2 * dx)
-                
-                # ∇·(ρg_ext) = g_ext·∇ρ
                 div_rho_g = g_ext_x * grad_rho_x + g_ext_y * grad_rho_y
                 
                 # Add to RHS (convert Pa to MPa)
@@ -99,6 +103,14 @@ class FluidDynamics:
 
         # Solve Poisson equation for pressure: ∇²P = RHS
         pressure = solve_pressure(rhs, dx)
+        
+        # Debug: print RHS statistics
+        if False:  # Enable for debugging
+            print(f"RHS min: {np.min(rhs):.6f}, max: {np.max(rhs):.6f}, mean: {np.mean(rhs):.6f}")
+        
+        # Force space/vacuum cells to zero pressure
+        space_mask = self.sim.material_types == MaterialType.SPACE
+        pressure[space_mask] = 0.0
 
         # Store & add persistent offsets (don't clip negative pressures!)
         self.sim.pressure[:] = pressure + self.sim.pressure_offset
@@ -377,13 +389,29 @@ class FluidDynamics:
         fx_pressure = np.zeros_like(fx)
         fy_pressure = np.zeros_like(fy)
 
-        # X-direction forces - pressure gradient (force density N/m³)
-        fx_pressure[:, :-1] -= (P_pa[:, :-1] - P_pa[:, 1:]) / dx  # interface with east neighbour
-        fx_pressure[:, 1:]  += (P_pa[:, :-1] - P_pa[:, 1:]) / dx  # equal & opposite on west side
+        # Compute pressure gradients using centered differences
+        # This is simpler than the face-based approach and may work better at interfaces
+        use_centered_gradients = True  # Toggle for testing
+        
+        if use_centered_gradients:
+            # Centered differences for interior cells
+            fx_pressure[1:-1, 1:-1] = -(P_pa[1:-1, 2:] - P_pa[1:-1, :-2]) / (2 * dx)
+            fy_pressure[1:-1, 1:-1] = -(P_pa[2:, 1:-1] - P_pa[:-2, 1:-1]) / (2 * dx)
+            
+            # One-sided at boundaries
+            fx_pressure[:, 0] = -(P_pa[:, 1] - P_pa[:, 0]) / dx
+            fx_pressure[:, -1] = -(P_pa[:, -1] - P_pa[:, -2]) / dx
+            fy_pressure[0, :] = -(P_pa[1, :] - P_pa[0, :]) / dx
+            fy_pressure[-1, :] = -(P_pa[-1, :] - P_pa[-2, :]) / dx
+        else:
+            # Original face-based approach
+            # X-direction forces - pressure gradient (force density N/m³)
+            fx_pressure[:, :-1] -= (P_pa[:, :-1] - P_pa[:, 1:]) / dx  # interface with east neighbour
+            fx_pressure[:, 1:]  += (P_pa[:, :-1] - P_pa[:, 1:]) / dx  # equal & opposite on west side
 
-        # Y-direction forces
-        fy_pressure[:-1, :] -= (P_pa[:-1, :] - P_pa[1:, :]) / dx  # south neighbour
-        fy_pressure[1:, :]  += (P_pa[:-1, :] - P_pa[1:, :]) / dx  # north side
+            # Y-direction forces
+            fy_pressure[:-1, :] -= (P_pa[:-1, :] - P_pa[1:, :]) / dx  # south neighbour
+            fy_pressure[1:, :]  += (P_pa[:-1, :] - P_pa[1:, :]) / dx  # north side
 
         # Add pressure forces to total
         fx += fx_pressure

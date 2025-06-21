@@ -234,9 +234,6 @@ Options are:
       - Compute acceleration at estimated velocity
       - Compute velocity from average of the two accelerations
 - Semi-implicit Euler
-   -
-
-We do not use 
 
 AIDEV-TODO: WE DON'T ACTUALLY USE DISPLACEMENT FOR ANYTHING THOUGH SO WHY COMPUTE IT
 
@@ -553,39 +550,150 @@ This formulation correctly handles:
 
 ### IMPLEMENTATION
 
-The pressure field is solved using a geometric multigrid method with V-cycle:
+The pressure field is solved using a geometric multigrid method, which is an optimal O(N) algorithm for solving the Poisson equation ∇²P = RHS.
 
-1. **Multigrid Solver** (`pressure_solver.py`):
-   - Classical V-cycle with red-black Gauss-Seidel smoothing
-   - Full-weighting restriction and bilinear prolongation
-   - Handles rectangular grids and odd dimensions
-   - Converges in ~10-20 V-cycles for typical grids
+#### What is Multigrid?
 
-2. **Right-Hand Side Construction**:
-   - First compute gravity field (if self-gravity enabled)
-   - Calculate divergence of gravity: ∇·g
-   - Calculate density gradient: ∇ρ
-   - Build RHS combining both terms:
-   
+The key insight: iterative methods like Gauss-Seidel quickly smooth high-frequency errors but are slow at reducing low-frequency (smooth) errors. Multigrid accelerates convergence by:
+1. Smoothing on the fine grid to reduce high-frequency errors
+2. Transferring the problem to a coarser grid where low-frequency errors become high-frequency
+3. Solving on the coarse grid (where it's cheaper)
+4. Transferring the correction back to the fine grid
+
+#### The V-Cycle Algorithm
+
+Our implementation uses a V-cycle, which looks like:
+```
+Fine grid (100×100):    Smooth → Restrict ↘
+                                           ↘
+Coarse grid (50×50):                        Smooth → Restrict ↘
+                                                               ↘
+Coarsest grid (25×25):                                          Solve
+                                                               ↗
+Coarse grid (50×50):                        Smooth ← Prolong ↗
+                                           ↗
+Fine grid (100×100):    Smooth ← Prolong ↗
+```
+
+#### Components of our Multigrid Solver
+
+1. **Smoother: Red-Black Gauss-Seidel**
+   - Updates grid points in a checkerboard pattern (red points, then black points)
+   - Each point updated using: `P[i,j] = (P[i±1,j] + P[i,j±1] - h²·RHS[i,j])/4`
+   - Chosen because it parallelizes well and has good smoothing properties
+
+2. **Restriction: Full-Weighting** (fine → coarse)
+   - Averages 2×2 blocks of fine grid cells to create one coarse cell
+   - `P_coarse[i,j] = (P_fine[2i,2j] + P_fine[2i+1,2j] + P_fine[2i,2j+1] + P_fine[2i+1,2j+1])/4`
+   - Properly handles odd-sized grids by padding
+
+3. **Prolongation: Bilinear Interpolation** (coarse → fine)
+   - Interpolates coarse grid values back to fine grid
+   - Direct injection at coincident points
+   - Linear interpolation along edges
+   - Bilinear interpolation at cell centers
+
+4. **Convergence**: Typically 10-20 V-cycles for 1e-6 relative error
+
+#### Right-Hand Side Construction
+
+Before solving, we must build the RHS of ∇²P = RHS:
+
+1. **Compute gravity field** (if self-gravity enabled via `gravity_solver.py`)
+2. **Calculate spatial derivatives** using central differences:
    ```python
-   # Self-gravity contribution (simplified - only first term)
-   div_g = (∂gx/∂x + ∂gy/∂y)
-   rhs = -ρ * div_g / 1e6  # Convert Pa to MPa
+   # Divergence of gravity
+   div_g = (gx[i,j+1] - gx[i,j-1])/(2*dx) + (gy[i+1,j] - gy[i-1,j])/(2*dx)
    
-   # External gravity contribution (full term)
-   grad_rho_x = ∂ρ/∂x
-   grad_rho_y = ∂ρ/∂y
-   rhs += (g_ext_x * grad_rho_x + g_ext_y * grad_rho_y) / 1e6
+   # Density gradient  
+   grad_rho_x = (rho[i,j+1] - rho[i,j-1])/(2*dx)
+   grad_rho_y = (rho[i+1,j] - rho[i-1,j])/(2*dx)
    ```
+3. **Build RHS** combining terms:
+   - Self-gravity: `RHS = -ρ(∇·g)`
+   - External gravity: `RHS = g·∇ρ`
 
-3. **Boundary Conditions**:
-   - Dirichlet P = 0 at grid boundaries
-   - Space/vacuum cells forced to P = 0
-   - Pressure offset can be added for absolute pressure
+#### Boundary Conditions
 
-The solver exactly reproduces analytical hydrostatic profiles when density is uniform, and correctly captures pressure variations in heterogeneous media.
+- **Dirichlet boundaries**: P = 0 at grid edges (open boundaries)
+- **Material boundaries**: No special treatment needed - the variable density in RHS naturally handles interfaces
+- **Vacuum/Space**: Forced to P = 0 after solving
 
-Note: Future work should incorporate velocity divergence (∇·v) into the pressure calculation for more accurate fluid dynamics.
+#### Why Multigrid is Fast
+
+- **Direct methods** (Gaussian elimination): O(N³) operations
+- **Simple iterative** (Gauss-Seidel alone): O(N²) operations  
+- **Multigrid**: O(N) operations - optimal!
+
+For a 100×100 grid:
+- Direct: ~1,000,000,000 operations
+- Gauss-Seidel: ~1,000,000 operations per iteration × many iterations
+- Multigrid: ~10,000 operations per V-cycle × 10-20 cycles = ~200,000 total
+
+#### Current Limitations and Design Philosophy
+
+The pressure solver is designed for **dynamic simulations**, not static equilibrium:
+
+1. **Captures pressure-driven flows**: The solver correctly handles buoyancy, density stratification, and material interfaces
+2. **Not designed for perfect hydrostatics**: Static fluid columns don't achieve f = 0 equilibrium
+
+**Why hydrostatic equilibrium is imperfect:**
+
+1. **Discrete grid effects**: On coarse grids (50-100m cells), material interfaces are step functions. The pressure equation ∇²P = ∇·(ρg) has delta-function forcing at boundaries, poorly represented on discrete grids.
+
+2. **Inconsistent discretizations**: The Poisson solver uses one discretization of ∇², while force calculation uses a different discretization of ∇. These need to be "adjoint" for perfect conservation.
+
+3. **Interface forces**: At material boundaries (e.g., water/air), the pressure gradient calculation creates spurious forces. Water at interfaces experiences ~13,000 N/m³ instead of the expected 10,000 N/m³.
+
+4. **Theoretical limits**: With sharp density jumps, the vector field ρg is not curl-free at interfaces. This means no exact pressure field satisfies ∇P = ρg everywhere on the discrete grid.
+
+**Design trade-offs:**
+
+- **Speed**: The multigrid solver is O(N) optimal, achieving milliseconds for 128×128 grids
+- **Simplicity**: Avoids complex interface treatments like ghost fluid methods
+- **Dynamic accuracy**: Correctly captures the physics that matters for geological evolution
+
+**Possible improvements:**
+
+1. **Ghost Fluid Method**: Modify pressure gradients at interfaces to account for density jumps
+2. **Consistent discretization**: Ensure gradient operator is adjoint to divergence operator
+3. **Higher resolution**: Smoother interfaces reduce numerical artifacts
+
+For now, we accept these limitations. The solver successfully drives the intended physics: heavy materials sink, light materials rise, and the system evolves toward realistic configurations.
+
+### INCOMPRESSIBLE FLOW AND DYNAMIC PRESSURE
+
+For incompressible fluids, the pressure must enforce the divergence-free constraint:
+
+```
+∇·v = 0  (incompressibility)
+```
+
+This leads to an additional pressure equation:
+```
+∇²P_dynamic = ρ∇·(v·∇v) - ∂(∇·v)/∂t
+```
+
+For steady incompressible flow, this simplifies to:
+```
+∇²P_dynamic = -ρ∇·(v·∇v)
+```
+
+**Why this matters:**
+- When a rigid body moves through fluid, it displaces fluid that must flow around it
+- The pressure field must adjust to maintain ∇·v = 0
+- This creates dynamic pressure variations beyond the hydrostatic pressure
+- Without this term, fluids can artificially compress/expand at boundaries
+
+**Current limitation:** Our pressure solver only computes hydrostatic pressure from gravity. This means:
+- Fluids can compress/expand numerically when interacting with moving solids
+- Pressure forces on rigid bodies may be underestimated
+- High-speed flows lack proper pressure-velocity coupling
+
+**Future implementation:** Add a projection step to enforce incompressibility:
+1. Compute provisional velocity from forces
+2. Solve for dynamic pressure that makes velocity divergence-free
+3. Project velocity: v_new = v_provisional - ∇P_dynamic/ρ
 
 ## SURFACE TENSION
 

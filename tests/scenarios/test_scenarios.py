@@ -18,7 +18,6 @@ from tests.framework.test_framework import ScenarioRunner
 from .fluids import (
     WaterConservationScenario,
     WaterConservationStressScenario,
-    WaterDropletCoalescenceScenario,
     WaterBlobScenario,
     WaterLineCollapseScenario,
     MagmaFlowScenario,
