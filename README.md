@@ -1,142 +1,235 @@
-# 2D Geology Simulator
+# Geology Simulator
 
-A fast, fun planetary simulation system that models geological processes using simplified physics. Everything flows based on material viscosity - no rigid bodies!
+A modern 2D geological simulation using flux-based physics for realistic material flow and transitions.
+
+## Quick Start
+
+```bash
+# Install dependencies
+python3 -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+# Run the simulation
+python main.py                      # Default Earth-like planet
+python main.py --scenario volcanic  # Volcanic island
+python main.py --scenario ice       # Ice world with subsurface ocean
+python main.py --size 200          # Larger grid
+```
 
 ## Features
 
+### Flux-Based Physics (NEW!)
+- **Volume Fractions**: Each cell can contain multiple materials (e.g., 30% water, 70% air)
+- **Continuous Transport**: Materials flow based on physical flux calculations
+- **Conservation Laws**: Exact mass, momentum, and energy conservation
+- **Unified Framework**: All materials use the same transport equations
+
 ### Core Simulation
-- **Viscosity-Based Flow**: All materials flow at different rates (rocks slowly, water quickly)
-- **Self-Gravity**: Dynamic gravitational field calculation
-- **Heat Transfer**: Realistic heat diffusion with material-based heating (uranium!)
-- **Pressure Dynamics**: Proper hydrostatic/lithostatic pressure using multigrid solver
-- **Material Transitions**: Temperature/pressure-based phase changes (ice↔water↔vapor, rock→magma)
-- **Performance**: ~22 FPS for 100x60 grid (1.5x faster with recent optimizations)
+- **Multi-Material Cells**: Realistic mixing and interfaces
+- **Self-Gravity**: Dynamic gravitational field using multigrid solver
+- **Phase Transitions**: Temperature/pressure-based changes (ice↔water↔vapor, rock→magma)
+- **Heat Transfer**: Conduction, radioactive heating, solar radiation
+- **Fluid Dynamics**: Navier-Stokes with variable viscosity
+- **Performance**: Target 30+ FPS at 128×128 grid
 
-### Interactive Visualization
-- **Real-time Rendering**: Pygame-based visualization
-- **Multiple Display Modes**:
-  - Material types (color-coded by geological classification)
-  - Temperature (thermal gradient visualization)
-  - Pressure (pressure gradient visualization)
-  - Power/energy flow
-- **Interactive Tools**:
-  - Heat source placement (simulate magma intrusions)
-  - Pressure application (simulate tectonic stress)
-  - Material placement and editing
-  - Real-time inspection of cell properties
-
-### User Controls
-- **Time Control**: Play/pause, step forward/backward, adjustable time steps
-- **Interactive Editing**: Click and drag to modify simulation conditions
-- **Multiple Visualization Modes**: Switch between rock types, temperature, and pressure views
-
-## Installation
-
-Abbreviated instructions are as follows:
-
-   ```bash
-   wsl --install -d Ubuntu
-   cd geo
-   python3 -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   python main.py
-   ```
+### Interactive Features
+- **Real-Time Visualization**: Multiple display modes
+- **Interactive Tools**: Add heat, pressure, materials
+- **Time Control**: Pause, step, adjust speed
+- **Scenarios**: Pre-built worlds to explore
 
 ## Usage
 
+### Main Application
+
+```bash
+python main.py [options]
+
+Options:
+  --scenario {planet,volcanic,ice,empty}  Initial world type
+  --size N                                Grid size (default: 128)
+  --scale M                               Cell size in meters (default: 50)
+  --width W --height H                    Custom dimensions
+```
+
+### Scenarios
+
+1. **Planet** (default)
+   - Atmosphere, ocean, and rocky crust
+   - Uranium deposits for heat generation
+   - Active weather and erosion
+
+2. **Volcanic Island**
+   - Island with magma chamber
+   - Surrounding ocean
+   - Active volcanism
+
+3. **Ice World**
+   - Frozen surface
+   - Subsurface liquid ocean
+   - Tidal heating effects
+
+4. **Empty**
+   - Blank canvas
+   - Build your own world
+
 ### Controls
-Controls are printed to the terminal when you run the simulator. Press H in the simulation for complete controls help.
 
-## Geological Processes Modeled
+**Simulation**
+- `SPACE` - Pause/Resume
+- `←/→` - Step backward/forward
+- `R` - Reset
+- `ESC` - Exit
+- `H` - Show help
 
-### Rock Types
-- **Igneous**: Granite, Basalt, Obsidian, Pumice, Andesite
-- **Sedimentary**: Sandstone, Limestone, Shale, Conglomerate
-- **Metamorphic**: Gneiss, Schist, Slate, Marble, Quartzite
+**Display Modes**
+- `1` - Material (dominant)
+- `2` - Material (composite)
+- `3` - Temperature
+- `4` - Pressure
+- `5` - Velocity
+- `6` - Density
 
-### Metamorphic Transitions
-- Shale → Slate → Schist → Gneiss (increasing P-T)
-- Sandstone → Quartzite
-- Limestone → Marble
-- Granite → Gneiss
+**Tools** (number keys select tools, then click/drag to use)
+- Heat sources
+- Pressure application  
+- Material placement
+- And more...
 
-### Physical Properties
-Each rock type has realistic:
-- Density (kg/m³)
-- Thermal conductivity (W/m·K)
-- Specific heat (J/kg·K)
-- Melting point (°C)
-- Compressive strength (MPa)
-- Porosity
+## Materials
+
+| Material | Properties | Transitions |
+|----------|------------|-------------|
+| Water | Flows easily, moderate density | →Ice (<0°C), →Vapor (>100°C) |
+| Ice | Solid, less dense than water | →Water (>0°C) |
+| Rock | Very viscous flow, high density | →Magma (>1200°C) |
+| Magma | Viscous flow, radiates heat | →Rock (<1200°C) |
+| Sand | Granular flow, medium density | Forms from rock weathering |
+| Air | Low density, low viscosity | Greenhouse effects |
+| Uranium | Radioactive, generates heat | No transitions |
+| Space | Vacuum, no properties | No transitions |
 
 ## Architecture
 
-### Modular Physics Engine
-The codebase uses a modular architecture with physics domains isolated in separate modules:
+### Flux-Based Approach (NEW!)
+The new flux-based approach replaces the cellular automata (CA) system:
 
-- **`geo_game.py`**: Main simulation facade, inherits from CoreState + CoreToolsMixin
-- **`core_state.py`**: Shared state and grid allocation for physics modules
-- **`core_tools.py`**: Interactive tools mixin (heat sources, pressure application)
+**Core Modules**
+- `state.py` - Simulation state with volume fractions
+- `transport.py` - Flux-based mass/momentum transport
+- `physics.py` - Gravity, pressure, thermal physics
+- `materials.py` - Material properties and transitions
+- `simulation.py` - Main loop with operator splitting
+- `visualizer.py` - Interactive pygame visualization
+- `main.py` - Entry point with scenarios
 
-### Physics Modules
-Each physics domain is isolated in its own module:
-- **`heat_transfer.py`**: Heat diffusion calculations using operator splitting
-- **`fluid_dynamics.py`**: **Simplified viscosity-based flow** (no rigid bodies!)
-- **`gravity_solver.py`**: Self-gravity field calculations using multigrid Poisson solver
-- **`pressure_solver.py`**: Hydrostatic pressure field calculations
-- **`atmospheric_processes.py`**: Atmospheric physics and greenhouse effects
-- **`material_processes.py`**: Rock metamorphism and phase transitions
+**Key Differences from CA**
+1. **Volume Fractions**: Multiple materials per cell vs single material
+2. **Continuous Physics**: Flux equations vs discrete rules
+3. **Better Conservation**: Exact conservation vs approximate
+4. **No Rigid Bodies**: Everything flows based on viscosity
+5. **Unified Transport**: Same equations for all materials
 
-### Materials System
-- **`materials.py`**: Material types, properties, and metamorphic transitions
-- **`visualizer.py`**: Interactive pygame-based visualization with multiple display modes
+### Key Concepts
 
-### Key Physical Models
+1. **Volume Fractions** (φᵢ)
+   - Each material has fraction 0 ≤ φᵢ ≤ 1
+   - Sum equals 1: Σφᵢ = 1
+   - Mixture properties: ρ = Σ(φᵢρᵢ)
 
-- **Simplified Movement**: All materials flow based on viscosity (0.0 = no resistance, 1.0 = no flow)
-- **Self-Gravity**: Dynamic gravity field calculation using multigrid Poisson solver
-- **Heat Transfer**: Operator splitting with unconditional stability
-- **Material-Based Heating**: Uranium and other materials generate heat
-- **No Rigid Bodies**: Everything flows - rocks slowly (viscosity 0.9), water quickly (0.05)
-- **Atmospheric Effects**: Greenhouse warming and enhanced turbulent mixing
+2. **Flux Transport**
+   - Face-centered fluxes for conservation
+   - Upwind scheme for stability
+   - No artificial diffusion
 
-## Examples
-
-### Scenario 1: Magma Intrusion
-1. Start simulation
-2. Select "Heat Source" tool
-3. Click and drag in lower crust area
-4. Watch heat propagate upward
-5. Observe metamorphic aureole formation
-
-### Scenario 2: Tectonic Compression
-1. Select "Pressure" tool
-2. Apply pressure to sedimentary layers
-3. Observe metamorphic transitions
-4. Use backward stepping to see process in reverse
-
-### Scenario 3: Deep Crustal Processes
-1. Set simulation to auto-step
-2. Add multiple heat sources at depth
-3. Watch long-term thermal evolution
-4. Switch between visualization modes
-
-## Performance Optimizations
-
-Recent optimizations have significantly improved simulation speed:
-- **Vectorized movement**: 7.7x speedup (19ms → 2.5ms) through batch processing
-- **Optimized time series**: Removed unused planet_radius calculation
-- **Pre-allocated buffers**: Reduced memory allocation overhead
-- **Material count caching**: Only recalculate when materials change
-
-## Technical Details
-
-See [PHYSICS.md](PHYSICS.md) for details.
+3. **Operator Splitting**
+   - Separate physics solved sequentially
+   - Maintains accuracy and stability
+   - Allows different time scales
 
 ## Testing
 
-See the [testing readme](./tests/README.md).
+### Run Test Suite
+```bash
+pytest tests/                    # All tests
+pytest tests/ -v                # Verbose
+pytest tests/ -k "water"        # Specific tests
+```
+
+### Visual Testing
+```bash
+# List available test scenarios
+python tests/run_visual_tests.py --list
+
+# Run specific scenario with visualization
+python tests/run_visual_tests.py water_drop_fall
+python tests/run_visual_tests.py heat_diffusion --size 80
+```
+
+Test categories:
+- **Fluid Dynamics**: Hydrostatic equilibrium, buoyancy, flow
+- **Phase Transitions**: Freezing, melting, evaporation
+- **Thermal Physics**: Diffusion, radiation, nuclear heating
+
+## Development
+
+### Performance
+- Vectorized numpy operations
+- Optional Numba JIT compilation
+- Pre-allocated arrays for efficiency
+
+### Adding Features
+1. New materials → Edit `materials.py`
+2. New physics → Add to `physics.py`
+3. New tools → Extend `visualizer.py`
+4. New scenarios → Add to `main.py`
+
+### Debugging
+```bash
+# Profile performance
+python -m cProfile -o profile.dat main.py --size 64
+
+# Test specific physics
+python tests/run_visual_tests.py <scenario_name>
+```
+
+## Physics Details
+
+See [PHYSICS_FLUX.md](PHYSICS_FLUX.md) for detailed physics documentation including:
+- Conservation equations
+- Numerical methods
+- Material properties
+- Phase transition rules
+
+## References
+
+### Simulation Methods
+- **Eulerian**: Fixed grid, flux-based (this project)
+- **Lagrangian**: Particle-based, moving mesh
+- **SPH**: Smoothed Particle Hydrodynamics
+- **CA**: Cellular Automata (old version)
+
+### Inspirations
+- Games:
+  - [Noita](https://store.steampowered.com/app/881100/Noita/)
+  - [Powder Game](https://dan-ball.jp/en/javagame/dust/)
+  - [The Powder Toy](https://powdertoy.co.uk/)
+- Simulators:
+  - [ASPECT](https://aspect.geodynamics.org/)
+  - [ConMan](https://geodynamics.org/resources/conman)
+- Tutorials:
+  - [Mantle Convection](https://www.youtube.com/watch?v=x6mcua0HOJs)
+  - [Plate Tectonics](https://www.youtube.com/watch?v=iKAVRgIrUOU)
+  - [Earth Structure](https://www.youtube.com/watch?v=rSKMYc1CQHE)
+  - [Geology Basics](https://www.youtube.com/watch?v=8nIB7e_eds4)
+  - [SPH Tutorial](https://tommccracken.net/sph-fluid-simulation/)
+- Papers:
+  - [Planetary Formation](https://arxiv.org/abs/astro-ph/0610051)
+
+## Legacy CA Version
+
+The original cellular automata version is preserved in the `ca/` directory. It uses discrete cell states and local update rules rather than continuous flux calculations. This approach has numerous problems based on the quantization of cell state, for example incorrect pressures in uniform bodies of fluid. The continuous flux based approach solves these problems.
 
 ## License
 
