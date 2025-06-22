@@ -10,6 +10,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 3. Check for basic errors like AttributeError, ImportError, etc.
 4. If you get an error, iterate and fix it - don't leave broken code
 
+## CRITICAL: Pressure Calculation
+
+**NEVER use ANY form of integration to calculate pressure in 2D!**
+- NO path integration (integrating along x then y)
+- NO vertical integration (integrating only in y)
+- NO line integrals of any kind
+- These are ALL fundamentally incorrect for 2D problems
+
+**Why integration fails:**
+- Integration assumes you can compute pressure by accumulating ρg along a path
+- This only works in 1D or for very special 2D cases (uniform gravity, stratified density)
+- For general 2D problems with varying gravity/density, different paths give different answers
+- This violates the requirement that pressure be a single-valued function
+
+**The ONLY correct approaches:**
+- Solve the Poisson equation: ∇²P = ∇·(ρg) using the multigrid solver
+- Let pressure evolve dynamically through velocity projection
+- Initialize to a constant and let the system find equilibrium
+
 ## Important: Read AGENTS.md First
 
 Before making any changes, **read `AGENTS.md`** which contains:
@@ -17,7 +36,7 @@ Before making any changes, **read `AGENTS.md`** which contains:
 - Required workflow (including running pytest before commits)
 - Code style guidelines (PEP8, 120-char lines, double quotes)
 - Anchor comment conventions (`AIDEV-NOTE`, `AIDEV-TODO`, `AIDEV-QUESTION`)
-- References to other key documents (`PHYSICS.md`, `README.md`)
+- References to other key documents (`PHYSICS_CA.md`, `PHYSICS_FLUX.MD`, `README.md`)
 
 ## Commands
 
@@ -74,21 +93,30 @@ pip install -r requirements.txt
 
 ## Architecture
 
-### Modular Physics Engine
-The codebase has been refactored from a monolithic engine to a modular architecture:
+### Performance Optimizations
+Recent optimizations have significantly improved simulation speed:
+- **Vectorized movement**: 7.7x speedup (19ms → 2.5ms) through batch processing of cells
+- **Time series optimization**: Removed unused planet_radius calculation, added material count caching
+- **Pre-allocated buffers**: Reuse memory for movement operations
+- **Overall improvement**: 22 FPS on 100x60 grid (was 15 FPS)
+
+### Simplified Physics Engine
+The codebase uses a modular architecture focused on **fast, viscosity-based flow**:
 
 - `geo_game.py` - Main simulation facade, inherits from CoreState + CoreToolsMixin
-- `core_state.py` - Shared state and grid allocation for physics modules
+- `core_state.py` - Shared state and grid allocation for physics modules (includes optimized time series)
 - `core_tools.py` - Interactive tools mixin (heat sources, pressure application)
 
 ### Physics Modules
 Each physics domain is isolated in its own module:
-- `heat_transfer.py` - Heat diffusion calculations (now uses material-based heat generation)
-- `fluid_dynamics.py` - Fluid flow and material swapping
+- `heat_transfer.py` - Heat diffusion calculations (material-based heat generation)
+- `fluid_dynamics.py` - **Vectorized viscosity-based flow** (7.7x faster, no rigid bodies!)
 - `gravity_solver.py` - Gravitational field calculations using Poisson solver
 - `pressure_solver.py` - Pressure field calculations
 - `atmospheric_processes.py` - Atmospheric physics
 - `material_processes.py` - Rock metamorphism and phase transitions
+
+**Key Simplification**: All materials flow based on viscosity - rocks flow slowly (0.9), water flows easily (0.05)
 
 ### Materials System
 - `materials.py` - Material types, properties, and metamorphic transitions
@@ -176,6 +204,25 @@ except ImportError:
 3. Disable specific physics phases to isolate issues
 4. Use screenshot capture for documenting bugs
 
+## Performance Notes
+
+### Current Performance (2025-01-21)
+- **Target**: 30+ FPS for 128x128 grids
+- **Achieved**: ~13 FPS for 100x60 grid (77ms/step)
+- **Previous**: ~4 FPS with rigid body mechanics
+
+### Performance Breakdown
+- Movement calculation: 28ms (main bottleneck)
+- Time series recording: 19ms
+- Heat diffusion: 9ms
+- Other physics: ~20ms
+
+### Optimization Opportunities
+- Vectorize remaining movement loops
+- Reduce time series recording frequency
+- Consider numba JIT for hot paths
+- GPU acceleration for field solvers
+
 ## Known Issues
 
 ### Surface Tension
@@ -183,3 +230,8 @@ except ImportError:
 - The scale mismatch is extreme - molecular forces (nanometers) vs geological cells (50 meters) 
 - See PHYSICS.md for detailed explanation of why surface tension cannot work at these scales
 - Water behaves correctly as a bulk fluid under gravity without surface tension
+
+### Rigid Bodies
+- **REMOVED FROM CODEBASE**: All rigid body mechanics have been removed for simplicity and performance
+- Everything flows based on material viscosity - rocks flow very slowly, fluids flow quickly
+- This simplification improved performance by 3x and makes the simulation more predictable

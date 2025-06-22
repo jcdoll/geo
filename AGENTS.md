@@ -6,7 +6,13 @@
 
 ## 1. Project overview
 
-`geo` is a 2‑D geology simulator. The high‑level description of features and usage lives in [README.md](README.md).  All physical laws and "golden rules" are defined in [PHYSICS.md](PHYSICS.md); consult that document before making physics changes.
+`geo` is a 2‑D geology simulator focused on **fast, fun planetary simulation**. The high‑level description of features and usage lives in [README.md](README.md). All physical laws and "golden rules" are defined in [PHYSICS.md](PHYSICS.md); consult that document before making physics changes.
+
+**Key Design Principles:**
+- Everything flows based on material viscosity (no rigid bodies)
+- Simple physics-based rules create emergent complexity
+- Performance target: 30+ FPS for 128x128 grids
+- All materials behave consistently - just with different flow rates
 
 ---
 
@@ -36,11 +42,15 @@ python main.py                    # start the simulator
 
 | File/Folder              | Description                                   |
 |--------------------------|-----------------------------------------------|
-| `simulation_engine.py`   | Main simulation engine                        |
-| `materials.py`           | Definitions of rock and fluid materials       |
-| `atmospheric_processes.py`, `fluid_dynamics.py` | Environmental processes |
+| `geo_game.py`            | Main simulation facade (inherits CoreState)   |
+| `core_state.py`          | Shared state and grid allocation              |
+| `fluid_dynamics.py`      | Simplified viscosity-based flow mechanics     |
+| `materials.py`           | Material properties including viscosity       |
+| `heat_transfer.py`       | Heat diffusion and thermal processes          |
+| `gravity_solver.py`      | Self-gravity field calculations               |
+| `pressure_solver.py`     | Pressure field solver                         |
 | `visualizer.py`          | Pygame-based renderer                         |
-| `tests/`                 | Regression tests                              |
+| `tests/`                 | Visual and unit tests                         |
 
 ---
 
