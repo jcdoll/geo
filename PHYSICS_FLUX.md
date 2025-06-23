@@ -61,21 +61,100 @@ With gravitational acceleration:
 g = -∇Φ
 ```
 
-#### 4. Pressure
-For hydrostatic equilibrium, pressure satisfies:
-```
-∇P = ρg
-```
+#### 4. Pressure and Incompressibility
 
-Taking the divergence:
+The naive approach to pressure would be:
+
 ```
+F = 0 = -∇P + ρg
+∇P = ρg
 ∇²P = ∇·(ρg) = ρ(∇·g) + g·(∇ρ)
 ```
 
-For self-gravity: ∇·g = -4πGρ, giving:
+But consider a fluid with uniform density and uniform gravity. If we solve `∇²P = 0` there is no guarantee that the pressure will vary linearly with depth to balance gravity, reaching hydrostatic equilibrium. Consider buoyancy. Adding a second material (water over rock) only introduces `g·∇ρ ≠ 0` at one grid-cell row, and otherwise the pressure in the fluid will be constant.
+
+We need a different approach.
+
+Instead, we use the marker-and-cell (MAC) staggered grid velocity projection method - the standard approach in incompressible CFD.
+
+Incompressible Navier-Stokes is:
 ```
-∇²P = -4πGρ² + g·(∇ρ)
+∂v/∂t  +  (v·∇)v  =  – (1/ρ) ∇P  +  g  +  ν ∇²v
+∇·v = 0
 ```
+
+which has components:
+
+- ∂v/∂t
+    - local acceleration
+    - how fast the velocity at one grid point changes with time
+- (v·∇) v
+    - convective acceleration
+    - velocity change due to fluid flow
+    - allows fast moving material to pull along slower moving fluid
+- (1/ρ) ∇P
+    - pressure gradient force
+    - pushes fluid from high pressure to low pressure
+    - provides buoyancy
+- g
+    - body force
+    - external acceleration applied everywhere (gravity, Coriois, etc)
+    - force that leads to pressure gradient which provides buoyancy
+- ν ∇²v
+    - viscous diffusion
+    - internal friction that smooths out velocity differences
+
+The operators and symbols are:
+
+* v = (vₓ, vᵧ) – velocity vector field in 2-D.
+* ∇ – gradient; `∇f = (∂f/∂x, ∂f/∂y)`.
+* (v·∇)v – dot product first, then gradient: `vₓ ∂v/∂x + vᵧ ∂v/∂y`.
+* ∇² – Laplacian; sum of second derivatives: `∂²v/∂x² + ∂²v/∂y²`.
+* ρ(x,y,t) – density (may vary between materials).
+* P(x,y,t) – pressure field.
+* g – gravity (may vary in magnitude and direction)
+* ν – kinematic viscosity (0 → inviscid, large → viscous).
+
+The core idea is:
+* Predict velocity with every force except pressure → provisional v★.
+* Measure how much ∇·v★ deviates from zero (it should be zero with incompressibility).
+* Solve a Poisson-type equation for a scalar φ; its gradient, divided by ρ, removes that deviation in one shot.
+
+In more detail - we perform a forward Euler step with all of the non-pressure forces to obtain:
+
+```
+v★ = vⁿ + Δt [ –(v·∇)v + g + ν∇²v ]                (predictor)
+```
+
+We now look for a scalar potential (φ) such that:
+
+```
+vⁿ⁺¹ = v★ – Δt · β ∇φ                              (corrector)
+β = 1/ρ
+```
+
+where β is computed at cell faces using harmonic averaging.
+
+To ensure that φ yields an incompressible fluid, we take the divergence and set it to zero (`∇vⁿ⁺¹ = 0`).
+
+```
+∇·(β ∇φ) = (1/Δt) ∇·v★                             (Poisson equation)
+```
+
+We solve for φ via standard Poisson equation methods (multigrid) and apply the correction to the stored pressure:
+
+```
+Pⁿ⁺¹ = Pⁿ + φ                                     (pressure update)
+```
+
+In summary, the projection loop is:
+1. Predictor: advance cell face velocities with all forces except pressure.
+2. Divergence: compute ∇·u* at cell centres.
+3. Poisson equation: solve ∇·(β ∇φ)=∇·u*/Δt (β=1/ρ) on cell faces using the harmonic mean.
+4. Corrector: subtract β ∇φ from each face velocity, making the new field divergence-free.
+5. Update pressure: P ← P + φ.
+
+MAC staggered grid means that we use the velocity components on the faces vs the pressure/density/temperature at the cell centers.
 
 #### 5. Heat Transfer
 Energy conservation with thermal diffusion:
@@ -189,25 +268,25 @@ def timestep(state, dt):
     # 1. Self-gravity (existing multigrid solver)
     gx, gy = solve_gravity_multigrid(state.density)
     
-    # 2. Pressure (existing multigrid solver)
-    pressure = solve_pressure_multigrid(state.density, gx, gy)
+    # 2. Update momentum with MAC projection
+    # This handles the predictor-corrector split internally:
+    # - Predictor: v* = v + dt*(advection + gravity + viscosity)
+    # - Corrector: Project v* to divergence-free
+    physics.update_momentum(gx, gy, dt)
     
-    # 3. Momentum update (pressure gradients + gravity)
-    update_momentum(state, pressure, gx, gy, dt)
-    
-    # 4. Advection (flux-based transport)
+    # 3. Advection (flux-based transport)
     advect_materials_flux(state, dt)
     
-    # 5. Thermal diffusion (flux-based)
+    # 4. Thermal diffusion (flux-based)
     diffuse_heat_flux(state, dt)
     
-    # 6. Solar heating
+    # 5. Solar heating
     apply_solar_heating(state, solar_angle)
     
-    # 7. Radiative cooling
+    # 6. Radiative cooling
     apply_radiative_cooling(state)
     
-    # 8. Phase transitions
+    # 7. Phase transitions
     apply_phase_changes(state)
 ```
 
@@ -273,45 +352,217 @@ def advect_materials_flux(state, dt):
     update_mixture_density(state)
 ```
 
-### Pressure Solver Integration
+### Pressure Projection Implementation
 
-The existing multigrid solver with red-black smoothing remains unchanged:
+
+We solve the Poisson equation using the same multigrid method used for gravity.
+
+Key Implementation Details
+1. Face-Centered Coefficients: β lives on faces, not cell centers
+2. Staggered Grid: Ideally use MAC grid (velocities on faces)
+3. Boundary Conditions: Neumann (∂φ/∂n = 0) for closed domains
+4. Null Space: For pure Neumann, remove mean from φ
+
+Common Pitfalls
+- Using cell-centered β instead of face-centered → spurious currents
+- Forgetting harmonic averaging → pressure oscillations at interfaces  
+- Wrong BC type → unphysical flows at boundaries
+- Tolerance too loose → residual divergence
+
+The projection method is essential because:
+- Automatically handles buoyancy at density interfaces
+- Maintains exact incompressibility (∇·v = 0)
+- No special cases for uniform/variable gravity
+- Standard, well-tested approach used in all modern CFD codes
+
+| Symptom                       | Cause                        | Fix                            |
+| ----------------------------- | ---------------------------- | ------------------------------ |
+| Checkerboard pressure         | velocities collocated with P | use MAC staggering             |
+| Slow drift in “static” test   | β stored at centres          | move β to faces, harmonic mean |
+| Pressure ringing at interface | arithmetic averaging of β    | use harmonic average           |
+| Solver doesn’t converge       | null space not removed       | subtract mean φ every cycle    |
+
+
+| ✔ Do this                                        | ✘ Don’t do this                  | Why                                 |
+| ------------------------------------------------ | -------------------------------- | ----------------------------------- |
+| β on faces, harmonic average                     | β at centres or arithmetic mean  | preserves hydrostatic balance       |
+| Pure Neumann BC ⇒ subtract mean φ each V-cycle   | leave φ undefined                | avoids singular matrix              |
+| Tight Poisson tolerance (≤10⁻⁷)                  | loose tolerance                  | residual divergence ⇒ creeping flow |
+| Keep predictor and corrector on the same stagger | mix collocated & staggered forms | eliminates force imbalance          |
+
+The MAC-grid projection method is implemented as follows:
+
+Here is pseudo-code for the method:
+
 
 ```python
-def solve_pressure_multigrid(density, gx, gy):
-    """Existing multigrid Poisson solver"""
-    
-    # Build RHS: ∇²P = -4πGρ² + g·∇ρ
-    rhs = build_pressure_rhs(density, gx, gy)
-    
-    # V-cycle with red-black smoothing
-    pressure = multigrid_vcycle(rhs, n_levels=4)
-    
-    # Boundary conditions
-    pressure[density < vacuum_threshold] = 0
-    
-    return pressure
+class FluxPhysics:
+    def update_momentum(self, gx, gy, dt):
+        """MAC-grid projection method for incompressible flow"""
+        
+        # Update face coefficients (β = 1/ρ with harmonic averaging)
+        state.update_face_coefficients()
+        state.update_face_velocities_from_cell()
+        
+        # A. Predictor: v* = v + dt*(advection + gravity + viscosity)
+        # Convective acceleration
+        ax_conv, ay_conv = self._compute_convective_acceleration()
+        state.velocity_x += dt * (ax_conv + gx)
+        state.velocity_y += dt * (ay_conv + gy)
+        
+        # Viscous damping (scaled by dx²)
+        self.apply_viscous_damping(dt)
+        
+        # Update face velocities for projection
+        state.update_face_velocities_from_cell()
+        
+        # B. Projection: solve ∇·(β∇φ) = ∇·v*/Δt
+        solver = PressureSolver(state)
+        phi = solver.project_velocity(dt, bc_type="neumann")
+        # Face velocities corrected inside project_velocity()
+
+class PressureSolver:
+    def project_velocity(self, dt, bc_type="neumann"):
+        """Project velocity to divergence-free field"""
+        
+        # Compute divergence of face velocities
+        div = self._compute_divergence()  # ∇·v*
+        rhs = div / dt
+        
+        # Solve variable-coefficient Poisson equation
+        phi = solve_pressure_variable_coeff(
+            rhs, 
+            state.beta_x,  # Face-centered 1/ρ (x-faces)
+            state.beta_y,  # Face-centered 1/ρ (y-faces)
+            state.dx,
+            tol=1e-6,
+            bc_type=bc_type
+        )
+        
+        # Update face velocities: v = v* - dt*β*∇φ
+        self._update_face_velocities(phi, dt)
+        
+        # Update cell-centered velocities
+        state.update_cell_velocities_from_face()
+        
+        return phi
 ```
 
-### Momentum Update
+Key Implementation Details
 
-Forces are applied consistently:
+1. Face-Centered β: Computed using harmonic averaging at material interfaces
+   ```python
+   beta_x[j, i] = 2.0 / (rho[j, i-1] + rho[j, i])  # At vertical faces
+   beta_y[j, i] = 2.0 / (rho[j-1, i] + rho[j, i])  # At horizontal faces
+   ```
+
+2. Staggered Grid Storage:
+   - Cell centers: pressure, density, temperature
+   - Vertical faces: x-velocity, beta_x (shape ny, nx+1)
+   - Horizontal faces: y-velocity, beta_y (shape ny+1, nx)
+
+3. Boundary Conditions:
+    - Neumann (∂φ/∂n = 0) for closed domains
+    - Dirichlet (φ = 0) for open domains.
+
+4. CFL Timestep: Includes gravity wave speed
+   ```python
+   c_grav = sqrt(g * H)  # H = domain height
+   dt <= 0.5 * dx / max(|v|, c_grav)
+   ```
+
+
+Theory and notation were covered earlier; below is only the practical implementation and pitfall.
+
+Solver flow:
+1. Predictor – advance face velocities with all forces except pressure
+2. Build RHS – compute `(∇·v★)/Δt` at cell centres
+3. Poisson – solve `∇·(β ∇φ) = RHS` (β = 1/ρ on faces) with the same multigrid used for gravity
+4. Corrector – subtract `Δt β ∇φ` from u, v on faces
+5. Pressure update – `P ← P + φ`
+6. Move scalars – advect density, temperature, volume fractions, etc.
+
+Minimum data layout (MAC stagger)
+
+| Location on grid          | Stored      |
+| ------------------------- | ----------- |
+| Cell centre `(i,j)`       | P, ρ, T, φᵢ |
+| Vertical face `(i+½,j)`   | u, βₓ (1/ρ) |
+| Horizontal face `(i,j+½)` | v, βᵧ (1/ρ) |
+
+Harmonic averaging for β on faces
 
 ```python
-def update_momentum(state, pressure, gx, gy, dt):
-    """Update velocities from forces"""
-    
-    # Pressure gradient (using same stencil as Poisson solver!)
-    dpdx = gradient_x(pressure)
-    dpdy = gradient_y(pressure)
-    
-    # Update velocities
-    state.vx += dt * (-dpdx/state.density + gx)
-    state.vy += dt * (-dpdy/state.density + gy)
-    
-    # Apply viscosity for stability
-    apply_viscous_damping(state, dt)
+beta_x[i,j] = 2.0 / (rho[i,j] + rho[i-1,j])
+beta_y[i,j] = 2.0 / (rho[i,j] + rho[i,j-1])
 ```
+
+Pseudo-code:
+
+```python
+def advance_one_step(state, dt):
+    # ----- 1. predictor ------------------------------------------------------
+    # explicit advection + body forces on faces
+    ax, ay = convective_accel(state)          # (v·∇)v
+    state.u_face += dt * (ax + state.gx)
+    state.v_face += dt * (ay + state.gy)
+    apply_viscous_diffusion(state, dt)
+
+    # ----- 2. RHS for Poisson ------------------------------------------------
+    div_star = divergence_faces_to_cells(state.u_face, state.v_face, state.dx)
+    rhs      = div_star / dt                 # (∇·v★)/Δt
+
+    # ----- 3. Poisson solve --------------------------------------------------
+    phi = multigrid_poisson(
+            rhs,
+            beta_x = state.beta_x,           # face-centred 1/ρ
+            beta_y = state.beta_y,
+            dx     = state.dx,
+            bc     = "neumann",              # closed domain default
+            tol    = 1e-7)
+
+    # ----- 4. projection -----------------------------------------------------
+    gx_phi, gy_phi = gradient_cells_to_faces(phi, state.dx)
+    state.u_face -= dt * state.beta_x * gx_phi
+    state.v_face -= dt * state.beta_y * gy_phi
+
+    # ----- 5. update pressure & cell velocities ------------------------------
+    state.P_cell += phi
+    cell_average_velocities(state)           # for output or scalar advection
+```
+
+Boundary-conditions:
+
+| Domain edge   | φ BC                | When to use                  |
+| ------------- | ------------------- | ---------------------------- |
+| Solid wall    | Neumann `∂φ/∂n = 0` | Closed planet crust          |
+| Open to space | Dirichlet `φ = 0`   | Top of atmosphere            |
+
+Null-space note: if all faces are Neumann, subtract the mean of φ each V-cycle or the Poisson matrix is singular.
+
+Timestep rule of thumb:
+
+```
+Δt ≤ 0.5 · dx / max( |v| , √(g·dx) )      # includes gravity-wave speed
+```
+
+Bigger grids or stiffer gravity ⇒ smaller Δt.
+
+Potential pitfalls:
+
+| Symptom                          | Root cause                           | Fix                         |
+| -------------------------------- | ------------------------------------ | --------------------------- |
+| Checkerboard pattern in pressure | u,v collocated with P                | switch to MAC staggering    |
+| Very slow drift in static column | β stored at centres                  | put harmonic β on faces     |
+| Ringing at rock/water interface  | arithmetic averaging of β            | harmonic averaging          |
+| Poisson stalls or explodes       | null space not removed (Neumann all) | subtract mean φ every cycle |
+| Residual divergence after step   | solver tolerance too loose           | tighten tol to ≤ 1 × 10⁻⁷   |
+
+Summary:
+* Face-centred β guarantees hydrostatic equilibrium cell-by-cell.
+* MAC staggering removes the pressure-velocity decoupling (“checkerboards”).
+* One multigrid solve per step keeps cost O(N) and fully re-uses the gravity code.
+* Projection enforces `∇·v = 0` to machine precision, so buoyancy emerges entirely from density differences—no hand-coded hacks.
 
 ### Solar Heating Implementation
 
@@ -668,7 +919,10 @@ def remove_material(state, x, y, radius):
 | M | Cycle display mode |
 | S | Save screenshot |
 | H | Show help |
+| L | Enable logging |
+| R | Reset to initial simulation state |
 | ESC | Exit |
+| TAB | Toggle through display modes |
 
 | Mouse | Action |
 |-------|--------|
