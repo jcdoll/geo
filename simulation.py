@@ -15,7 +15,7 @@ from materials import MaterialDatabase, MaterialType
 from scenarios import setup_scenario
 from gravity_solver import GravitySolver
 from pressure_solver import PressureSolver
-from heat_transfer_simple import HeatTransfer
+from heat_transfer import HeatTransfer
 from transport import FluxTransport
 
 

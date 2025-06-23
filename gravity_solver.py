@@ -12,7 +12,7 @@ Uses multigrid V-cycle method for efficiency.
 import numpy as np
 from typing import Tuple
 from state import FluxState
-from multigrid_mac_vectorized import solve_mac_poisson_vectorized, BoundaryCondition
+from multigrid import solve_mac_poisson_vectorized, BoundaryCondition
 
 
 class GravitySolver:

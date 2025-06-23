@@ -18,8 +18,8 @@ from typing import Tuple, Optional
 from state import FluxState
 from materials import MaterialType
 
-# Import fully vectorized MAC multigrid solver
-from multigrid_mac_vectorized import solve_mac_poisson_vectorized as solve_mac_poisson, BoundaryCondition
+# Import MAC multigrid solver
+from multigrid import solve_mac_poisson_vectorized as solve_mac_poisson, BoundaryCondition
 
 
 class PressureSolver:
