@@ -259,11 +259,13 @@ class BuoyancyScenario(FluxTestScenario):
         distance_risen = (initial_y - ice_y) * sim.state.dx
         
         # Check if ice is at surface
-        water_surface_y = np.min(np.where(
-            np.any(sim.state.vol_frac[MaterialType.WATER] > 0.1, axis=1)
-        )[0])
-        
-        at_surface = ice_y < water_surface_y + 5
+        water_rows = np.where(np.any(sim.state.vol_frac[MaterialType.WATER] > 0.1, axis=1))[0]
+        if len(water_rows) > 0:
+            water_surface_y = np.min(water_rows)
+            at_surface = ice_y < water_surface_y + 5
+        else:
+            water_surface_y = sim.state.ny
+            at_surface = False
         
         # Success: ice has risen at least 5m or reached surface
         success = distance_risen > 5.0 or at_surface
@@ -284,4 +286,93 @@ class BuoyancyScenario(FluxTestScenario):
         return {
             'preferred_display_mode': 'material_dominant',
             'highlight_materials': [MaterialType.ICE, MaterialType.WATER],
+        }
+
+
+class RockSinkingScenario(FluxTestScenario):
+    """Test that denser materials sink in water."""
+    
+    def get_name(self) -> str:
+        return "rock_sinking"
+        
+    def get_description(self) -> str:
+        return "Rock should sink in water due to higher density"
+        
+    def setup(self, sim: FluxSimulation) -> None:
+        """Create rock block above water."""
+        nx, ny = sim.state.nx, sim.state.ny
+        
+        # Clear the grid
+        sim.state.vol_frac.fill(0.0)
+        sim.state.vol_frac[MaterialType.AIR] = 1.0
+        
+        # Fill bottom 2/3 with water
+        water_level = 2 * ny // 3
+        sim.state.vol_frac[MaterialType.AIR, water_level:, :] = 0.0
+        sim.state.vol_frac[MaterialType.WATER, water_level:, :] = 1.0
+        
+        # Place rock block above water
+        rock_cx = nx // 2
+        rock_cy = water_level - 10  # Start above water
+        rock_radius = 6
+        
+        y_grid, x_grid = np.ogrid[:ny, :nx]
+        dist = np.sqrt((x_grid - rock_cx)**2 + (y_grid - rock_cy)**2)
+        rock_mask = dist < rock_radius
+        
+        # Replace air with rock
+        sim.state.vol_frac[MaterialType.AIR][rock_mask] = 0.0
+        sim.state.vol_frac[MaterialType.ROCK][rock_mask] = 1.0
+        
+        # Set temperature
+        sim.state.temperature.fill(293.0)  # Room temperature
+        
+        # Update properties
+        sim.state.normalize_volume_fractions()
+        sim.state.update_mixture_properties(sim.material_db)
+        
+    def evaluate(self, sim: FluxSimulation) -> Dict[str, Any]:
+        """Check if rock has sunk."""
+        # Get rock center of mass
+        rock_phi = sim.state.vol_frac[MaterialType.ROCK]
+        total_rock = np.sum(rock_phi)
+        
+        if total_rock < 0.1:
+            return {
+                'success': False,
+                'metrics': {},
+                'message': "Rock disappeared!"
+            }
+            
+        y_grid, _ = np.mgrid[:sim.state.ny, :sim.state.nx]
+        rock_y = np.sum(rock_phi * y_grid) / total_rock
+        
+        # Check if rock has sunk
+        water_level = 2 * sim.state.ny // 3
+        initial_y = water_level - 10
+        distance_sunk = (rock_y - initial_y) * sim.state.dx
+        
+        # Check if rock is in water
+        water_at_rock = np.mean(sim.state.vol_frac[MaterialType.WATER][rock_phi > 0.5])
+        in_water = water_at_rock > 0.5
+        
+        # Success: rock has sunk at least 10m and is in water
+        success = distance_sunk > 10.0 and in_water
+        
+        return {
+            'success': success,
+            'metrics': {
+                'distance_sunk': distance_sunk,
+                'rock_y': rock_y,
+                'in_water': in_water,
+                'water_at_rock': water_at_rock,
+                'time': sim.state.time,
+            },
+            'message': f"Rock sunk {distance_sunk:.1f}m, in_water={in_water}"
+        }
+        
+    def get_visualization_hints(self) -> Dict[str, Any]:
+        return {
+            'preferred_display_mode': 'material_dominant',
+            'highlight_materials': [MaterialType.ROCK, MaterialType.WATER],
         }

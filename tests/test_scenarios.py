@@ -6,6 +6,10 @@ This allows running scenarios as part of the test suite without visualization.
 import pytest
 from typing import Dict, Any
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from simulation import FluxSimulation
 from tests.scenarios import ALL_SCENARIOS
 
@@ -16,7 +20,7 @@ class TestScenarios:
     @pytest.fixture
     def simulation(self):
         """Create a test simulation."""
-        return FluxSimulation(nx=50, ny=50, dx=50.0)
+        return FluxSimulation(nx=50, ny=50, dx=50.0, scenario=False)  # Don't auto-setup
     
     def run_scenario(self, simulation: FluxSimulation, scenario_class, params: Dict[str, Any], 
                     max_steps: int = 100, success_threshold: float = 0.8):
@@ -31,7 +35,9 @@ class TestScenarios:
         # Run simulation
         success_count = 0
         for step in range(max_steps):
-            simulation.timestep(simulation.dt)
+            # Compute timestep
+            dt = simulation.physics.apply_cfl_limit()
+            simulation.timestep(dt)
             
             # Evaluate every 10 steps
             if step % 10 == 0:
@@ -110,11 +116,7 @@ class TestScenarios:
         self.run_scenario(simulation, scenario_class, params, max_steps=200)
 
 
-# Dynamic test generation (alternative approach)
-def pytest_generate_tests(metafunc):
-    """Generate test cases dynamically for all scenarios."""
-    if "scenario_key" in metafunc.fixturenames:
-        metafunc.parametrize("scenario_key", list(ALL_SCENARIOS.keys()))
+# Note: Using @pytest.mark.parametrize instead of pytest_generate_tests
 
 
 class TestAllScenarios:
@@ -137,7 +139,9 @@ class TestAllScenarios:
         # Run briefly
         max_steps = 50 if 'melting' not in scenario_key else 100
         for _ in range(max_steps):
-            sim.timestep(sim.dt)
+            # Compute timestep
+            dt = sim.physics.apply_cfl_limit()
+            sim.timestep(dt)
             
         # Final evaluation
         result = scenario.evaluate(sim)

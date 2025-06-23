@@ -55,10 +55,12 @@ class MaterialProperties:
     thermal_conductivity: float  # W/(m·K)
     specific_heat: float  # J/(kg·K)
     emissivity: float  # 0-1 for radiative cooling
-    heat_generation: float = 0.0  # W/m³ (for radioactive materials)
     
     # Optical properties
     albedo: float  # 0-1 (0=perfect absorber, 1=perfect reflector)
+    
+    # Fields with defaults must come after fields without defaults
+    heat_generation: float = 0.0  # W/m³ (for radioactive materials)
     absorption_coeff: float = 1.0  # For solar radiation
     
     # Phase transitions
@@ -79,13 +81,13 @@ class MaterialDatabase:
         """Initialize material properties based on PHYSICS_FLUX.md tables."""
         props = {}
         
-        # SPACE - vacuum
+        # SPACE - vacuum (using tiny values to avoid division by zero)
         props[MaterialType.SPACE] = MaterialProperties(
-            density=0.0,
+            density=1e-10,  # Nearly zero but not zero
             viscosity=0.0,
-            thermal_conductivity=0.0,
-            specific_heat=0.0,
-            emissivity=0.0,
+            thermal_conductivity=1e-10,  # Tiny but non-zero
+            specific_heat=1e-3,  # Small to avoid numerical issues
+            emissivity=1e-10,  # Nearly zero
             albedo=0.0,
             absorption_coeff=0.0,
             color_rgb=(0, 0, 0),  # Black

@@ -1,8 +1,8 @@
 """
-Flux-based transport calculations.
+Flux-based transport calculations for geological simulation.
 
-This module handles all flux computations for mass, momentum, and energy transport
-using a finite volume approach with upwind schemes for stability.
+This module handles material advection using a finite-volume approach
+with vectorized operations for performance.
 """
 
 import numpy as np
@@ -12,7 +12,7 @@ from materials import MaterialType
 
 
 class FluxTransport:
-    """Handles flux-based transport calculations."""
+    """Handles material transport using finite-volume flux calculations."""
     
     def __init__(self, state: FluxState):
         """
@@ -23,66 +23,31 @@ class FluxTransport:
         """
         self.state = state
         
-    def compute_mass_flux(self, dt: float) -> Tuple[np.ndarray, np.ndarray]:
+        # Pre-allocate work arrays for face velocities
+        self.vx_face = np.zeros((state.ny, state.nx+1), dtype=np.float32)
+        self.vy_face = np.zeros((state.ny+1, state.nx), dtype=np.float32)
+        
+        # Pre-allocate flux arrays
+        self.flux_x = np.zeros((state.ny, state.nx+1), dtype=np.float32)
+        self.flux_y = np.zeros((state.ny+1, state.nx), dtype=np.float32)
+        
+    def compute_face_velocities(self):
+        """Pre-compute face-centered velocities (only once per timestep)."""
+        # X-faces: average of adjacent cells
+        self.vx_face[:, 1:-1] = 0.5 * (self.state.velocity_x[:, :-1] + self.state.velocity_x[:, 1:])
+        # Boundary conditions
+        self.vx_face[:, 0] = self.state.velocity_x[:, 0]
+        self.vx_face[:, -1] = self.state.velocity_x[:, -1]
+        
+        # Y-faces: average of adjacent cells  
+        self.vy_face[1:-1, :] = 0.5 * (self.state.velocity_y[:-1, :] + self.state.velocity_y[1:, :])
+        # Boundary conditions
+        self.vy_face[0, :] = self.state.velocity_y[0, :]
+        self.vy_face[-1, :] = self.state.velocity_y[-1, :]
+        
+    def compute_material_flux_vectorized(self, mat: int, dt: float) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Compute mass flux through cell faces using upwind scheme.
-        
-        Args:
-            dt: Time step
-            
-        Returns:
-            (flux_x, flux_y): Mass fluxes at cell faces
-        """
-        nx, ny = self.state.nx, self.state.ny
-        dx = self.state.dx
-        
-        # X-direction flux at face (i+1/2, j)
-        flux_x = np.zeros((ny, nx+1), dtype=np.float32)
-        
-        # Face velocities (average of adjacent cells)
-        vx_face = np.zeros((ny, nx+1), dtype=np.float32)
-        vx_face[:, 1:-1] = 0.5 * (self.state.velocity_x[:, :-1] + self.state.velocity_x[:, 1:])
-        
-        # Upwind scheme
-        for i in range(1, nx):
-            # Positive velocity: flow from left cell
-            mask_pos = vx_face[:, i] > 0
-            flux_x[mask_pos, i] = (
-                self.state.density[mask_pos, i-1] * vx_face[mask_pos, i] * dt / dx
-            )
-            
-            # Negative velocity: flow from right cell
-            mask_neg = vx_face[:, i] <= 0
-            flux_x[mask_neg, i] = (
-                self.state.density[mask_neg, i] * vx_face[mask_neg, i] * dt / dx
-            )
-        
-        # Y-direction flux at face (i, j+1/2)
-        flux_y = np.zeros((ny+1, nx), dtype=np.float32)
-        
-        # Face velocities
-        vy_face = np.zeros((ny+1, nx), dtype=np.float32)
-        vy_face[1:-1, :] = 0.5 * (self.state.velocity_y[:-1, :] + self.state.velocity_y[1:, :])
-        
-        # Upwind scheme
-        for j in range(1, ny):
-            # Positive velocity: flow from bottom cell
-            mask_pos = vy_face[j, :] > 0
-            flux_y[j, mask_pos] = (
-                self.state.density[j-1, mask_pos] * vy_face[j, mask_pos] * dt / dx
-            )
-            
-            # Negative velocity: flow from top cell
-            mask_neg = vy_face[j, :] <= 0
-            flux_y[j, mask_neg] = (
-                self.state.density[j, mask_neg] * vy_face[j, mask_neg] * dt / dx
-            )
-            
-        return flux_x, flux_y
-        
-    def compute_material_flux(self, mat: int, dt: float) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Compute flux for a specific material.
+        Compute flux for a specific material using fully vectorized operations.
         
         Args:
             mat: Material type index
@@ -91,142 +56,152 @@ class FluxTransport:
         Returns:
             (flux_x, flux_y): Material volume fraction fluxes
         """
-        nx, ny = self.state.nx, self.state.ny
         dx = self.state.dx
         phi = self.state.vol_frac[mat]
         
-        # X-direction flux
-        flux_x = np.zeros((ny, nx+1), dtype=np.float32)
-        vx_face = np.zeros((ny, nx+1), dtype=np.float32)
-        vx_face[:, 1:-1] = 0.5 * (self.state.velocity_x[:, :-1] + self.state.velocity_x[:, 1:])
+        # X-direction flux (vectorized)
+        # Upwind scheme: use left cell if v>0, right cell if v<0
+        self.flux_x.fill(0.0)
         
-        for i in range(1, nx):
-            mask_pos = vx_face[:, i] > 0
-            flux_x[mask_pos, i] = phi[mask_pos, i-1] * vx_face[mask_pos, i] * dt / dx
-            
-            mask_neg = vx_face[:, i] <= 0
-            flux_x[mask_neg, i] = phi[mask_neg, i] * vx_face[mask_neg, i] * dt / dx
+        # Interior faces only (boundaries have zero flux)
+        self.flux_x[:, 1:-1] = np.where(
+            self.vx_face[:, 1:-1] > 0,
+            phi[:, :-1] * self.vx_face[:, 1:-1],  # Use left cell
+            phi[:, 1:] * self.vx_face[:, 1:-1]    # Use right cell
+        ) * dt / dx
         
-        # Y-direction flux
-        flux_y = np.zeros((ny+1, nx), dtype=np.float32)
-        vy_face = np.zeros((ny+1, nx), dtype=np.float32)
-        vy_face[1:-1, :] = 0.5 * (self.state.velocity_y[:-1, :] + self.state.velocity_y[1:, :])
+        # Y-direction flux (vectorized)
+        self.flux_y.fill(0.0)
         
-        for j in range(1, ny):
-            mask_pos = vy_face[j, :] > 0
-            flux_y[j, mask_pos] = phi[j-1, mask_pos] * vy_face[j, mask_pos] * dt / dx
-            
-            mask_neg = vy_face[j, :] <= 0
-            flux_y[j, mask_neg] = phi[j, mask_neg] * vy_face[j, mask_neg] * dt / dx
-            
-        return flux_x, flux_y
+        # Interior faces only
+        self.flux_y[1:-1, :] = np.where(
+            self.vy_face[1:-1, :] > 0,
+            phi[:-1, :] * self.vy_face[1:-1, :],  # Use bottom cell
+            phi[1:, :] * self.vy_face[1:-1, :]    # Use top cell
+        ) * dt / dx
         
-    def compute_heat_flux(self, dt: float) -> Tuple[np.ndarray, np.ndarray]:
+        return self.flux_x.copy(), self.flux_y.copy()
+        
+    def advect_materials_vectorized(self, dt: float):
         """
-        Compute heat flux through diffusion and advection.
+        Transport all materials using vectorized operations.
+        
+        This is the main optimization - compute face velocities once,
+        then use vectorized operations for all materials.
         
         Args:
             dt: Time step
-            
-        Returns:
-            (flux_x, flux_y): Heat fluxes at cell faces
         """
-        nx, ny = self.state.nx, self.state.ny
+        # Compute face velocities once for all materials
+        self.compute_face_velocities()
+        
+        # Process all materials at once using vectorized operations
         dx = self.state.dx
-        T = self.state.temperature
-        k = self.state.thermal_conductivity
         
-        # Diffusive flux: -k * dT/dx
-        flux_x = np.zeros((ny, nx+1), dtype=np.float32)
-        flux_y = np.zeros((ny+1, nx), dtype=np.float32)
-        
-        # X-direction diffusion
-        for i in range(1, nx):
-            # Harmonic mean of conductivity at face
-            k_face = 2.0 * k[:, i-1] * k[:, i] / (k[:, i-1] + k[:, i] + 1e-10)
-            flux_x[:, i] = -k_face * (T[:, i] - T[:, i-1]) / dx * dt
-            
-        # Y-direction diffusion
-        for j in range(1, ny):
-            # Harmonic mean of conductivity at face
-            k_face = 2.0 * k[j-1, :] * k[j, :] / (k[j-1, :] + k[j, :] + 1e-10)
-            flux_y[j, :] = -k_face * (T[j, :] - T[j-1, :]) / dx * dt
-            
-        # Add advective heat flux (could be added here)
-        # For now, focusing on diffusion
-        
-        return flux_x, flux_y
-        
-    def apply_flux_divergence(self, flux_x: np.ndarray, flux_y: np.ndarray, 
-                            quantity: np.ndarray) -> np.ndarray:
-        """
-        Apply flux divergence to update a quantity.
-        
-        Args:
-            flux_x: X-direction fluxes at faces
-            flux_y: Y-direction fluxes at faces
-            quantity: The quantity to update
-            
-        Returns:
-            Updated quantity
-        """
-        # Compute flux divergence
-        div_flux = np.zeros_like(quantity)
-        
-        # X-direction: flux_out - flux_in
-        div_flux += flux_x[:, 1:] - flux_x[:, :-1]
-        
-        # Y-direction: flux_out - flux_in
-        div_flux += flux_y[1:, :] - flux_y[:-1, :]
-        
-        # Update quantity
-        return quantity - div_flux
-        
-    def advect_materials(self, dt: float):
-        """
-        Transport all materials using flux form.
-        
-        Args:
-            dt: Time step
-        """
-        # Skip space material (index 0)
+        # For each material (skip space at index 0)
         for mat in range(1, self.state.n_materials):
-            # Compute fluxes for this material
-            flux_x, flux_y = self.compute_material_flux(mat, dt)
+            phi = self.state.vol_frac[mat]
             
-            # Store in state for visualization/debugging
-            if mat == MaterialType.WATER:  # Track water flux for visualization
-                self.state.mass_flux_x = flux_x
-                self.state.mass_flux_y = flux_y
+            # X-direction flux
+            self.flux_x.fill(0.0)
+            # Interior faces only (skip boundaries)
+            self.flux_x[:, 1:-1] = np.where(
+                self.vx_face[:, 1:-1] > 0,
+                phi[:, :-1] * self.vx_face[:, 1:-1],
+                phi[:, 1:] * self.vx_face[:, 1:-1]
+            ) * dt / dx
             
-            # Apply flux divergence
-            self.state.vol_frac[mat] = self.apply_flux_divergence(
-                flux_x, flux_y, self.state.vol_frac[mat]
+            # Y-direction flux
+            self.flux_y.fill(0.0)
+            # Interior faces only (skip boundaries)
+            self.flux_y[1:-1, :] = np.where(
+                self.vy_face[1:-1, :] > 0,
+                phi[:-1, :] * self.vy_face[1:-1, :],
+                phi[1:, :] * self.vy_face[1:-1, :]
+            ) * dt / dx
+            
+            # Apply flux divergence directly
+            self.state.vol_frac[mat, :, :] -= (
+                self.flux_x[:, 1:] - self.flux_x[:, :-1] +
+                self.flux_y[1:, :] - self.flux_y[:-1, :]
             )
             
+            # Store water flux for visualization
+            if mat == MaterialType.WATER.value:
+                self.state.mass_flux_x[:] = self.flux_x
+                self.state.mass_flux_y[:] = self.flux_y
+                
         # Ensure constraints
         self.state.normalize_volume_fractions()
         
-    def diffuse_heat(self, dt: float):
+    def advect_all_materials_single_pass(self, dt: float):
         """
-        Apply thermal diffusion.
+        Ultra-optimized: Process all materials in a single pass.
+        
+        This computes fluxes for all materials simultaneously using
+        broadcasting and advanced indexing.
         
         Args:
             dt: Time step
         """
-        # Compute heat fluxes
-        flux_x, flux_y = self.compute_heat_flux(dt)
+        # Compute face velocities once
+        self.compute_face_velocities()
         
-        # Store for visualization
-        self.state.heat_flux_x = flux_x
-        self.state.heat_flux_y = flux_y
+        nx, ny = self.state.nx, self.state.ny
+        dx = self.state.dx
+        dt_dx = dt / dx
         
-        # Apply to temperature field
-        # Need to account for heat capacity
-        heat_div = np.zeros_like(self.state.temperature)
-        heat_div += flux_x[:, 1:] - flux_x[:, :-1]
-        heat_div += flux_y[1:, :] - flux_y[:-1, :]
+        # Get all material volume fractions (excluding space)
+        all_phi = self.state.vol_frac[1:, :, :]  # Shape: (n_mat-1, ny, nx)
         
-        # dT/dt = -div(heat_flux) / (rho * cp)
-        denom = self.state.density * self.state.specific_heat + 1e-10
-        self.state.temperature -= heat_div / denom
+        # X-direction: Compute all fluxes at once
+        # Shape: (n_mat-1, ny, nx+1)
+        flux_x_all = np.zeros((self.state.n_materials-1, ny, nx+1), dtype=np.float32)
+        
+        # Vectorized upwind for all materials
+        vx_positive = self.vx_face[:, 1:] > 0  # Shape: (ny, nx)
+        
+        for i, mat in enumerate(range(1, self.state.n_materials)):
+            flux_x_all[i, :, 1:-1] = np.where(
+                vx_positive[:, :-1],
+                all_phi[i, :, :-1] * self.vx_face[:, 1:-1],
+                all_phi[i, :, 1:] * self.vx_face[:, 1:-1]
+            ) * dt_dx
+            
+        # Y-direction: Compute all fluxes at once
+        flux_y_all = np.zeros((self.state.n_materials-1, ny+1, nx), dtype=np.float32)
+        
+        vy_positive = self.vy_face[1:, :] > 0  # Shape: (ny, nx)
+        
+        for i, mat in enumerate(range(1, self.state.n_materials)):
+            flux_y_all[i, 1:-1, :] = np.where(
+                vy_positive[:-1, :],
+                all_phi[i, :-1, :] * self.vy_face[1:-1, :],
+                all_phi[i, 1:, :] * self.vy_face[1:-1, :]
+            ) * dt_dx
+            
+        # Apply all flux divergences at once
+        for i, mat in enumerate(range(1, self.state.n_materials)):
+            self.state.vol_frac[mat, :, :] -= (
+                flux_x_all[i, :, 1:] - flux_x_all[i, :, :-1] +
+                flux_y_all[i, 1:, :] - flux_y_all[i, :-1, :]
+            )
+            
+            # Store water flux for visualization
+            if mat == MaterialType.WATER.value:
+                self.state.mass_flux_x[:] = flux_x_all[i]
+                self.state.mass_flux_y[:] = flux_y_all[i]
+                
+        # Ensure constraints
+        self.state.normalize_volume_fractions()
+    def diffuse_heat(self, dt: float):
+        """
+        Apply thermal diffusion (delegated to base class for now).
+        
+        Args:
+            dt: Time step
+        """
+        # For now, just use the base implementation
+        # Could be optimized later if needed
+        base_transport = FluxTransport(self.state)
+        base_transport.diffuse_heat(dt)

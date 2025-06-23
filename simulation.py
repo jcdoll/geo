@@ -10,9 +10,13 @@ from typing import Optional, Dict, Any
 import time
 
 from state import FluxState
-from transport import FluxTransport
 from physics import FluxPhysics
 from materials import MaterialDatabase, MaterialType
+from scenarios import setup_scenario
+from gravity_solver import GravitySolver
+from pressure_solver import PressureSolver
+from heat_transfer_simple import HeatTransfer
+from transport import FluxTransport
 
 
 class FluxSimulation:
@@ -23,7 +27,7 @@ class FluxSimulation:
         nx: int,
         ny: int,
         dx: float = 50.0,
-        setup_planet: bool = True,
+        scenario: Optional[str] = None,
     ):
         """
         Initialize flux-based simulation.
@@ -32,16 +36,23 @@ class FluxSimulation:
             nx: Grid cells in x direction
             ny: Grid cells in y direction
             dx: Cell size in meters
-            setup_planet: Whether to create initial planet setup
+            scenario: Name of scenario to load (or None for default)
         """
         # Core components
         self.state = FluxState(nx, ny, dx)
+        
+        # Transport module
         self.transport = FluxTransport(self.state)
+            
+        # Physics modules
+        self.gravity_solver = GravitySolver(self.state)
+        self.pressure_solver = PressureSolver(self.state)
+        self.heat_transfer = HeatTransfer(self.state)
         self.physics = FluxPhysics(self.state)
         self.material_db = MaterialDatabase()
         
         # Simulation parameters
-        self.paused = False
+        self.paused = True  # Start paused so user can see initial state
         self.step_count = 0
         self.solar_angle = 0.0
         self.solar_rotation_rate = 2 * np.pi / (24 * 3600)  # rad/s (24 hour day)
@@ -55,50 +66,24 @@ class FluxSimulation:
         self.solar_constant = 1361.0  # W/m²
         self.t_space = 2.7  # K (cosmic background)
         
-        # Initialize planet if requested
-        if setup_planet:
-            self.setup_initial_planet()
+        # Store scenario for reset
+        self.scenario = scenario
+        
+        # Initialize scenario
+        if scenario is not False:  # Allow False to skip setup
+            setup_scenario(scenario, self.state, self.material_db)
             
-    def setup_initial_planet(self):
-        """Create a simple initial planet configuration."""
-        nx, ny = self.state.nx, self.state.ny
         
-        # Create circular planet
-        cx, cy = nx // 2, ny // 2
-        radius = min(nx, ny) // 3
-        
-        y_grid, x_grid = np.ogrid[:ny, :nx]
-        dist_from_center = np.sqrt((x_grid - cx)**2 + (y_grid - cy)**2)
-        
-        # Rock core
-        rock_mask = dist_from_center < radius
-        self.state.vol_frac[MaterialType.SPACE][rock_mask] = 0.0
-        self.state.vol_frac[MaterialType.ROCK][rock_mask] = 1.0
-        
-        # Thin atmosphere
-        atmos_mask = (dist_from_center >= radius) & (dist_from_center < radius + 10)
-        self.state.vol_frac[MaterialType.SPACE][atmos_mask] = 0.0
-        self.state.vol_frac[MaterialType.AIR][atmos_mask] = 1.0
-        
-        # Add some water on surface
-        water_mask = (dist_from_center >= radius - 5) & (dist_from_center < radius) & (y_grid < cy)
-        self.state.vol_frac[MaterialType.ROCK][water_mask] = 0.5
-        self.state.vol_frac[MaterialType.WATER][water_mask] = 0.5
-        
-        # Set initial temperature
-        self.state.temperature.fill(288.0)  # 15°C
-        
-        # Add some heat in core
-        core_mask = dist_from_center < radius // 2
-        self.state.temperature[core_mask] = 1000.0  # Hot core
-        
-        # Normalize and update properties
-        self.state.normalize_volume_fractions()
-        self.state.update_mixture_properties(self.material_db)
-        
-    def reset(self):
+    def reset(self, scenario: Optional[str] = None):
         """Reset simulation to initial state."""
-        self.__init__(self.state.nx, self.state.ny, self.state.dx, setup_planet=True)
+        # Use provided scenario or fall back to stored one
+        scenario_to_use = scenario if scenario is not None else self.scenario
+        
+        # Store current dimensions
+        nx, ny, dx = self.state.nx, self.state.ny, self.state.dx
+        
+        # Reinitialize
+        self.__init__(nx, ny, dx, scenario=scenario_to_use)
         
     def step_forward(self):
         """Execute one simulation timestep."""
@@ -108,8 +93,11 @@ class FluxSimulation:
         start_time = time.time()
         
         # Compute adaptive timestep
+        t0 = time.perf_counter()
         dt = self.physics.apply_cfl_limit()
         self.state.dt = dt
+        if hasattr(self, 'step_timings'):
+            self.step_timings['cfl_calculation'] = time.perf_counter() - t0
         
         # Operator splitting approach
         self.timestep(dt)
@@ -131,32 +119,46 @@ class FluxSimulation:
         Args:
             dt: Time step in seconds
         """
+        # Initialize timing if needed
+        if not hasattr(self, 'step_timings'):
+            self.step_timings = {}
+            
+        import time
+        
         # 1. Self-gravity
-        gx, gy = self.physics.solve_gravity()
+        t0 = time.perf_counter()
+        gx, gy = self.gravity_solver.solve_gravity()
+        self.step_timings['gravity'] = time.perf_counter() - t0
         
-        # 2. Pressure
-        pressure = self.physics.solve_pressure(gx, gy)
-        
-        # 3. Momentum update (pressure gradients + gravity)
-        self.physics.update_momentum(pressure, gx, gy, dt)
+        # 2. Momentum update (projection enforces incompressibility)
+        t0 = time.perf_counter()
+        self.physics.update_momentum(gx, gy, dt)
+        self.step_timings['momentum'] = time.perf_counter() - t0
         
         # 4. Advection (flux-based transport)
-        self.transport.advect_materials(dt)
+        t0 = time.perf_counter()
+        self.transport.advect_materials_vectorized(dt)
+        self.step_timings['advection'] = time.perf_counter() - t0
         
-        # 5. Thermal diffusion
-        self.transport.diffuse_heat(dt)
+        # 5. Heat transfer (diffusion + radiation)
+        t0 = time.perf_counter()
+        self.heat_transfer.solve_heat_equation(dt)
+        self.step_timings['heat_transfer'] = time.perf_counter() - t0
         
         # 6. Solar heating
+        t0 = time.perf_counter()
         self.apply_solar_heating(dt)
+        self.step_timings['solar_heating'] = time.perf_counter() - t0
         
-        # 7. Radiative cooling
-        self.apply_radiative_cooling(dt)
-        
-        # 8. Phase transitions
+        # 7. Phase transitions
+        t0 = time.perf_counter()
         self.apply_phase_transitions(dt)
+        self.step_timings['phase_transitions'] = time.perf_counter() - t0
         
-        # 9. Update mixture properties
+        # 8. Update mixture properties
+        t0 = time.perf_counter()
         self.state.update_mixture_properties(self.material_db)
+        self.step_timings['update_properties'] = time.perf_counter() - t0
         
     def apply_solar_heating(self, dt: float):
         """
@@ -181,25 +183,6 @@ class FluxSimulation:
             dT = absorbed * dt / (self.state.density[0, i] * self.state.specific_heat[0, i])
             self.state.temperature[0, i] += dT
             
-    def apply_radiative_cooling(self, dt: float):
-        """Apply Stefan-Boltzmann radiative cooling."""
-        # Skip space cells
-        mask = self.state.density > 0.1
-        
-        # Stefan-Boltzmann cooling
-        cooling = self.state.emissivity * self.stefan_boltzmann * (
-            self.state.temperature**4 - self.t_space**4
-        )
-        
-        # Apply greenhouse effect for atmospheric cells
-        vapor_frac = self.state.vol_frac[MaterialType.WATER_VAPOR]
-        greenhouse = 0.1 + 0.5 * np.tanh(np.log(1 + vapor_frac * 10) / 10)
-        cooling *= (1 - greenhouse)
-        
-        # Apply cooling
-        dT = -cooling * dt / (self.state.density * self.state.specific_heat + 1e-10)
-        self.state.temperature[mask] += dT[mask]
-        
     def apply_phase_transitions(self, dt: float):
         """
         Apply material phase transitions based on T-P conditions.
@@ -210,24 +193,24 @@ class FluxSimulation:
         P = self.state.pressure
         
         # Water -> Ice (freezing)
-        freeze_mask = (T < 273.15) & (self.state.vol_frac[MaterialType.WATER] > 0)
+        freeze_mask = (T < 273.15) & (self.state.vol_frac[MaterialType.WATER.value] > 0)
         if np.any(freeze_mask):
             rate = 0.1 * dt  # 10% per second
-            amount = self.state.vol_frac[MaterialType.WATER] * np.minimum(rate, 1.0)
+            amount = self.state.vol_frac[MaterialType.WATER.value] * np.minimum(rate, 1.0)
             
-            self.state.vol_frac[MaterialType.WATER] -= amount * freeze_mask
-            self.state.vol_frac[MaterialType.ICE] += amount * freeze_mask
+            self.state.vol_frac[MaterialType.WATER.value] -= amount * freeze_mask
+            self.state.vol_frac[MaterialType.ICE.value] += amount * freeze_mask
             # Latent heat
             self.state.heat_source += amount * freeze_mask * 3.34e5
             
         # Ice -> Water (melting)
-        melt_mask = (T > 273.15) & (self.state.vol_frac[MaterialType.ICE] > 0)
+        melt_mask = (T > 273.15) & (self.state.vol_frac[MaterialType.ICE.value] > 0)
         if np.any(melt_mask):
             rate = 0.1 * dt
-            amount = self.state.vol_frac[MaterialType.ICE] * np.minimum(rate, 1.0)
+            amount = self.state.vol_frac[MaterialType.ICE.value] * np.minimum(rate, 1.0)
             
-            self.state.vol_frac[MaterialType.ICE] -= amount * melt_mask
-            self.state.vol_frac[MaterialType.WATER] += amount * melt_mask
+            self.state.vol_frac[MaterialType.ICE.value] -= amount * melt_mask
+            self.state.vol_frac[MaterialType.WATER.value] += amount * melt_mask
             # Latent heat
             self.state.heat_source -= amount * melt_mask * 3.34e5
             

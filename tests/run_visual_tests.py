@@ -54,22 +54,21 @@ class VisualScenarioRunner:
             traceback.print_exc()
             raise
         
-        # Create simulation
+        # Create simulation (don't auto-setup a scenario)
         self.sim = FluxSimulation(
             nx=grid_size, 
             ny=grid_size,
-            dx=cell_size
+            dx=cell_size,
+            scenario=False
         )
         
-        if dt is not None:
-            self.sim.dt = dt
+        # dt will be computed dynamically by CFL condition
         
         # Setup scenario
         print(f"\nRunning scenario: {self.scenario.get_name()}")
         print(f"Description: {self.scenario.get_description()}")
         print(f"Parameters: {params}")
         print(f"Grid: {grid_size}x{grid_size}, cell size: {cell_size}m")
-        print(f"Time step: {self.sim.dt:.4f}s")
         print("-" * 60)
         
         try:
@@ -162,22 +161,7 @@ class VisualScenarioRunner:
         return False  # Let visualizer handle other events
 
 
-class ScenarioGroup:
-    """Container for related test scenarios."""
-    
-    def __init__(self, name: str, description: str):
-        """Initialize scenario group."""
-        self.name = name
-        self.description = description
-        self.scenarios = {}
-        
-    def add_scenario(self, key: str, scenario_class: type, **default_params):
-        """Add a scenario to this group."""
-        self.scenarios[key] = (scenario_class, default_params)
-        
-    def list_scenarios(self) -> list:
-        """List all scenario keys in this group."""
-        return list(self.scenarios.keys())
+# ScenarioGroup is imported from tests.scenarios
 
 
 def list_scenarios():

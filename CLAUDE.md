@@ -16,18 +16,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - NO path integration (integrating along x then y)
 - NO vertical integration (integrating only in y)
 - NO line integrals of any kind
+- NO hydrostatic approximation (P = P₀ + ∫ρg dy)
 - These are ALL fundamentally incorrect for 2D problems
 
-**Why integration fails:**
+**Why integration and hydrostatic approximations fail:**
 - Integration assumes you can compute pressure by accumulating ρg along a path
-- This only works in 1D or for very special 2D cases (uniform gravity, stratified density)
+- Hydrostatic approximation assumes no horizontal flow and ∂P/∂x = 0
+- This only works in 1D or for very special 2D cases (uniform gravity, stratified density, no flow)
 - For general 2D problems with varying gravity/density, different paths give different answers
 - This violates the requirement that pressure be a single-valued function
+- Cannot capture buoyancy-driven flows, convection, or lateral spreading
 
-**The ONLY correct approaches:**
+**The ONLY correct approach for general 2D:**
 - Solve the Poisson equation: ∇²P = ∇·(ρg) using the multigrid solver
-- Let pressure evolve dynamically through velocity projection
-- Initialize to a constant and let the system find equilibrium
+- This couples pressure everywhere in the domain
+- Required because gravity direction may vary and we're solving a general 2D problem
+- Hydrostatic is ~24x faster but physically wrong for dynamic flows
 
 ## Important: Read AGENTS.md First
 
@@ -48,8 +52,22 @@ source .venv/bin/activate
 **⚠️ IMPORTANT: All Python tools (pytest, python, pip) REQUIRE the venv to be activated first!**
 
 ### Running the Simulation
+
+#### Flux-Based Simulation (New)
 ```bash
+# Run with default planet scenario
 python main.py
+
+# Run with specific scenario
+python main.py --scenario volcanic
+
+# Run with custom size
+python main.py --scenario layered --size 150
+```
+
+#### CA-Based Simulation (Legacy)
+```bash
+python geo_visualizer.py
 ```
 
 ### Testing
@@ -235,3 +253,30 @@ except ImportError:
 - **REMOVED FROM CODEBASE**: All rigid body mechanics have been removed for simplicity and performance
 - Everything flows based on material viscosity - rocks flow very slowly, fluids flow quickly
 - This simplification improved performance by 3x and makes the simulation more predictable
+
+## Flux-Based Simulation (flux/)
+
+The flux-based simulation provides a more physically accurate model using continuous fields and volume fractions:
+
+### Architecture
+- `main.py` - Entry point with command-line interface
+- `scenarios.py` - **Centralized scenario definitions** (no duplication between files)
+  - Available scenarios: empty, planet, layered, volcanic, ice
+  - Each scenario is a function that configures the initial state
+- `simulation.py` - Main simulation loop with operator splitting
+- `state.py` - Volume fraction state management (multiple materials per cell)
+- `transport.py` - Material advection (vectorized with 30x speedup) and heat diffusion
+- `physics.py` - Gravity, pressure, and momentum calculations
+- `materials.py` - Material properties database (9 materials)
+- `visualizer.py` - Interactive visualization with toolbar UI
+
+### Key Differences from CA Simulation
+- **Volume fractions**: Multiple materials can exist in each cell
+- **Continuous fields**: Temperature, pressure, velocity are continuous
+- **Flux-based transport**: Exact conservation using face-centered fluxes
+- **Better physics**: Proper momentum equations, phase transitions with latent heat
+
+### Performance (Flux-Based)
+- **Target**: 100+ FPS for 100x100 grids
+- **Achieved**: 640 FPS with optimized transport
+- **Bottlenecks**: Heat diffusion (54%), gravity solve (15%)

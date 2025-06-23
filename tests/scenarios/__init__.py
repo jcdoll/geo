@@ -19,6 +19,7 @@ from .fluids import (
     HydrostaticEquilibriumScenario,
     WaterDropFallScenario,
     BuoyancyScenario,
+    RockSinkingScenario,
 )
 
 from .materials import (
@@ -35,8 +36,8 @@ from .thermal import (
     RadiativeCoolingScenario,
 )
 
-# Import ScenarioGroup from run_visual_tests to avoid circular dependency
-from ..run_visual_tests import ScenarioGroup
+# Import ScenarioGroup to organize scenarios
+from .groups import ScenarioGroup
 
 # Define scenario groups for organization
 SCENARIO_GROUPS = {
@@ -49,6 +50,7 @@ SCENARIO_GROUPS = {
 SCENARIO_GROUPS['fluids'].add_scenario('hydrostatic_equilibrium', HydrostaticEquilibriumScenario)
 SCENARIO_GROUPS['fluids'].add_scenario('water_drop_fall', WaterDropFallScenario)
 SCENARIO_GROUPS['fluids'].add_scenario('buoyancy', BuoyancyScenario)
+SCENARIO_GROUPS['fluids'].add_scenario('rock_sinking', RockSinkingScenario)
 
 # Register material scenarios
 SCENARIO_GROUPS['materials'].add_scenario('water_freezing', WaterFreezingScenario)

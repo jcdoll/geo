@@ -91,6 +91,11 @@ Options:
 - `5` - Velocity
 - `6` - Density
 
+**Information Overlays**
+- `I` - Toggle info display (FPS, time, averages)
+- `L` - Toggle performance logging (timing for each physics step)
+- `H` - Show help overlay
+
 **Tools** (number keys select tools, then click/drag to use)
 - Heat sources
 - Pressure application  
