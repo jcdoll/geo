@@ -12,7 +12,7 @@ Uses multigrid V-cycle method for efficiency.
 import numpy as np
 from typing import Tuple
 from state import FluxState
-from multigrid import solve_poisson_2d, BoundaryCondition
+from multigrid_mac_vectorized import solve_mac_poisson_vectorized, BoundaryCondition
 
 
 class GravitySolver:
@@ -69,7 +69,10 @@ class GravitySolver:
     def solve_poisson(self, rhs: np.ndarray, dx: float, 
                       max_iter: int = 50, tol: float = 1e-6) -> np.ndarray:
         """
-        Solve Poisson equation using multigrid V-cycle.
+        Solve Poisson equation using MAC multigrid.
+        
+        For gravity, we have a constant-coefficient problem (∇²φ = rhs),
+        which is a special case of the variable-coefficient solver.
         
         Args:
             rhs: Right-hand side of equation
@@ -80,11 +83,19 @@ class GravitySolver:
         Returns:
             Solution to Poisson equation
         """
-        # Use the general multigrid solver
-        return solve_poisson_2d(
-            rhs, dx, 
+        ny, nx = rhs.shape
+        
+        # For constant-coefficient Poisson, beta = 1 everywhere
+        # Create face-centered coefficients
+        beta_x = np.ones((ny, nx + 1), dtype=np.float32)
+        beta_y = np.ones((ny + 1, nx), dtype=np.float32)
+        
+        # Use the MAC multigrid solver
+        return solve_mac_poisson_vectorized(
+            rhs, beta_x, beta_y, dx,
             bc_type=BoundaryCondition.NEUMANN,
-            tol=tol
+            tol=tol,
+            max_cycles=max_iter
         )
         
     def smooth(self, phi: np.ndarray, rhs: np.ndarray, h: float, 

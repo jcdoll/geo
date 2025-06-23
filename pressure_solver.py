@@ -18,8 +18,8 @@ from typing import Tuple, Optional
 from state import FluxState
 from materials import MaterialType
 
-# Import multigrid solver
-from multigrid import solve_variable_poisson_2d, BoundaryCondition
+# Import fully vectorized MAC multigrid solver
+from multigrid_mac_vectorized import solve_mac_poisson_vectorized as solve_mac_poisson, BoundaryCondition
 
 
 class PressureSolver:
@@ -79,23 +79,25 @@ class PressureSolver:
         rhs[space_mask] = 0.0
         
         # Solve variable-coefficient Poisson equation
-        # Use adaptive tolerances based on grid size
+        # Use very relaxed settings for real-time performance
         grid_size = st.nx * st.ny
         if grid_size > 8192:  # 128x64 or larger
-            max_iter = 10   # Very limited iterations for multigrid
-            tol = 1e-3      # Relax tolerance for large grids
+            max_iter = 20   # Very strict iteration limit
+            tol = 5e-2      # Accept approximate solutions
         else:
-            max_iter = 20
-            tol = 1e-5
+            max_iter = 50
+            tol = 1e-3
             
-        phi = solve_pressure_variable_coeff(
+        # Solve using MAC multigrid
+        bc = BoundaryCondition.NEUMANN if bc_type == "neumann" else BoundaryCondition.DIRICHLET
+        phi = solve_mac_poisson(
             rhs,
             st.beta_x,
             st.beta_y,
             st.dx,
+            bc_type=bc,
             tol=tol,
-            max_iter=max_iter,
-            bc_type=bc_type,
+            max_cycles=max_iter,
             initial_guess=self.phi_prev,
         )
         
@@ -174,123 +176,3 @@ class PressureSolver:
         # Boundary faces handled by BC
 
 
-# -----------------------------------------------------------------------------
-# Variable-coefficient multigrid solver
-# -----------------------------------------------------------------------------
-
-def _apply_bc(phi: np.ndarray, bc_type: str = "neumann"):
-    """Apply boundary conditions."""
-    if bc_type == "neumann":
-        # Homogeneous Neumann: ∂φ/∂n = 0
-        phi[0, :] = phi[1, :]
-        phi[-1, :] = phi[-2, :]
-        phi[:, 0] = phi[:, 1]
-        phi[:, -1] = phi[:, -2]
-    else:
-        # Homogeneous Dirichlet: φ = 0
-        phi[0, :] = 0.0
-        phi[-1, :] = 0.0
-        phi[:, 0] = 0.0
-        phi[:, -1] = 0.0
-
-
-def solve_pressure_variable_coeff(
-    rhs: np.ndarray, 
-    beta_x: np.ndarray, 
-    beta_y: np.ndarray, 
-    dx: float,
-    *, 
-    tol: float = 1e-6, 
-    max_iter: int = 10000, 
-    bc_type: str = "neumann",
-    initial_guess: np.ndarray = None
-) -> np.ndarray:
-    """Solve variable-coefficient Poisson equation: ∇·(β∇φ) = rhs
-    
-    Uses multigrid for large grids, Gauss-Seidel for small grids.
-    
-    Args:
-        rhs: Right-hand side (cell-centered)
-        beta_x: Face-centered coefficients in x (shape ny, nx+1)
-        beta_y: Face-centered coefficients in y (shape ny+1, nx)
-        dx: Grid spacing
-        tol: Convergence tolerance
-        max_iter: Maximum iterations
-        bc_type: Boundary condition type
-        
-    Returns:
-        phi: Solution to Poisson equation
-    """
-    ny, nx = rhs.shape
-    
-    # Use multigrid for medium/large grids
-    if nx * ny > 256:  # 16x16 or larger
-        bc = BoundaryCondition.NEUMANN if bc_type == "neumann" else BoundaryCondition.DIRICHLET
-        return solve_variable_poisson_2d(
-            rhs, beta_x, beta_y, dx,
-            bc_type=bc,
-            tol=tol,
-            initial_guess=initial_guess
-        )
-    
-    # Fall back to Gauss-Seidel for very small grids
-    if initial_guess is not None and initial_guess.shape == rhs.shape:
-        phi = np.copy(initial_guess)
-    else:
-        phi = np.zeros_like(rhs)
-    
-    dx2 = dx * dx
-    omega = 1.7  # SOR relaxation parameter
-    
-    for it in range(max_iter):
-        max_change = 0.0
-        
-        # Red-black Gauss-Seidel
-        for color in (0, 1):
-            for j in range(1, ny - 1):
-                for i in range(1, nx - 1):
-                    if (i + j) % 2 != color:
-                        continue
-                    
-                    # Face coefficients
-                    bx_e = beta_x[j, i + 1]
-                    bx_w = beta_x[j, i]
-                    by_n = beta_y[j + 1, i]
-                    by_s = beta_y[j, i]
-                    
-                    # Denominator
-                    denom = bx_e + bx_w + by_n + by_s
-                    if denom < 1e-12:
-                        continue
-                    
-                    # Gauss-Seidel update
-                    phi_new = (
-                        bx_e * phi[j, i + 1] +
-                        bx_w * phi[j, i - 1] +
-                        by_n * phi[j + 1, i] +
-                        by_s * phi[j - 1, i] -
-                        dx2 * rhs[j, i]
-                    ) / denom
-                    
-                    # SOR update
-                    phi_new = phi[j, i] + omega * (phi_new - phi[j, i])
-                    
-                    # Track convergence
-                    change = abs(phi_new - phi[j, i])
-                    if change > max_change:
-                        max_change = change
-                    
-                    phi[j, i] = phi_new
-        
-        # Apply boundary conditions
-        _apply_bc(phi, bc_type)
-        
-        # Check convergence
-        if max_change < tol:
-            break
-    
-    # For Neumann BC, remove mean to fix null space
-    if bc_type == "neumann":
-        phi -= np.mean(phi)
-    
-    return phi

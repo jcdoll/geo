@@ -180,57 +180,18 @@ class FluxState:
 
         # β_x: shape (ny, nx+1)
         # Interior faces: harmonic mean of left & right cell densities
-        # Special handling for space regions
-        space_mask = rho < 0.1  # Space has essentially zero density
+        # But clamp minimum density to avoid huge values in space
+        rho_min = 1.0  # kg/m³ - reasonable minimum for numerical stability
+        rho_clamped = np.maximum(rho, rho_min)
         
-        # For faces between space and matter, use the matter density
-        # For faces between two space cells, use a small value
-        self.beta_x[:, 1:-1] = np.zeros((self.ny, self.nx-1))
-        for j in range(self.ny):
-            for i in range(1, self.nx):
-                left_space = space_mask[j, i-1]
-                right_space = space_mask[j, i]
-                
-                if left_space and right_space:
-                    # Both cells are space - use small beta
-                    self.beta_x[j, i] = 1000.0  # Large but finite
-                elif left_space:
-                    # Left is space, right is matter
-                    self.beta_x[j, i] = 1.0 / rho[j, i]
-                elif right_space:
-                    # Right is space, left is matter
-                    self.beta_x[j, i] = 1.0 / rho[j, i-1]
-                else:
-                    # Both are matter - harmonic mean
-                    self.beta_x[j, i] = 2.0 / (rho[j, i-1] + rho[j, i])
-
-        # Boundaries
-        self.beta_x[:, 0] = 1.0 / np.maximum(rho[:, 0], 0.001)
-        self.beta_x[:, -1] = 1.0 / np.maximum(rho[:, -1], 0.001)
+        self.beta_x[:, 1:-1] = 2.0 / (rho_clamped[:, :-1] + rho_clamped[:, 1:])
+        self.beta_x[:, 0] = 1.0 / rho_clamped[:, 0]
+        self.beta_x[:, -1] = 1.0 / rho_clamped[:, -1]
 
         # β_y: shape (ny+1, nx)
-        self.beta_y[1:-1, :] = np.zeros((self.ny-1, self.nx))
-        for j in range(1, self.ny):
-            for i in range(self.nx):
-                top_space = space_mask[j-1, i]
-                bottom_space = space_mask[j, i]
-                
-                if top_space and bottom_space:
-                    # Both cells are space
-                    self.beta_y[j, i] = 1000.0
-                elif top_space:
-                    # Top is space, bottom is matter
-                    self.beta_y[j, i] = 1.0 / rho[j, i]
-                elif bottom_space:
-                    # Bottom is space, top is matter
-                    self.beta_y[j, i] = 1.0 / rho[j-1, i]
-                else:
-                    # Both are matter - harmonic mean
-                    self.beta_y[j, i] = 2.0 / (rho[j-1, i] + rho[j, i])
-                    
-        # Boundaries
-        self.beta_y[0, :] = 1.0 / np.maximum(rho[0, :], 0.001)
-        self.beta_y[-1, :] = 1.0 / np.maximum(rho[-1, :], 0.001)
+        self.beta_y[1:-1, :] = 2.0 / (rho_clamped[:-1, :] + rho_clamped[1:, :])
+        self.beta_y[0, :] = 1.0 / rho_clamped[0, :]
+        self.beta_y[-1, :] = 1.0 / rho_clamped[-1, :]
 
     def update_face_velocities_from_cell(self):
         """Populate face-centred velocities by averaging neighbouring cells.
