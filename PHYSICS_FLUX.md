@@ -120,12 +120,21 @@ Each material's volume fraction evolves according to:
 
 With the constraint: Σφᵢ = 1 (volume fractions sum to unity)
 
-Additionally, we must conserve thermal energy during transport:
+#### Conservative Energy Transport
+
+The thermal energy conservation equation for multi-material flows requires careful treatment:
 ```
 ∂(φᵢρᵢcₚᵢT)/∂t + ∇·(φᵢρᵢcₚᵢTv) = 0
 ```
 
-This ensures that when materials with different temperatures mix, the resulting temperature is correctly computed from energy conservation.
+This must be solved for EACH material separately to ensure exact energy conservation. The final temperature is then computed from:
+```
+T = Σ(φᵢρᵢcₚᵢT)ᵢ / Σ(φᵢρᵢcₚᵢ)ᵢ
+```
+
+**Implementation Note**: A simpler but INCORRECT approach would be to advect the mixed energy density E = ρ_mix·cp_mix·T. This fails catastrophically at material interfaces where thermal mass changes dramatically (e.g., hot rock flowing into cold air). The per-material approach is ~9x slower but physically correct.
+
+**Historical Note**: Early versions used the mixed energy approach for performance, resulting in temperature explosions exceeding 100,000K at material interfaces. The conservative per-material method eliminates these unphysical spikes.
 
 #### 2. Self-Gravity
 The gravitational potential Φ satisfies Poisson's equation:
@@ -506,20 +515,32 @@ def advect_materials_flux(state, dt):
     update_mixture_density(state)
 ```
 
-Temperature is advected as energy density to ensure energy conservation:
+Temperature advection requires conservative treatment of each material's energy:
 
 ```python
-def advect_temperature(state, dt):
-    # Compute energy density E = Σ(φᵢρᵢcₚᵢT)
-    E = sum(phi[i] * rho[i] * cp[i] * T for i in materials)
+def advect_temperature_conservative(state, dt, material_fluxes):
+    # Store OLD volume fractions before material advection
+    old_phi = state.vol_frac.copy()
     
-    # Advect E using same upwind scheme as materials
-    E_new = upwind_advection(E, velocity, dt)
+    # Compute initial energy in each cell
+    E_initial = sum(old_phi[i] * rho[i] * cp[i] * T for i in materials)
     
-    # Recover temperature from total thermal mass
-    thermal_mass = sum(phi[i] * rho[i] * cp[i] for i in materials)
-    T_new = E_new / thermal_mass  # Handle zero mass carefully
+    # Compute energy flux for EACH material using same fluxes as volume
+    for mat in materials:
+        # Energy flux = volume flux * density * cp * T_upwind
+        energy_flux_x[mat] = volume_flux_x[mat] * rho[mat] * cp[mat] * T_upwind
+        energy_flux_y[mat] = volume_flux_y[mat] * rho[mat] * cp[mat] * T_upwind
+    
+    # Total energy change from all material fluxes
+    E_change = -sum(divergence(energy_flux[mat]) for mat in materials)
+    E_final = E_initial + E_change
+    
+    # NEW thermal mass after materials have moved
+    thermal_mass_new = sum(phi_new[i] * rho[i] * cp[i] for i in materials)
+    T_new = E_final / thermal_mass_new  # Energy conserved exactly!
 ```
+
+**Critical**: This MUST use the same material fluxes and be done synchronously with material advection. Using stale volume fractions causes catastrophic errors.
 
 This unified approach ensures:
 - Exact mass conservation through flux divergence
