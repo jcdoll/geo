@@ -19,7 +19,7 @@ from state import FluxState
 from materials import MaterialType
 
 # Import MAC multigrid solver with configurable smoother
-from multigrid_dispatcher import solve_mac_poisson_configurable, SmootherType, BoundaryCondition
+from multigrid import solve_mac_poisson_configurable, SmootherType, BoundaryCondition
 
 
 class PressureSolver:
@@ -121,7 +121,7 @@ class PressureSolver:
             self.phi_prev[:] = phi
         
         # Update face velocities using pressure gradient
-        self._update_face_velocities(phi, dt)
+        self._update_face_velocities(phi, dt, bc)
         
         # Update cell-centered velocities from face velocities
         st.update_cell_velocities_from_face()
@@ -172,37 +172,83 @@ class PressureSolver:
         
         return div
         
-    def _update_face_velocities(self, phi: np.ndarray, dt: float):
+    def _update_face_velocities(self, phi: np.ndarray, dt: float, bc_type: BoundaryCondition = BoundaryCondition.NEUMANN):
         """Update face velocities using pressure gradient.
         
         v_new = v* - dt * β * ∇φ
         
+        Properly handles both Neumann and Dirichlet boundary conditions.
+        
         Args:
             phi: Pressure correction
             dt: Time step
+            bc_type: Boundary condition type
         """
         st = self.state
         dx = st.dx
         
-        # X-face velocities
-        grad_phi_x = (phi[:, 1:] - phi[:, :-1]) / dx
-        st.velocity_x_face[:, 1:-1] -= dt * st.beta_x[:, 1:-1] * grad_phi_x
-        
-        # Y-face velocities  
-        grad_phi_y = (phi[1:, :] - phi[:-1, :]) / dx
-        st.velocity_y_face[1:-1, :] -= dt * st.beta_y[1:-1, :] * grad_phi_y
-        
-        # Boundary faces: For Neumann BC (∂φ/∂n = 0), the pressure gradient 
-        # normal to the boundary is zero. This means:
-        # - At x boundaries: ∂φ/∂x = 0, so no velocity correction
-        # - At y boundaries: ∂φ/∂y = 0, so no velocity correction
-        # The face velocities at boundaries remain unchanged from the predictor step.
-        
-        # However, we should enforce no-penetration boundary conditions
-        # (zero normal velocity at solid walls)
-        st.velocity_x_face[:, 0] = 0.0    # Left boundary
-        st.velocity_x_face[:, -1] = 0.0   # Right boundary
-        st.velocity_y_face[0, :] = 0.0    # Top boundary
-        st.velocity_y_face[-1, :] = 0.0   # Bottom boundary
+        if bc_type == BoundaryCondition.NEUMANN:
+            # For Neumann BC (∂φ/∂n = 0), we use ghost cells to enforce zero gradient
+            
+            # X-faces
+            # Interior faces: standard centered difference
+            grad_phi_x_int = (phi[:, 1:] - phi[:, :-1]) / dx
+            st.velocity_x_face[:, 1:-1] -= dt * st.beta_x[:, 1:-1] * grad_phi_x_int
+            
+            # Boundary faces for Neumann BC
+            # At left boundary (x=0): ghost cell has φ[-1,j] = φ[0,j]
+            # So gradient at face is: (φ[0,j] - φ[-1,j])/dx = 0
+            grad_phi_x_left = 0.0
+            st.velocity_x_face[:, 0] -= dt * st.beta_x[:, 0] * grad_phi_x_left
+            
+            # At right boundary (x=nx): ghost cell has φ[nx,j] = φ[nx-1,j]
+            # So gradient at face is: (φ[nx,j] - φ[nx-1,j])/dx = 0
+            grad_phi_x_right = 0.0
+            st.velocity_x_face[:, -1] -= dt * st.beta_x[:, -1] * grad_phi_x_right
+            
+            # Y-faces
+            # Interior faces: standard centered difference
+            grad_phi_y_int = (phi[1:, :] - phi[:-1, :]) / dx
+            st.velocity_y_face[1:-1, :] -= dt * st.beta_y[1:-1, :] * grad_phi_y_int
+            
+            # Boundary faces for Neumann BC
+            # At bottom boundary (y=0): ghost cell has φ[i,-1] = φ[i,0]
+            # So gradient at face is: (φ[i,0] - φ[i,-1])/dy = 0
+            grad_phi_y_bottom = 0.0
+            st.velocity_y_face[0, :] -= dt * st.beta_y[0, :] * grad_phi_y_bottom
+            
+            # At top boundary (y=ny): ghost cell has φ[i,ny] = φ[i,ny-1]
+            # So gradient at face is: (φ[i,ny] - φ[i,ny-1])/dy = 0
+            grad_phi_y_top = 0.0
+            st.velocity_y_face[-1, :] -= dt * st.beta_y[-1, :] * grad_phi_y_top
+            
+        else:  # Dirichlet BC
+            # For Dirichlet BC (φ = 0 at boundaries), we use one-sided differences
+            
+            # X-faces
+            # Interior faces
+            grad_phi_x_int = (phi[:, 1:] - phi[:, :-1]) / dx
+            st.velocity_x_face[:, 1:-1] -= dt * st.beta_x[:, 1:-1] * grad_phi_x_int
+            
+            # Left boundary: φ[-1,j] = 0, so gradient = (φ[0,j] - 0) / dx
+            grad_phi_x_left = phi[:, 0] / dx
+            st.velocity_x_face[:, 0] -= dt * st.beta_x[:, 0] * grad_phi_x_left
+            
+            # Right boundary: φ[nx,j] = 0, so gradient = (0 - φ[nx-1,j]) / dx
+            grad_phi_x_right = -phi[:, -1] / dx
+            st.velocity_x_face[:, -1] -= dt * st.beta_x[:, -1] * grad_phi_x_right
+            
+            # Y-faces
+            # Interior faces
+            grad_phi_y_int = (phi[1:, :] - phi[:-1, :]) / dx
+            st.velocity_y_face[1:-1, :] -= dt * st.beta_y[1:-1, :] * grad_phi_y_int
+            
+            # Bottom boundary: φ[i,-1] = 0, so gradient = (φ[i,0] - 0) / dy
+            grad_phi_y_bottom = phi[0, :] / dx
+            st.velocity_y_face[0, :] -= dt * st.beta_y[0, :] * grad_phi_y_bottom
+            
+            # Top boundary: φ[i,ny] = 0, so gradient = (0 - φ[i,ny-1]) / dy
+            grad_phi_y_top = -phi[-1, :] / dx
+            st.velocity_y_face[-1, :] -= dt * st.beta_y[-1, :] * grad_phi_y_top
 
 

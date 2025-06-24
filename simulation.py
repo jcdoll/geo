@@ -15,14 +15,10 @@ from materials import MaterialDatabase, MaterialType
 from scenarios import setup_scenario
 from gravity_solver import GravitySolver
 from pressure_solver import PressureSolver
-from multigrid_dispatcher import SmootherType
+from multigrid import SmootherType
 from heat_transfer import HeatTransfer
-from heat_transfer_multigrid import HeatTransferMultigrid
-from heat_transfer_vectorized_stable import HeatTransferVectorized
 from transport import FluxTransport
-from transport_vectorized import FluxTransportVectorized
-from solar_heating_vectorized import apply_solar_heating_vectorized
-from solar_heating_proper_safe import apply_solar_heating_proper
+from solar_heating import apply_solar_heating_proper
 from atmospheric_processes import AtmosphericProcesses
 from phase_transitions import PhaseTransitionSystem
 
@@ -56,7 +52,7 @@ class FluxSimulation:
         self.state = FluxState(nx, ny, dx, cell_depth=cell_depth)
         
         # Transport module (vectorized)
-        self.transport = FluxTransportVectorized(self.state)
+        self.transport = FluxTransport(self.state)
             
         # Physics modules
         self.gravity_solver = GravitySolver(self.state)
@@ -64,11 +60,8 @@ class FluxSimulation:
         
         # Choose heat transfer solver
         self.use_multigrid_heat = use_multigrid_heat
-        if use_multigrid_heat:
-            self.heat_transfer = HeatTransferMultigrid(self.state)
-        else:
-            # Use vectorized heat transfer for better performance
-            self.heat_transfer = HeatTransferVectorized(self.state)
+        solver_method = "multigrid" if use_multigrid_heat else "adi"
+        self.heat_transfer = HeatTransfer(self.state, solver_method=solver_method)
             
         self.physics = FluxPhysics(self.state)
         self.material_db = MaterialDatabase()
@@ -239,10 +232,7 @@ class FluxSimulation:
                                                    posinf=5000.0, 
                                                    neginf=self.t_space)
         
-        # Clamp power density to reasonable range
-        max_power = 1e6  # 1 MW/m³ max heating
-        min_power = -1e5  # 100 kW/m³ max cooling
-        self.state.power_density = np.clip(self.state.power_density, min_power, max_power)
+        # No artificial limits on power density - let physics determine the values
         
     def apply_solar_heating(self, dt: float):
         """

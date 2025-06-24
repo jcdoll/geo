@@ -10,29 +10,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 3. Check for basic errors like AttributeError, ImportError, etc.
 4. If you get an error, iterate and fix it - don't leave broken code
 
-## CRITICAL: Pressure Calculation
-
-**NEVER use ANY form of integration to calculate pressure in 2D!**
-- NO path integration (integrating along x then y)
-- NO vertical integration (integrating only in y)
-- NO line integrals of any kind
-- NO hydrostatic approximation (P = P₀ + ∫ρg dy)
-- These are ALL fundamentally incorrect for 2D problems
-
-**Why integration and hydrostatic approximations fail:**
-- Integration assumes you can compute pressure by accumulating ρg along a path
-- Hydrostatic approximation assumes no horizontal flow and ∂P/∂x = 0
-- This only works in 1D or for very special 2D cases (uniform gravity, stratified density, no flow)
-- For general 2D problems with varying gravity/density, different paths give different answers
-- This violates the requirement that pressure be a single-valued function
-- Cannot capture buoyancy-driven flows, convection, or lateral spreading
-
-**The ONLY correct approach for general 2D:**
-- Solve the Poisson equation: ∇²P = ∇·(ρg) using the multigrid solver
-- This couples pressure everywhere in the domain
-- Required because gravity direction may vary and we're solving a general 2D problem
-- Hydrostatic is ~24x faster but physically wrong for dynamic flows
-
 ## Important: Read AGENTS.md First
 
 Before making any changes, **read `AGENTS.md`** which contains:
