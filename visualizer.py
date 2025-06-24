@@ -682,30 +682,40 @@ class FluxVisualizer:
                 power_norm = np.zeros_like(power)
                 
             # Apply diverging colormap: blue (cooling) -> white (neutral) -> red (heating)
-            for j in range(self.state.ny):
-                for i in range(self.state.nx):
-                    value = power_norm[j, i]
-                    
-                    if value > 0:  # Heating (positive power)
-                        # Red channel increases with heating
-                        rgb[j, i, 0] = int(255 * (0.5 + 0.5 * value))
-                        # Green and blue decrease with heating
-                        rgb[j, i, 1] = int(255 * (1.0 - 0.5 * value))
-                        rgb[j, i, 2] = int(255 * (1.0 - 0.5 * value))
-                    else:  # Cooling (negative power)
-                        # Blue channel increases with cooling
-                        rgb[j, i, 2] = int(255 * (0.5 + 0.5 * abs(value)))
-                        # Red and green decrease with cooling
-                        rgb[j, i, 0] = int(255 * (1.0 - 0.5 * abs(value)))
-                        rgb[j, i, 1] = int(255 * (1.0 - 0.5 * abs(value)))
+            # Vectorized implementation for better performance
+            
+            # For positive values (heating): interpolate from white to red
+            heating_mask = power_norm > 0
+            if np.any(heating_mask):
+                # Red stays at 255
+                rgb[heating_mask, 0] = 255
+                # Green and blue fade from 255 (white) to 0 (red)
+                fade_factor = 1.0 - power_norm[heating_mask]
+                rgb[heating_mask, 1] = (255 * fade_factor).astype(np.uint8)
+                rgb[heating_mask, 2] = (255 * fade_factor).astype(np.uint8)
+            
+            # For negative values (cooling): interpolate from white to blue
+            cooling_mask = power_norm < 0
+            if np.any(cooling_mask):
+                # Blue stays at 255
+                rgb[cooling_mask, 2] = 255
+                # Red and green fade from 255 (white) to 0 (blue)
+                fade_factor = 1.0 - np.abs(power_norm[cooling_mask])
+                rgb[cooling_mask, 0] = (255 * fade_factor).astype(np.uint8)
+                rgb[cooling_mask, 1] = (255 * fade_factor).astype(np.uint8)
+            
+            # For zero values: pure white
+            zero_mask = power_norm == 0
+            if np.any(zero_mask):
+                rgb[zero_mask] = 255
             
             # Store scale values for the scale bar
             self.power_scale_min = -max_abs_power
             self.power_scale_max = max_abs_power
             self.power_scale_type = "symmetric_log"
         else:
-            # No significant power, show neutral gray
-            rgb.fill(200)
+            # No significant power, show white (neutral)
+            rgb.fill(255)
             self.power_scale_min = 0
             self.power_scale_max = 0
             self.power_scale_type = "zero"
@@ -735,19 +745,21 @@ class FluxVisualizer:
             self.screen.blit(text, (bar_x, bar_y - 25))
             return
         
-        # Draw gradient bar
+        # Draw gradient bar with proper blue-white-red colormap
         for i in range(bar_width):
             # Map position to normalized value [-1, 1]
             norm_value = 2.0 * i / bar_width - 1.0
             
-            if norm_value > 0:  # Heating side
-                r = int(255 * (0.5 + 0.5 * norm_value))
-                g = int(255 * (1.0 - 0.5 * norm_value))
-                b = int(255 * (1.0 - 0.5 * norm_value))
-            else:  # Cooling side
-                r = int(255 * (1.0 - 0.5 * abs(norm_value)))
-                g = int(255 * (1.0 - 0.5 * abs(norm_value)))
-                b = int(255 * (0.5 + 0.5 * abs(norm_value)))
+            if norm_value > 0:  # Heating side (white to red)
+                r = 255  # Red stays at maximum
+                g = int(255 * (1.0 - norm_value))  # Green fades from white to red
+                b = int(255 * (1.0 - norm_value))  # Blue fades from white to red
+            elif norm_value < 0:  # Cooling side (white to blue)
+                r = int(255 * (1.0 - abs(norm_value)))  # Red fades from white to blue
+                g = int(255 * (1.0 - abs(norm_value)))  # Green fades from white to blue
+                b = 255  # Blue stays at maximum
+            else:  # Center (white)
+                r = g = b = 255
                 
             color = (r, g, b)
             pygame.draw.line(self.screen, color, 
