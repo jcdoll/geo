@@ -16,6 +16,62 @@ This document describes a flux-based approach for simulating planetary geology t
 
 - When in doubt, add traceback logging so that any error sources are correctly identified.
 
+## Goals
+
+TODO: Update this section
+
+The simulation captures these simplified behaviors:
+
+Physics-based:
+- Behaviors are based on physical laws and correct theory
+- Clamping, artificial limits, ad-hoc methods are not used
+
+Gravity:
+- Gravitational force is computed dynamically using self-gravity
+- Materials fall naturally in gravity fields
+- No assumptions about "down" - gravity emerges from mass distribution
+
+Fluid mechanics:
+- ALL materials flow based on forces and material viscosity
+- High viscosity materials (rocks) flow slowly, low viscosity (water) flows quickly
+- No rigid bodies - everything flows at geological time scales
+- Pressure drives fluid movement naturally
+
+Thermal mechanics:
+- Every cell has temperature with realistic heat diffusion
+- Heat sources: material-based (uranium), solar radiation
+- Heat sinks: radiative cooling to space
+- Temperature affects density through thermal expansion
+
+Buoyancy:
+- Emerges naturally from pressure gradients and density differences
+- Less dense materials rise, denser materials sink
+- No special rules - just physics
+
+Water cycle:
+- Phase transitions: ice ↔ water ↔ vapor based on temperature/pressure
+- Vapor rises due to low density
+- Condensation when cooled
+- Natural circulation emerges
+
+Material properties:
+- Viscosity determines flow resistance (rocks=high, water=low)
+- Density drives buoyancy
+- Phase transitions at specific temperature/pressure conditions
+- Simple per-material rules create complex emergent behavior
+
+Conservation:
+- Cell count is exactly conserved (no creation/destruction)
+- Mass is not conserved during phase transitions (realistic)
+- Reflecting boundaries prevent material loss
+
+Key simplifications for speed:
+- No rigid body groups or cohesion
+- No surface tension (meaningless at 50m scale)
+- Simple velocity-based movement
+- Material properties determine all behavior
+
+
 ## Theory
 
 ### State Variables
@@ -33,7 +89,11 @@ P(x,y,t)    - Pressure [Pa]
 
 ### Governing Equations
 
-#### 1. Mass Conservation (Continuity Equation)
+#### 1. Transport (Mass, Momentum, and Multi-Material)
+
+The foundation of our simulation is the coupled transport of mass, momentum, and multiple materials through the grid. These conservation laws ensure physically correct behavior.
+
+Mass Conservation (Continuity Equation)
 ```
 ∂ρ/∂t + ∇·(ρv) = 0
 ```
@@ -43,14 +103,31 @@ In flux form:
 ∂ρ/∂t = -[∂(ρvx)/∂x + ∂(ρvy)/∂y]
 ```
 
-#### 2. Momentum Conservation
+This ensures that mass is neither created nor destroyed, only transported between cells.
+
+Momentum Conservation
 ```
 ∂(ρv)/∂t + ∇·(ρvv) = -∇P + ρg
 ```
 
-Where g includes both self-gravity and any external gravity fields.
+Where g includes both self-gravity and any external gravity fields. This governs how velocity evolves due to pressure gradients, gravity, and advection.
 
-#### 3. Self-Gravity
+Multi-Material Transport
+Each material's volume fraction evolves according to:
+```
+∂φᵢ/∂t + ∇·(φᵢv) = 0
+```
+
+With the constraint: Σφᵢ = 1 (volume fractions sum to unity)
+
+Additionally, we must conserve thermal energy during transport:
+```
+∂(φᵢρᵢcₚᵢT)/∂t + ∇·(φᵢρᵢcₚᵢTv) = 0
+```
+
+This ensures that when materials with different temperatures mix, the resulting temperature is correctly computed from energy conservation.
+
+#### 2. Self-Gravity
 The gravitational potential Φ satisfies Poisson's equation:
 ```
 ∇²Φ = 4πGρ
@@ -61,7 +138,7 @@ With gravitational acceleration:
 g = -∇Φ
 ```
 
-#### 4. Pressure and Incompressibility
+#### 3. Pressure and Incompressibility
 
 The naive approach to pressure would be:
 
@@ -156,26 +233,24 @@ In summary, the projection loop is:
 
 MAC staggered grid means that we use the velocity components on the faces vs the pressure/density/temperature at the cell centers.
 
-#### 5. Heat Transfer
-Energy conservation with thermal diffusion:
+#### 4. Heat Transfer
+Energy conservation with advection and diffusion:
 ```
 ∂(ρcₚT)/∂t + ∇·(ρcₚTv) = ∇·(k∇T) + Q
 ```
 
 Where:
 - cₚ = specific heat capacity
-- k = thermal conductivity
+- k = thermal conductivity  
 - Q = heat sources (radioactive decay, etc.)
 
-#### 6. Multi-Material Transport
-Each material's volume fraction evolves by:
-```
-∂φᵢ/∂t + ∇·(φᵢv) = 0
-```
+This is solved using operator splitting:
+1. Advection: Solve `∂(ρcₚT)/∂t + ∇·(ρcₚTv) = 0` together with material transport
+2. Diffusion: Solve `∂(ρcₚT)/∂t = ∇·(k∇T) + Q` using alternating direction implicit (ADI) or multigrid methods
 
-With constraint: Σφᵢ = 1
+The advection step conserves total thermal energy E = Σ(φᵢρᵢcₚᵢT) while the diffusion step redistributes it.
 
-#### 7. Solar Heating
+#### 5. Solar Heating
 Solar radiation provides the primary external energy input:
 ```
 Q_solar = I₀ × (1 - albedo) × absorption_coefficient
@@ -186,7 +261,7 @@ Where:
 - albedo = material reflectance (0-1)
 - absorption_coefficient = material-dependent absorption
 
-#### 8. Radiative Cooling
+#### 6. Radiative Cooling
 All materials emit thermal radiation according to Stefan-Boltzmann law:
 ```
 Q_radiative = -ε σ (T⁴ - T_space⁴)
@@ -198,7 +273,7 @@ Where:
 - T = material temperature (K)
 - T_space = 2.7 K (cosmic background)
 
-#### 9. Material Phase Transitions
+#### 7. Material Phase Transitions
 Materials transform based on temperature and pressure conditions:
 ```
 Rate = f(T, P) × φ_source
@@ -216,7 +291,7 @@ Physical rate = freeze_thaw_cycles × thermal_stress
 ```
 Where water_factor = 3.0 if water is present
 
-### Mixture Properties
+### 8. Mixture Properties
 For cells containing multiple materials:
 ```
 ρ = Σ(φᵢρᵢ)                    # Volume-weighted density
@@ -235,7 +310,8 @@ Cell (i,j):
 - Center: stores ρ, v, T, P, φ
 - Faces: compute fluxes F
 
-Grid spacing: Δx = Δy = dx
+Cell in-plane dimensions: Δx = Δy = dx
+Cell out-of-plane dimensions: Δz = thickness
 Time step: Δt (CFL limited)
 ```
 
@@ -290,9 +366,89 @@ def timestep(state, dt):
     apply_phase_changes(state)
 ```
 
-### Flux Computation
+### Geometric Multigrid
 
-The key innovation is computing fluxes at cell faces:
+We use geometric multigrid for several problems, and so we wanted to go through it in detail once in this section.
+
+The key insight: iterative methods like Gauss-Seidel quickly smooth high-frequency errors but are slow at reducing low-frequency (smooth) errors. Multigrid accelerates convergence by:
+1. Smoothing on the fine grid to reduce high-frequency errors
+2. Transferring the problem to a coarser grid where low-frequency errors become high-frequency
+3. Solving on the coarse grid (where it's cheaper)
+4. Transferring the correction back to the fine grid
+
+Geometric multigrid attacks low-frequency (smooth) error on coarser grids and high-frequency error on finer grids.
+
+A cycle is the pattern in which the solver moves down (restrict) and up (prolong) through this grid hierarchy.
+
+Our implementation uses a V-cycle, which looks like:
+
+```
+Fine grid (100×100):    Smooth → Restrict ↘
+                                           ↘
+Coarse grid (50×50):                        Smooth → Restrict ↘
+                                                               ↘
+Coarsest grid (25×25):                                          Solve
+                                                               ↗
+Coarse grid (50×50):                        Smooth ← Prolong ↗
+                                           ↗
+Fine grid (100×100):    Smooth ← Prolong ↗
+```
+
+The components in this cycle are:
+
+1. Smoother: Red-Black Gauss-Seidel or Jacobi
+   - Updates grid points in a checkerboard pattern (red points, then black points)
+   - Gauss-Seidel updates per: `P[i,j] = (P[i±1,j] + P[i,j±1] - h²·RHS[i,j])/4`
+   - Chosen because it parallelizes well and has good smoothing properties
+
+2. Restriction: Full-Weighting (fine → coarse)
+   - Averages 2×2 blocks of fine grid cells to create one coarse cell
+   - `P_coarse[i,j] = (P_fine[2i,2j] + P_fine[2i+1,2j] + P_fine[2i,2j+1] + P_fine[2i+1,2j+1])/4`
+   - Properly handles odd-sized grids by padding
+
+3. Prolongation: Bilinear Interpolation (coarse → fine)
+   - Interpolates coarse grid values back to fine grid
+   - Direct injection at coincident points
+   - Linear interpolation along edges
+   - Bilinear interpolation at cell centers
+
+The solver visits the coarsest level once per cycle – like the letter V. This is usually enough when the right-hand-side (density field) is smooth.
+
+An F-cycle is more aggressive:
+
+```
+F-cycle (4 levels shown)
+
+L0 → L1 → L2 → L3
+       ▲    │
+       │    └── back down to L2, relax, then up
+       └────────── up to L1, relax, down again
+finally back to L0
+```
+
+The F-cycle re-visits the coarser grids multiple times, scrubbing out stubborn smooth error that appears when the density field has sharp contrasts. The F-cycle does ~30 % more relaxation work, so we don't use it by default.
+
+A concise mental model is:
+- Jacobi (or red–black Gauss–Seidel) smoothing damps high-frequency error; plain Gauss–Seidel converges roughly twice as fast but is less parallel-friendly.
+- Multigrid then transfers the remaining smooth error to coarser levels where it appears high-frequency again and is removed cheaply.
+- The V-cycle is the minimal single-pass walk through the hierarchy.
+- The F-cycle is a double-scrub that revisits coarse grids for extra smoothing.
+
+Multigrid is fast because ite requires fewer operations:
+- Direct methods (Gaussian elimination): O(N³) operations
+- Simple iterative (Gauss-Seidel alone): O(N²) operations  
+- Multigrid: O(N) operations - optimal!
+
+For a 100×100 grid:
+- Direct: ~1,000,000,000 operations
+- Gauss-Seidel: ~1,000,000 operations per iteration × many iterations
+- Multigrid: ~10,000 operations per V-cycle × 10-20 cycles = ~200,000 total
+
+### Transport Implementation
+
+The transport implementation combines mass conservation, momentum conservation, and multi-material advection into a unified flux-based approach.
+
+Flux is computed at cell faces:
 
 ```python
 def compute_mass_flux(density, velocity, dt, dx):
@@ -317,9 +473,7 @@ def compute_mass_flux(density, velocity, dt, dx):
     return flux_x
 ```
 
-### Material Transport
-
-Each material is advected with the flow:
+Material is advected with the flow:
 
 ```python
 def advect_materials_flux(state, dt):
@@ -352,7 +506,49 @@ def advect_materials_flux(state, dt):
     update_mixture_density(state)
 ```
 
-### Pressure Projection Implementation
+Temperature is advected as energy density to ensure energy conservation:
+
+```python
+def advect_temperature(state, dt):
+    # Compute energy density E = Σ(φᵢρᵢcₚᵢT)
+    E = sum(phi[i] * rho[i] * cp[i] * T for i in materials)
+    
+    # Advect E using same upwind scheme as materials
+    E_new = upwind_advection(E, velocity, dt)
+    
+    # Recover temperature from total thermal mass
+    thermal_mass = sum(phi[i] * rho[i] * cp[i] for i in materials)
+    T_new = E_new / thermal_mass  # Handle zero mass carefully
+```
+
+This unified approach ensures:
+- Exact mass conservation through flux divergence
+- Momentum conservation through velocity advection
+- Energy conservation through temperature advection
+- Consistent treatment of all transported quantities
+
+### Self-Gravity
+
+Two fast numerical schemes are available:
+
+FFT Poisson solver
+  - Fast O(N log N) for uniform Cartesian grids with periodic or free-space boundary handling by zeroing the k=0 mode.
+  - Recommended for standard rectangular planets.
+  - Not recommended when density varies sharply or the domain is non-rectangular
+  - Thus we do not use this method
+
+Geometric multigrid
+   - Robust for arbitrary boundary conditions or masked domains; typically converges in 6–8 sweeps using a V-cycle (our current default).
+   - An F-cycle (extra coarse-grid visits) can further accelerate convergence for highly heterogeneous density fields at the cost of ~1.3× work per solve.
+   - Recommended for irregular domains or when density varies sharply
+   - We use this method with a TBD mix of V-cycle vs F-cycle
+
+To mitigate ringing from sharp density jumps we optionally smooth ρ with a small Gaussian kernel (σ ≈ 0.5 cell) before the gravity solve; the full-resolution density is retained for all other physics.
+
+The solver interface returns (Φ, g_x, g_y) and caches spectral coefficients so that subsequent solves after minor density updates cost <50 % of the first call.
+
+
+### Pressure and Incompressibility
 
 Theory and notation were covered earlier; below is only the practical implementation and pitfall.
 
@@ -446,7 +642,94 @@ Summary:
 * One multigrid solve per step keeps cost O(N) and fully re-uses the gravity code.
 * Projection enforces `∇·v = 0` to machine precision, so buoyancy emerges entirely from density differences—no hand-coded hacks.
 
-### Solar Heating Implementation
+### Heat Transfer
+
+The heat equation combines advective and diffusive transport of thermal energy. We use operator splitting to solve these terms separately for efficiency and stability.
+
+For the diffusion term `∂T/∂t = ∇·(k∇T)`, we have two main approaches:
+
+1. ADI (Alternating Direction Implicit) method
+The ADI method splits the 2D diffusion into alternating 1D implicit solves:
+
+```python
+# First half-step: implicit in x, explicit in y
+for j in range(ny):
+    # Solve tridiagonal system for row j
+    solve_tridiagonal(a, b, c, d)  # O(nx) per row
+
+# Second half-step: implicit in y, explicit in x  
+for i in range(nx):
+    # Solve tridiagonal system for column i
+    solve_tridiagonal(a, b, c, d)  # O(ny) per column
+```
+
+**Advantages:**
+- Unconditionally stable (can use large Δt)
+- O(N) complexity per timestep
+- Well-suited for parabolic PDEs like heat diffusion
+- Simple implementation with banded matrix solver
+
+**Disadvantages:**
+- Splitting error (though second-order accurate)
+- Less efficient for highly anisotropic conductivity
+
+2. Multigrid method
+
+Multigrid solves the implicit system `(I - Δt∇·(k∇))T^{n+1} = T^n + ΔtQ` directly:
+
+```python
+# Full implicit discretization leads to linear system
+# A * T_new = T_old + dt * Q
+# where A = I - dt * L (L is discrete Laplacian)
+
+def multigrid_heat_solver(T_old, dt, k, Q):
+    # V-cycle with smoothing at each level
+    return multigrid_v_cycle(A, T_old + dt*Q)
+```
+
+**Advantages:**
+- Handles variable/anisotropic conductivity naturally
+- Can achieve higher accuracy
+- Scales well to very large grids
+
+**Disadvantages:**
+- More complex implementation
+- Higher computational cost per timestep (~10x slower than ADI)
+- Overkill for simple diffusion problems
+
+3. Explicit Methods (not used)
+Standard explicit finite difference: `T^{n+1} = T^n + Δt·α·∇²T^n`
+
+**Why rejected:**
+- Severe timestep restriction: Δt < 0.25·Δx²/α (CFL condition)
+- For typical parameters: Δt < 0.001s (impractical)
+- Would require 1000x more timesteps than implicit methods
+
+4. Spectral Methods (FFT) (not used)
+Solve in Fourier space where derivatives become multiplications.
+
+**Why rejected:**
+- Requires periodic boundary conditions (unrealistic for geology)
+- Cannot handle variable material properties
+- Poor performance with mixed materials
+
+Temperature advection is handled together with material transport as described in the Transport Implementation section above.
+
+#### Timestep Selection
+
+The overall timestep is limited by the fastest physical process:
+
+```
+Δt = min(
+    CFL_advection,     # 0.5 * dx / max(|v|)
+    CFL_gravity_wave,  # 0.5 * dx / sqrt(g*H)
+    diffusion_limit    # Not needed for implicit methods
+)
+```
+
+With ADI or multigrid, thermal diffusion doesn't limit the timestep, allowing much larger steps than explicit methods.
+
+### Solar Heating
 
 The DDA (Digital Differential Analyzer) ray-marching algorithm efficiently traces solar rays:
 
@@ -486,75 +769,235 @@ Material absorption coefficients:
 - ICE: 0.01 (semi-transparent)
 - Rocks/solids: 1.0 (opaque)
 
-### Radiative Cooling Implementation
+### Radiative Cooling
 
-Radiative cooling with greenhouse effect:
+Radiative cooling implements the Stefan-Boltzmann law for thermal radiation from materials to space. We offer two numerical methods for solving this highly nonlinear cooling term, both integrated within an operator-splitting framework for stability.
 
-```python
-def apply_radiative_cooling(state):
-    """Apply Stefan-Boltzmann cooling with greenhouse effect"""
-    
-    for i in range(nx):
-        for j in range(ny):
-            # Skip space cells
-            if state.density[i,j] < vacuum_threshold:
-                continue
-                
-            # Compute effective emissivity from mixture
-            emissivity = compute_mixture_emissivity(state.vol_frac[:,i,j])
-            
-            # Stefan-Boltzmann law
-            cooling = emissivity * STEFAN_BOLTZMANN * (
-                state.temperature[i,j]**4 - T_SPACE**4
-            )
-            
-            # Greenhouse effect from water vapor column
-            vapor_column = compute_vapor_column_above(state, i, j)
-            greenhouse_factor = 0.1 + 0.5 * tanh(log(1 + vapor_column/1.0) / 10)
-            
-            # Apply cooling
-            state.heat_source[i,j] -= cooling * (1 - greenhouse_factor)
+#### Mathematical Formulation
+
+The radiative cooling rate follows the Stefan-Boltzmann law noted earlier. There are two methods that we implement for solving the problem.
+
+1. Newton-Raphson Implicit (Default)
+
+Solves the nonlinear equation implicitly:
+```
+T_new - T_old + dt·α·(T_new⁴ - T_space⁴) = 0
 ```
 
-### Atmospheric Processes
+Where α = ε·σ / (ρ·cp·thickness)
 
-The atmosphere requires special handling for realistic behavior:
-
+Implementation:
 ```python
-def enhance_atmospheric_diffusion(state):
-    """Apply enhanced mixing to atmospheric cells"""
-    
-    # Identify atmospheric cells (air and water vapor)
-    atmos_mask = (state.vol_frac[AIR] > 0.5) | (state.vol_frac[WATER_VAPOR] > 0.5)
-    
-    # Enhanced diffusion coefficient (3x for turbulence)
-    state.thermal_diffusivity[atmos_mask] *= 3.0
-    state.momentum_diffusivity[atmos_mask] *= 3.0
+def solve_radiative_cooling_newton_raphson(T_old, dt, emissivity):
+    T_new = T_old  # Initial guess
+    for iteration in range(3):  # Usually converges in 2-3 iterations
+        f = T_new - T_old + dt*alpha*(T_new**4 - T_space**4)
+        df_dT = 1 + dt*alpha*4*T_new**3
+        T_new -= f / df_dT
+        if abs(f) < tolerance:
+            break
+    return T_new
 ```
 
-Greenhouse effect calculation:
-```python
-def compute_greenhouse_factor(vapor_column):
-    """Compute greenhouse trapping from water vapor"""
-    base = 0.1      # Minimum greenhouse effect
-    max_factor = 0.6 # Maximum greenhouse effect
-    scale = 1.0      # kg/m² scaling factor
-    
-    # Smooth transition using tanh
-    return base + (max_factor - base) * np.tanh(np.log(1 + vapor_column/scale) / 10)
+Advantages:
+- Unconditionally stable for any timestep
+- Exact solution of Stefan-Boltzmann law
+- Handles large temperature differences correctly
+
+Disadvantages:
+- Requires 2-3 iterations per cell
+- More computationally expensive than linearized method
+
+2. Linearized Stefan-Boltzmann
+
+Approximates the nonlinear cooling term using Taylor expansion around a reference temperature:
+```
+Q ≈ h·(T - T_space)
 ```
 
-## Key Advantages Over CA Approach
+Where h = 4·σ·ε·T_ref³ is the linearized heat transfer coefficient.
 
-### 1. Continuous Mass Transport
+The reference temperature T_ref is chosen dynamically:
+```
+T_ref = max(T_current, 300K)
+```
 
-**CA Problem**: Cell swapping is binary - either swap or don't. This creates:
+This choice optimizes linearization accuracy:
+- For T > 300K: Uses actual temperature, giving exact derivative at the operating point
+- For T < 300K: Uses 300K floor to maintain reasonable cooling rates for cold cells
+
+The 300K floor prevents the heat transfer coefficient from becoming vanishingly small for very cold cells, ensuring meaningful cooling rates even as temperatures approach T_space.
+
+Implementation:
+```python
+def solve_radiative_cooling_linearized(T_old, dt, emissivity):
+    T_ref = max(T_old, 300.0)  # Dynamic reference temperature
+    h_effective = 4 * STEFAN_BOLTZMANN * emissivity * T_ref**3
+    cooling_rate = h_effective * (T_old - T_space) / (rho * cp * thickness)
+    return T_old - dt * cooling_rate
+```
+
+Advantages:
+- Single calculation per cell (no iterations)
+- Very fast execution
+- Stable for reasonable timesteps
+
+Disadvantages:
+- Less accurate for large temperature differences
+- May underestimate cooling at very high temperatures
+
+We modulate the radiative cooling by the greenhouse effect. The atmosphere traps some outgoing radiation based on water vapor content:
+
+```python
+def apply_greenhouse_effect(cooling, i, j):
+    # Calculate water vapor column above this cell
+    vapor_column = compute_vapor_column_above(state, i, j)
+    
+    # Greenhouse factor: 0.1 (min) to 0.6 (max) absorption
+    greenhouse_factor = 0.1 + 0.5 * tanh(log(1 + vapor_column/1.0) / 10)
+    
+    # Reduce cooling by trapped radiation
+    effective_cooling = cooling * (1 - greenhouse_factor)
+    return effective_cooling
+```
+
+The tanh function provides a smooth transition from minimal greenhouse effect (dry atmosphere) to significant trapping (humid atmosphere).
+
+Both methods are integrated into the operator-splitting framework, ensuring overall stability of the heat equation solver.
+
+### Material Phase Transitions
+
+Material phase transitions implement state changes based on temperature and pressure conditions, with proper handling of latent heat and volume conservation.
+
+The phase transition system uses a rule-based approach where each material can define multiple transition pathways:
+
+```python
+@dataclass
+class TransitionRule:
+    target: MaterialType          # Destination material
+    temp_min: float              # Minimum temperature (K)
+    temp_max: float              # Maximum temperature (K)  
+    pressure_min: float          # Minimum pressure (Pa)
+    pressure_max: float          # Maximum pressure (Pa)
+    rate: float                  # Transition rate (fraction/second)
+    latent_heat: float = 0.0    # J/kg (positive = exothermic, negative = endothermic)
+    water_required: bool = False # Requires water presence
+    description: str = ""        # Human-readable description
+```
+
+The phase transition system processes all materials each timestep:
+
+1. Condition Checking: For each material with defined transitions, check if T-P conditions are met
+2. Rate Calculation: Apply transition rate limited by available material
+3. Volume Transfer: Move volume fractions between materials
+4. Latent Heat: Apply energy changes to maintain conservation
+5. Normalization: Ensure volume fractions sum to 1.0
+
+```python
+def apply_transitions(state, dt):
+    # Check each material's transition rules
+    for source_type, rules in transitions.items():
+        for rule in rules:
+            # Find cells meeting conditions
+            mask = (T >= rule.temp_min) & (T <= rule.temp_max) &
+                   (P >= rule.pressure_min) & (P <= rule.pressure_max) &
+                   (vol_frac[source] > 0)
+            
+            # Calculate transition amount
+            rate = min(rule.rate * dt, 1.0)
+            amount = vol_frac[source] * rate
+            
+            # Apply transition
+            vol_frac[source][mask] -= amount[mask]
+            vol_frac[target][mask] += amount[mask]
+            
+            # Apply latent heat
+            heat = rule.latent_heat * density[source] * amount
+            temperature += heat / (density * specific_heat)
+```
+
+The water system demonstrates the full complexity of phase transitions:
+
+Water → Ice (Freezing)
+- **Conditions**: T < 273.15K
+- **Rate**: 0.1/s (10% per second)
+- **Latent heat**: +334 kJ/kg (releases heat)
+- **Physics**: Crystallization releases energy, warming surroundings
+
+Ice → Water (Melting)
+- **Conditions**: T > 273.15K
+- **Rate**: 0.1/s
+- **Latent heat**: -334 kJ/kg (absorbs heat)
+- **Physics**: Breaking crystal structure requires energy
+
+Water → Water Vapor (Evaporation)
+- **Conditions**: T > 373.15K
+- **Rate**: 0.05/s (5% per second)
+- **Latent heat**: -2,260 kJ/kg (strongly endothermic)
+- **Physics**: Phase change to gas requires significant energy
+
+Water Vapor → Water (Condensation)
+- **Conditions**: T < 373.15K
+- **Rate**: 0.05/s
+- **Latent heat**: +2,260 kJ/kg (releases heat)
+- **Physics**: Condensation releases large amounts of energy
+
+Simiilarly rock has several transitions.
+
+Rock → Sand (Weathering)
+- **Conditions**: Any temperature, P < 100 kPa, water required
+- **Rate**: 1e-7/s (geological timescale)
+- **Special**: Requires water presence for chemical weathering
+- **Physics**: Chemical and mechanical breakdown of rock
+
+Sand → Rock (Lithification)
+- **Conditions**: T > 673K, P > 10 MPa
+- **Rate**: 1e-8/s (very slow)
+- **Physics**: Compaction and cementation under pressure
+
+Rock → Magma (Melting)
+- **Conditions**: T > 1473K
+- **Rate**: 0.01/s
+- **Latent heat**: -400 kJ/kg (endothermic)
+- **Physics**: Solid to liquid transition
+
+Magma → Rock (Crystallization)
+- **Conditions**: T < 1273K
+- **Rate**: 0.01/s
+- **Latent heat**: +400 kJ/kg (exothermic)
+- **Physics**: Cooling magma crystallizes, releasing heat
+
+Latent heat is carefully tracked to ensure energy conservation:
+
+1. **Endothermic transitions** (melting, evaporation) cool the cell
+2. **Exothermic transitions** (freezing, condensation) warm the cell
+3. Heat changes are applied based on the actual mass transitioning
+
+This creates realistic thermal effects:
+- Ice formation releases heat, slowing further freezing
+- Evaporation cools surfaces (evaporative cooling)
+- Magma crystallization releases heat, creating thermal aureoles
+
+The system ensures stability through:
+- Rate limiting to prevent overshooting (max 100% transition per timestep)
+- Volume fraction normalization after all transitions
+- Proper handling of competing transitions
+- Conservation checks for mass and energy
+
+## Flux vs cellular automata (CA) approaches
+
+Initially this project used a CA approach which had numerous problems.
+
+1. Continuous Mass Transport
+
+CA Problem - cell swapping is binary. This creates:
 - Quantization noise in flow
 - Unclear criteria for when to swap
 - Mass not conserved (different materials have different densities)
 - Difficulty achieving hydrostatic equilibrium
 
-**Flux Solution**: Transport arbitrary amounts of mass:
+Flux solution: transport an arbitrary amount of mass.
+
 ```python
 # CA approach (problematic)
 if should_swap(cell1, cell2):
@@ -566,19 +1009,19 @@ cell1.mass -= mass_to_move
 cell2.mass += mass_to_move
 ```
 
-### 2. Consistent Pressure-Velocity Coupling
+2. Consistent Pressure-Velocity Coupling
 
-**CA Problem**: Pressure solver and movement rules use different discretizations:
+CA Problem: Pressure solver and movement rules use different discretizations:
 - Pressure solver assumes continuous density field
 - Movement rules operate on discrete cells
 - Result: Forces don't balance at equilibrium
 
-**Flux Solution**: Same discretization throughout:
+Flux Solution: Same discretization throughout:
 - Pressure solver uses cell-centered values
 - Flux computation uses same grid
 - Forces exactly balance at equilibrium
 
-### 3. Exact Conservation
+3. Exact Conservation
 
 The flux formulation guarantees:
 ```
@@ -587,11 +1030,11 @@ Mass leaving cell (i,j) = Mass entering neighbor cells
 
 This is exact to machine precision, unlike CA swapping.
 
-### 4. Natural Multi-Material Handling
+4. Natural Multi-Material Handling
 
-**CA**: Each cell has one material - interfaces are stepped
+CA: Each cell has one material - interfaces are stepped
 
-**Flux**: Each cell can contain multiple materials with smooth transitions:
+Flux: Each cell can contain multiple materials with smooth transitions:
 ```python
 # Cell can be 70% rock, 30% water
 # Leads to realistic mixing and interfaces
