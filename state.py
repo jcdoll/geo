@@ -55,6 +55,10 @@ class FluxState:
         self.velocity_x = np.zeros((ny, nx), dtype=np.float32)
         self.velocity_y = np.zeros((ny, nx), dtype=np.float32)
         self.temperature = np.zeros((ny, nx), dtype=np.float32)
+        
+        # CRITICAL: Pressure is ONLY calculated through velocity projection method
+        # NEVER by integration, NEVER by hydrostatic approximation
+        # ONLY through the incompressible flow projection in update_momentum()
         self.pressure = np.zeros((ny, nx), dtype=np.float32)
         
         # Volume fractions for each material [n_materials, ny, nx]

@@ -55,7 +55,9 @@ class FluxSimulation:
         self.transport = FluxTransport(self.state)
             
         # Physics modules
-        self.gravity_solver = GravitySolver(self.state)
+        # Initialize gravity solver with DFT method (no boundary artifacts)
+        from gravity_solver import SolverMethod
+        self.gravity_solver = GravitySolver(self.state, method=SolverMethod.DFT)
         self.pressure_solver = PressureSolver(self.state, smoother_type)
         
         # Choose heat transfer solver
@@ -121,15 +123,32 @@ class FluxSimulation:
         self.__init__(nx, ny, dx, scenario=scenario_to_use, use_multigrid_heat=use_multigrid, smoother_type=smoother)
         
     def _solve_initial_state(self):
-        """Solve gravity and pressure fields for initial state."""
-        # Solve gravity field
+        """Solve gravity, pressure, and velocity fields for initial state.
+        
+        CRITICAL: Pressure is ONLY EVER calculated through velocity projection method.
+        
+        NEVER NEVER NEVER calculate pressure by:
+        - Integration (e.g., P = P₀ + ∫ρg dy) - THIS IS WRONG
+        - Hydrostatic approximation - THIS IS WRONG
+        - Any direct solving - THIS IS WRONG
+        
+        The velocity projection method in update_momentum() is the ONLY correct way.
+        It works even with zero initial velocity - the projection enforces incompressibility
+        and produces the correct pressure field.
+        """
+        # Step 1: Solve gravity field
         gx, gy = self.gravity_solver.solve_gravity()
         self.state.gravity_x[:] = gx
         self.state.gravity_y[:] = gy
         
-        # For initial state, we just need gravity solved
-        # Velocity starts at zero which is appropriate for initial conditions
-        # Pressure will be computed during first timestep
+        # Step 2: Solve for pressure-velocity coupling
+        # Use a small timestep for initialization
+        dt_init = 0.01  # Small timestep for initialization
+        
+        # Update momentum with gravity - the velocity projection method
+        # will solve for the pressure field that enforces incompressibility
+        # This works even starting from zero velocity!
+        self.physics.update_momentum(gx, gy, dt_init)
         
     def step_forward(self):
         """Execute one simulation timestep."""
