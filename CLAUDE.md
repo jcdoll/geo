@@ -10,6 +10,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 3. Check for basic errors like AttributeError, ImportError, etc.
 4. If you get an error, iterate and fix it - don't leave broken code
 
+## CRITICAL: Pressure Calculation
+
+**PRESSURE IS ONLY EVER CALCULATED THROUGH VELOCITY PROJECTION METHOD**
+
+**NEVER NEVER NEVER calculate pressure by:**
+- Integration (e.g., P = P₀ + ∫ρg dy) - WRONG
+- Hydrostatic approximation - WRONG  
+- Direct solving of any kind - WRONG
+
+**The ONLY correct way:** The velocity projection method in `physics.update_momentum()` which enforces incompressibility. This is the ONLY way pressure is ever calculated.
+
 ## Important: Read AGENTS.md First
 
 Before making any changes, **read `AGENTS.md`** which contains:
@@ -219,6 +230,14 @@ except ImportError:
 - GPU acceleration for field solvers
 
 ## Known Issues
+
+### Gravity Solver Asymmetry
+- **Issue**: The multigrid gravity solver shows bright bands (2-3 pixels wide) on right/bottom boundaries
+- **Root Cause**: The Neumann BC implementation creates artificial plateaus at boundaries, leading to incorrect gradients in cells adjacent to boundaries
+- **Details**: When computing gradients near boundaries, the copied boundary values create one-sided differences that appear as bright bands in the gravity visualization
+- **Partial Fix**: Using one-sided differences near boundaries helps but doesn't eliminate the underlying asymmetry in the potential field
+- **Proper Solution**: The CA codebase uses FFT-based solver with Dirichlet BC (φ=0 at boundaries) which is more appropriate for isolated masses in space
+- **TODO**: Replace multigrid gravity solver with FFT-based implementation from ca/gravity_solver.py
 
 ### Surface Tension
 - **REMOVED FROM CODEBASE**: Surface tension is fundamentally incompatible with geological-scale grids (50m cells)

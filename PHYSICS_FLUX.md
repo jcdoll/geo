@@ -147,6 +147,23 @@ With gravitational acceleration:
 g = -∇Φ
 ```
 
+**Implementation**: The flux-based simulation supports two methods for solving the gravity Poisson equation:
+
+1. **DFT (Discrete Fourier Transform) - Default**
+   - Uses Discrete Sine Transform (DST-II) for fast, accurate solution
+   - Assumes Dirichlet boundary conditions (Φ = 0 at boundaries)
+   - Appropriate for isolated bodies in vacuum
+   - O(N log N) complexity, highly optimized
+   - No boundary artifacts
+
+2. **Multigrid - Alternative** 
+   - Flexible boundary condition support (Neumann/Dirichlet)
+   - O(N) complexity but currently slower due to implementation issues
+   - Has known issues with Neumann BC causing bright bands on boundaries
+   - Available for future improvements
+
+The DFT method is preferred due to its accuracy and lack of boundary artifacts. The slight asymmetry (~5%) in computed gravity fields comes from the gradient computation using numpy.gradient, not the potential solver itself.
+
 #### 3. Pressure and Incompressibility
 
 The naive approach to pressure would be:
@@ -350,8 +367,8 @@ def flux_based_simulation():
 
 ```python
 def timestep(state, dt):
-    # 1. Self-gravity (existing multigrid solver)
-    gx, gy = solve_gravity_multigrid(state.density)
+    # 1. Self-gravity (DFT solver by default)
+    gx, gy = gravity_solver.solve_gravity()  # Uses DFT method
     
     # 2. Update momentum with MAC projection
     # This handles the predictor-corrector split internally:
@@ -1090,7 +1107,7 @@ state = {
 ## Expected Performance
 
 For 128×128 grid with 9 materials:
-- Gravity solve: 15ms (existing)
+- Gravity solve: 15ms (DFT method)
 - Pressure solve: 15ms (existing)
 - Material flux: 5ms (new)
 - Momentum update: 2ms
