@@ -26,8 +26,12 @@ class GravitySolver:
             state: FluxState instance
         """
         self.state = state
-        self.G = 6.67430e-11  # Gravitational constant
-        self.use_self_gravity = False  # Default to uniform Earth gravity
+        # For geological simulation, scale up G to get reasonable gravity values
+        # Real G = 6.67430e-11 produces tiny values for km-scale features
+        self.G_real = 6.67430e-11  # Real gravitational constant
+        self.G_scale = 10000  # Scaling factor for Earth-like gravity (~10 m/s²)
+        self.G = self.G_real * self.G_scale  # Scaled gravitational constant
+        self.use_self_gravity = True  # Default to self-gravity for realistic simulation
         
     def solve_gravity(self) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -67,7 +71,7 @@ class GravitySolver:
         return gx, gy
         
     def solve_poisson(self, rhs: np.ndarray, dx: float, 
-                      max_iter: int = 50, tol: float = 1e-6) -> np.ndarray:
+                      max_iter: int = 15, tol: float = 5e-2) -> np.ndarray:
         """
         Solve Poisson equation using MAC multigrid.
         
@@ -97,9 +101,6 @@ class GravitySolver:
             tol=tol,
             max_cycles=max_iter
         )
-        
-    def smooth(self, phi: np.ndarray, rhs: np.ndarray, h: float, 
-               n_smooth: int = 1) -> np.ndarray:
         """
         Gauss-Seidel smoothing iterations.
         

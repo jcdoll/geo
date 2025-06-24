@@ -280,3 +280,13 @@ The flux-based simulation provides a more physically accurate model using contin
 - **Target**: 100+ FPS for 100x100 grids
 - **Achieved**: 640 FPS with optimized transport
 - **Bottlenecks**: Heat diffusion (54%), gravity solve (15%)
+
+### Heat Transfer Methods
+- **ADI (Alternating Direction Implicit)**: Current default in `heat_transfer.py`
+  - ~30ms for 100x100 grid
+  - Unconditionally stable for diffusion
+  - Excellent performance for parabolic PDEs
+- **Multigrid**: Alternative in `heat_transfer_multigrid.py`
+  - ~300ms for 100x100 grid (10x slower than ADI)
+  - Better suited for elliptic problems (pressure/gravity)
+  - Not recommended for heat diffusion

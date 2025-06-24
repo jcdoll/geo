@@ -19,13 +19,13 @@ def setup_empty_world(state: 'FluxState', material_db: MaterialDatabase):
     """Create an empty world with just space."""
     state.vol_frac.fill(0.0)
     state.vol_frac[MaterialType.SPACE.value] = 1.0
-    state.temperature.fill(273.0)  # 0°C
+    state.temperature.fill(2.7)  # CMB temperature
     state.normalize_volume_fractions()
     state.update_mixture_properties(material_db)
 
 
 def setup_planet(state: 'FluxState', material_db: MaterialDatabase):
-    """Create a simple circular planet with atmosphere."""
+    """Create a realistic planet with uranium core, rock mantle, surface oceans, and atmosphere."""
     nx, ny = state.nx, state.ny
     
     # Initialize everything as space first
@@ -34,35 +34,89 @@ def setup_planet(state: 'FluxState', material_db: MaterialDatabase):
     
     # Create circular planet
     cx, cy = nx // 2, ny // 2
-    radius = min(nx, ny) // 3
+    planet_radius = min(nx, ny) // 3
     
     y_grid, x_grid = np.ogrid[:ny, :nx]
     dist_from_center = np.sqrt((x_grid - cx)**2 + (y_grid - cy)**2)
     
-    # Rock core
-    rock_mask = dist_from_center < radius
+    # Define radial zones
+    core_radius = planet_radius * 0.3      # Uranium core
+    mantle_radius = planet_radius * 0.8    # Rock mantle
+    surface_radius = planet_radius         # Surface (rock with oceans)
+    atmos_thickness = 5                    # Atmosphere thickness
+    
+    # Uranium core (bright green)
+    core_mask = dist_from_center < core_radius
+    state.vol_frac[MaterialType.SPACE.value][core_mask] = 0.0
+    state.vol_frac[MaterialType.URANIUM.value][core_mask] = 1.0
+    
+    # Add some magma near core-mantle boundary
+    magma_mask = (dist_from_center >= core_radius * 0.9) & (dist_from_center < core_radius * 1.2)
+    # Random magma pockets
+    np.random.seed(42)
+    magma_prob = np.random.random((ny, nx))
+    magma_mask = magma_mask & (magma_prob < 0.3)
+    state.vol_frac[MaterialType.URANIUM.value][magma_mask] = 0.0
+    state.vol_frac[MaterialType.MAGMA.value][magma_mask] = 1.0
+    
+    # Rock mantle
+    mantle_mask = (dist_from_center >= core_radius) & (dist_from_center < surface_radius)
+    # Don't overwrite existing magma
+    rock_mask = mantle_mask & (state.vol_frac[MaterialType.MAGMA.value] == 0)
     state.vol_frac[MaterialType.SPACE.value][rock_mask] = 0.0
     state.vol_frac[MaterialType.ROCK.value][rock_mask] = 1.0
     
-    # Thin atmosphere  
-    atmos_mask = (dist_from_center >= radius) & (dist_from_center < radius + 5)
+    # Surface features - distributed oceans
+    surface_mask = (dist_from_center >= surface_radius - 5) & (dist_from_center < surface_radius)
+    # Create random ocean distribution
+    ocean_prob = np.random.random((ny, nx))
+    # Make oceans more likely at certain angles for variety
+    angle = np.arctan2(y_grid - cy, x_grid - cx)
+    ocean_bias = 0.5 + 0.3 * np.sin(3 * angle)  # Creates 3 ocean "lobes"
+    ocean_mask = surface_mask & (ocean_prob < ocean_bias) & (ocean_prob < 0.4)
+    state.vol_frac[MaterialType.ROCK.value][ocean_mask] = 0.0
+    state.vol_frac[MaterialType.WATER.value][ocean_mask] = 1.0
+    
+    # Add some mountain peaks with ice (optional)
+    mountain_prob = np.random.random((ny, nx))
+    mountain_mask = surface_mask & (mountain_prob < 0.05) & (~ocean_mask)
+    # Mountains are just taller rock, but we can add ice caps
+    ice_mask = mountain_mask & (dist_from_center < surface_radius - 2)
+    state.vol_frac[MaterialType.ROCK.value][ice_mask] = 0.5
+    state.vol_frac[MaterialType.ICE.value][ice_mask] = 0.5
+    
+    # Atmosphere
+    atmos_mask = (dist_from_center >= surface_radius) & (dist_from_center < surface_radius + atmos_thickness)
     state.vol_frac[MaterialType.SPACE.value][atmos_mask] = 0.0
     state.vol_frac[MaterialType.AIR.value][atmos_mask] = 1.0
     
-    # Add some water on surface (pools)
-    water_mask = (dist_from_center >= radius - 8) & (dist_from_center < radius - 2) & (y_grid > cy)
-    state.vol_frac[MaterialType.ROCK.value][water_mask] = 0.0
-    state.vol_frac[MaterialType.WATER.value][water_mask] = 1.0
+    # Set initial temperature - space should be at CMB temperature
+    state.temperature.fill(2.7)  # CMB temperature for space
     
-    # Set initial temperature
-    state.temperature.fill(288.0)  # 15°C
+    # Only set non-space regions to Earth-like temperatures
+    non_space_mask = state.vol_frac[MaterialType.SPACE.value] < 0.9
+    state.temperature[non_space_mask] = 288.0  # 15°C surface temperature
     
-    # Temperature gradient - hotter at depth
+    # Temperature gradient - much hotter at depth
     for j in range(ny):
         for i in range(nx):
-            if rock_mask[j, i]:
-                depth = dist_from_center[j, i] / radius
-                state.temperature[j, i] = 288 + (1 - depth) * 500  # Hotter toward center
+            dist = dist_from_center[j, i]
+            if dist < surface_radius:
+                # Linear temperature increase toward core
+                depth_fraction = 1.0 - (dist / surface_radius)
+                # Surface: 288K, Core: ~2000K
+                state.temperature[j, i] = 288 + depth_fraction * 1700
+                
+                # Extra heat in uranium core
+                if dist < core_radius:
+                    state.temperature[j, i] += 300
+                    
+                # Magma is hot
+                if state.vol_frac[MaterialType.MAGMA.value, j, i] > 0:
+                    state.temperature[j, i] = 1500  # Molten rock temperature
+    
+    # Cool atmosphere
+    state.temperature[atmos_mask] = 250  # -23°C in upper atmosphere
     
     # Normalize and update properties
     state.normalize_volume_fractions()
@@ -157,8 +211,10 @@ def setup_volcanic_island(state: 'FluxState', material_db: MaterialDatabase):
                    chamber_y-chamber_size:chamber_y+chamber_size,
                    island_center-chamber_size:island_center+chamber_size] = 1.0
     
-    # Temperature - hot magma, cool elsewhere
-    state.temperature.fill(290.0)  # 17°C
+    # Temperature - space at CMB, materials at reasonable temps
+    state.temperature.fill(2.7)  # CMB temperature for space
+    non_space_mask = state.vol_frac[MaterialType.SPACE.value] < 0.9
+    state.temperature[non_space_mask] = 290.0  # 17°C for materials
     magma_mask = state.vol_frac[MaterialType.MAGMA.value] > 0.5
     state.temperature[magma_mask] = 1500.0  # Hot magma
     

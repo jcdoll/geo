@@ -23,7 +23,6 @@ class DisplayMode(Enum):
     VELOCITY = "velocity"
     GRAVITY = "gravity"
     POWER = "power"
-    WATER_FRACTION = "water_fraction"
 
 
 class FluxVisualizer:
@@ -65,6 +64,10 @@ class FluxVisualizer:
         self.show_help = False
         self.show_performance = False
         
+        # Store window dimensions
+        self.window_width = window_width
+        self.window_height = window_height
+        
         # Grid to screen mapping
         self.grid_surface = pygame.Surface((self.state.nx, self.state.ny))
         self.scale_x = window_width / self.state.nx
@@ -76,6 +79,7 @@ class FluxVisualizer:
         self.selected_material = MaterialType.WATER
         self.tool_radius = 5
         self.tool_intensity = 0.1
+        self.selected_cell = None  # (x, y) coordinates of selected cell for inspection
         
         # Tool types
         self.tools = [
@@ -155,6 +159,10 @@ class FluxVisualizer:
                     else:
                         self.mouse_down = True
                         self.apply_tool(event.pos, event.button)
+                elif event.button == 3:  # Right click
+                    # Select cell for inspection
+                    if event.pos[0] < self.sidebar_x:
+                        self.handle_cell_selection(event.pos)
                     
             elif event.type == pygame.MOUSEBUTTONUP:
                 if event.button == 1:
@@ -183,8 +191,14 @@ class FluxVisualizer:
         elif event.key == pygame.K_r:
             if hasattr(self.simulation, 'reset'):
                 self.simulation.reset()  # Will use last scenario
+                # CRITICAL: Update our reference to the new state object!
+                self.state = self.simulation.state
                 self.simulation.paused = True  # Start paused after reset
+                self.selected_cell = None  # Clear selected cell
                 print("Simulation reset to initial state (paused)")
+                # Force immediate render to show reset state
+                self.render()
+                pygame.display.flip()
             
         elif event.key == pygame.K_m:
             # Cycle display mode
@@ -232,10 +246,30 @@ class FluxVisualizer:
         elif event.key == pygame.K_RIGHT:
             # Step forward one frame
             if self.simulation.paused:
+                # Temporarily unpause to allow step
+                self.simulation.paused = False
                 self.simulation.step_forward()
+                self.simulation.paused = True
                 
         elif event.key == pygame.K_ESCAPE:
             self.running = False
+            
+    def handle_cell_selection(self, pos):
+        """Handle right-click cell selection for inspection."""
+        x, y = pos
+        # Convert screen coordinates to grid coordinates
+        grid_x = int(x / self.scale_x)
+        grid_y = int(y / self.scale_y)
+        
+        # Validate coordinates
+        if 0 <= grid_x < self.state.nx and 0 <= grid_y < self.state.ny:
+            # Toggle selection if clicking same cell
+            if self.selected_cell == (grid_x, grid_y):
+                self.selected_cell = None
+            else:
+                self.selected_cell = (grid_x, grid_y)
+        else:
+            self.selected_cell = None
             
     def handle_toolbar_click(self, mouse_pos: Tuple[int, int]):
         """Handle clicks on the toolbar."""
@@ -394,8 +428,6 @@ class FluxVisualizer:
             self.render_gravity()
         elif self.display_mode == DisplayMode.POWER:
             self.render_power()
-        elif self.display_mode == DisplayMode.WATER_FRACTION:
-            self.render_water_fraction()
             
         # Draw info overlay
         if self.show_info:
@@ -411,6 +443,10 @@ class FluxVisualizer:
             
         # Draw toolbar
         self.render_toolbar()
+        
+        # Draw selected cell highlight and info
+        if self.selected_cell:
+            self.render_selected_cell()
             
         pygame.display.flip()
         
@@ -459,10 +495,13 @@ class FluxVisualizer:
         
     def render_temperature(self):
         """Render temperature field."""
-        # Normalize temperature to 0-255 range
+        # Auto-scale based on actual values
         T = self.state.temperature
-        T_min, T_max = 0.0, 2000.0  # K
-        T_norm = np.clip((T - T_min) / (T_max - T_min) * 255, 0, 255).astype(np.uint8)
+        T_min, T_max = np.min(T), np.max(T)
+        if T_max > T_min:
+            T_norm = np.clip((T - T_min) / (T_max - T_min) * 255, 0, 255).astype(np.uint8)
+        else:
+            T_norm = np.ones_like(T, dtype=np.uint8) * 128
         
         # Apply colormap
         rgb = self.temp_colors[T_norm]
@@ -475,12 +514,21 @@ class FluxVisualizer:
         )
         self.screen.blit(scaled, (0, 0))
         
+        # Add scale bar
+        self.render_scale_bar(T_min, T_max, "K", "Temperature")
+        
     def render_pressure(self):
         """Render pressure field."""
-        # Normalize pressure
+        # Get pressure range
         P = self.state.pressure
-        P_max = np.max(np.abs(P)) + 1e-10
-        P_norm = np.clip(np.abs(P) / P_max * 255, 0, 255).astype(np.uint8)
+        P_min, P_max = np.min(P), np.max(P)
+        P_range = max(abs(P_min), abs(P_max))
+        
+        if P_range > 0:
+            # Normalize to show both positive and negative
+            P_norm = np.clip((P + P_range) / (2 * P_range) * 255, 0, 255).astype(np.uint8)
+        else:
+            P_norm = np.ones_like(P, dtype=np.uint8) * 128
         
         # Apply colormap
         rgb = self.pressure_colors[P_norm]
@@ -493,12 +541,20 @@ class FluxVisualizer:
         )
         self.screen.blit(scaled, (0, 0))
         
+        # Add scale bar
+        self.render_scale_bar(P_min, P_max, "Pa", "Pressure")
+        
     def render_velocity(self):
         """Render velocity magnitude."""
         # Compute velocity magnitude
         v_mag = np.sqrt(self.state.velocity_x**2 + self.state.velocity_y**2)
-        v_max = np.max(v_mag) + 1e-10
-        v_norm = np.clip(v_mag / v_max * 255, 0, 255).astype(np.uint8)
+        v_min = 0
+        v_max = np.max(v_mag)
+        
+        if v_max > 0:
+            v_norm = np.clip(v_mag / v_max * 255, 0, 255).astype(np.uint8)
+        else:
+            v_norm = np.zeros_like(v_mag, dtype=np.uint8)
         
         # Simple grayscale for now
         rgb = np.stack([v_norm, v_norm, v_norm], axis=2)
@@ -511,22 +567,8 @@ class FluxVisualizer:
         )
         self.screen.blit(scaled, (0, 0))
         
-    def render_water_fraction(self):
-        """Render water volume fraction."""
-        water_frac = self.state.vol_frac[MaterialType.WATER.value]
-        water_norm = np.clip(water_frac * 255, 0, 255).astype(np.uint8)
-        
-        # Blue channel for water
-        rgb = np.zeros((self.state.ny, self.state.nx, 3), dtype=np.uint8)
-        rgb[:, :, 2] = water_norm
-        
-        # Render
-        pygame.surfarray.blit_array(self.grid_surface, rgb.swapaxes(0, 1))
-        scaled = pygame.transform.scale(
-            self.grid_surface,
-            (int(self.state.nx * self.scale_x), int(self.state.ny * self.scale_y))
-        )
-        self.screen.blit(scaled, (0, 0))
+        # Add scale bar
+        self.render_scale_bar(v_min, v_max, "m/s", "Velocity")
         
     def render_gravity(self):
         """Render gravitational field magnitude."""
@@ -534,24 +576,34 @@ class FluxVisualizer:
         if hasattr(self.state, 'gravity_x') and hasattr(self.state, 'gravity_y'):
             gx = self.state.gravity_x
             gy = self.state.gravity_y
-            g_mag = np.sqrt(gx**2 + gy**2)
-        elif hasattr(self.simulation.physics, 'gx') and hasattr(self.simulation.physics, 'gy'):
-            gx = self.simulation.physics.gx
-            gy = self.simulation.physics.gy
-            g_mag = np.sqrt(gx**2 + gy**2)
+        elif hasattr(self.simulation, 'gravity_solver'):
+            # Force gravity calculation if not done
+            self.simulation.gravity_solver.solve_gravity()
+            gx = self.state.gravity_x
+            gy = self.state.gravity_y
         else:
             # Default gravity pointing down
-            g_mag = np.ones((self.state.ny, self.state.nx)) * 9.81
+            gx = np.zeros((self.state.ny, self.state.nx))
+            gy = np.ones((self.state.ny, self.state.nx)) * 9.81
             
-        # Normalize to 0-255
-        g_max = np.max(g_mag) + 1e-10
-        g_norm = np.clip(g_mag / g_max * 255, 0, 255).astype(np.uint8)
+        # Calculate magnitude
+        g_mag = np.sqrt(gx**2 + gy**2)
         
-        # Purple gradient for gravity
+        # Auto-scale based on actual values
+        g_max = np.max(g_mag)
+        g_min = 0  # Gravity magnitude is always positive
+        if g_max > 0:
+            g_norm = np.clip(g_mag / g_max, 0, 1)
+        else:
+            g_norm = np.zeros_like(g_mag)
+        
+        # Blue-green-red colormap (like CA version)
         rgb = np.zeros((self.state.ny, self.state.nx, 3), dtype=np.uint8)
-        rgb[:, :, 0] = g_norm // 2  # Red channel
-        rgb[:, :, 1] = 0             # Green channel
-        rgb[:, :, 2] = g_norm        # Blue channel
+        # 0 -> blue, 0.5 -> green, 1 -> red
+        rgb[:, :, 2] = ((1 - g_norm) * 255).astype(np.uint8)  # Blue
+        green_factor = 4 * g_norm * (1 - g_norm)  # Peak at 0.5
+        rgb[:, :, 1] = (green_factor * 255).astype(np.uint8)  # Green
+        rgb[:, :, 0] = (g_norm * 255).astype(np.uint8)  # Red
         
         # Render
         pygame.surfarray.blit_array(self.grid_surface, rgb.swapaxes(0, 1))
@@ -560,28 +612,103 @@ class FluxVisualizer:
             (int(self.state.nx * self.scale_x), int(self.state.ny * self.scale_y))
         )
         self.screen.blit(scaled, (0, 0))
+        
+        # Add scale bar
+        self.render_scale_bar(g_min, g_max, "m/s²", "Gravity")
         
     def render_power(self):
-        """Render power generation/dissipation."""
-        # Calculate power from various sources
-        power = np.zeros((self.state.ny, self.state.nx), dtype=np.float32)
+        """Render power generation/dissipation with diverging color scale."""
+        # Get power density field
+        power = self.state.power_density.copy()
         
-        # Nuclear power from uranium
-        uranium_frac = self.state.vol_frac[MaterialType.URANIUM.value]
-        uranium_power = uranium_frac * 1e6  # W/m³ (simplified)
-        power += uranium_power
+        # If power_density is not being updated (all zeros), calculate manually
+        if np.max(np.abs(power)) < 1e-10:
+            # Add radioactive heat generation as a minimum
+            uranium_idx = MaterialType.URANIUM.value
+            if uranium_idx < self.state.n_materials:
+                uranium_props = self.material_db.get_properties(MaterialType.URANIUM)
+                if hasattr(uranium_props, 'heat_generation') and uranium_props.heat_generation > 0:
+                    # Heat generation is in W/kg, multiply by density and volume fraction
+                    uranium_mask = self.state.vol_frac[uranium_idx] > 0
+                    if np.any(uranium_mask):
+                        power[uranium_mask] = (self.state.vol_frac[uranium_idx][uranium_mask] * 
+                                             self.state.density[uranium_mask] * 
+                                             uranium_props.heat_generation)
         
-        # Could add other power sources here (e.g., friction, compression)
+        # Find the maximum absolute value for symmetric scaling
+        max_abs_power = np.max(np.abs(power))
         
-        # Normalize to 0-255
-        power_max = np.max(np.abs(power)) + 1e-10
-        power_norm = np.clip(np.abs(power) / power_max * 255, 0, 255).astype(np.uint8)
-        
-        # Yellow-orange gradient for power
+        # Create RGB array
         rgb = np.zeros((self.state.ny, self.state.nx, 3), dtype=np.uint8)
-        rgb[:, :, 0] = power_norm           # Red channel
-        rgb[:, :, 1] = power_norm // 2      # Green channel
-        rgb[:, :, 2] = 0                    # Blue channel
+        
+        if max_abs_power > 1e-10:
+            # Use symmetric logarithmic scaling for better visualization
+            # This handles both positive and negative values
+            
+            # Define a linear threshold below which we use linear scaling
+            linear_threshold = max_abs_power * 0.001  # 0.1% of max
+            
+            # Create a symmetric log-like scaling
+            def symlog_scale(values, threshold):
+                """Symmetric log scaling that handles positive and negative values."""
+                scaled = np.zeros_like(values)
+                
+                # Positive values
+                pos_mask = values > threshold
+                if np.any(pos_mask):
+                    scaled[pos_mask] = 1 + np.log10(values[pos_mask] / threshold)
+                    
+                # Negative values
+                neg_mask = values < -threshold
+                if np.any(neg_mask):
+                    scaled[neg_mask] = -1 - np.log10(-values[neg_mask] / threshold)
+                    
+                # Linear region near zero
+                linear_mask = np.abs(values) <= threshold
+                if np.any(linear_mask):
+                    scaled[linear_mask] = values[linear_mask] / threshold
+                    
+                return scaled
+            
+            # Apply symmetric log scaling
+            power_scaled = symlog_scale(power, linear_threshold)
+            
+            # Find scale limits
+            scale_max = np.max(np.abs(power_scaled))
+            if scale_max > 0:
+                # Normalize to [-1, 1]
+                power_norm = power_scaled / scale_max
+            else:
+                power_norm = np.zeros_like(power)
+                
+            # Apply diverging colormap: blue (cooling) -> white (neutral) -> red (heating)
+            for j in range(self.state.ny):
+                for i in range(self.state.nx):
+                    value = power_norm[j, i]
+                    
+                    if value > 0:  # Heating (positive power)
+                        # Red channel increases with heating
+                        rgb[j, i, 0] = int(255 * (0.5 + 0.5 * value))
+                        # Green and blue decrease with heating
+                        rgb[j, i, 1] = int(255 * (1.0 - 0.5 * value))
+                        rgb[j, i, 2] = int(255 * (1.0 - 0.5 * value))
+                    else:  # Cooling (negative power)
+                        # Blue channel increases with cooling
+                        rgb[j, i, 2] = int(255 * (0.5 + 0.5 * abs(value)))
+                        # Red and green decrease with cooling
+                        rgb[j, i, 0] = int(255 * (1.0 - 0.5 * abs(value)))
+                        rgb[j, i, 1] = int(255 * (1.0 - 0.5 * abs(value)))
+            
+            # Store scale values for the scale bar
+            self.power_scale_min = -max_abs_power
+            self.power_scale_max = max_abs_power
+            self.power_scale_type = "symmetric_log"
+        else:
+            # No significant power, show neutral gray
+            rgb.fill(200)
+            self.power_scale_min = 0
+            self.power_scale_max = 0
+            self.power_scale_type = "zero"
         
         # Render
         pygame.surfarray.blit_array(self.grid_surface, rgb.swapaxes(0, 1))
@@ -590,6 +717,83 @@ class FluxVisualizer:
             (int(self.state.nx * self.scale_x), int(self.state.ny * self.scale_y))
         )
         self.screen.blit(scaled, (0, 0))
+        
+        # Draw power scale bar
+        self.draw_power_scale_bar()
+        
+    def draw_power_scale_bar(self):
+        """Draw scale bar for power density with diverging scale."""
+        # Position at bottom left
+        bar_x = 10
+        bar_y = self.window_height - 60
+        bar_width = 200
+        bar_height = 20
+        
+        if self.power_scale_type == "zero":
+            # No power to display
+            text = self.font.render("Power: 0 W/m³", True, (255, 255, 255))
+            self.screen.blit(text, (bar_x, bar_y - 25))
+            return
+        
+        # Draw gradient bar
+        for i in range(bar_width):
+            # Map position to normalized value [-1, 1]
+            norm_value = 2.0 * i / bar_width - 1.0
+            
+            if norm_value > 0:  # Heating side
+                r = int(255 * (0.5 + 0.5 * norm_value))
+                g = int(255 * (1.0 - 0.5 * norm_value))
+                b = int(255 * (1.0 - 0.5 * norm_value))
+            else:  # Cooling side
+                r = int(255 * (1.0 - 0.5 * abs(norm_value)))
+                g = int(255 * (1.0 - 0.5 * abs(norm_value)))
+                b = int(255 * (0.5 + 0.5 * abs(norm_value)))
+                
+            color = (r, g, b)
+            pygame.draw.line(self.screen, color, 
+                            (bar_x + i, bar_y), 
+                            (bar_x + i, bar_y + bar_height))
+        
+        # Draw border
+        pygame.draw.rect(self.screen, (255, 255, 255), 
+                        (bar_x, bar_y, bar_width, bar_height), 1)
+        
+        # Draw labels
+        def format_power(value):
+            """Format power value with appropriate units."""
+            abs_val = abs(value)
+            if abs_val >= 1e9:
+                return f"{value/1e9:.1f} GW/m³"
+            elif abs_val >= 1e6:
+                return f"{value/1e6:.1f} MW/m³"
+            elif abs_val >= 1e3:
+                return f"{value/1e3:.1f} kW/m³"
+            elif abs_val >= 1:
+                return f"{value:.1f} W/m³"
+            elif abs_val >= 1e-3:
+                return f"{value*1e3:.1f} mW/m³"
+            else:
+                return f"{value:.2e} W/m³"
+        
+        # Title
+        title = self.font.render("Power Density", True, (255, 255, 255))
+        self.screen.blit(title, (bar_x, bar_y - 25))
+        
+        # Min (cooling) label
+        min_text = format_power(self.power_scale_min)
+        min_label = self.small_font.render(min_text, True, (150, 150, 255))
+        self.screen.blit(min_label, (bar_x, bar_y + bar_height + 2))
+        
+        # Center (zero) label
+        center_label = self.small_font.render("0", True, (255, 255, 255))
+        center_x = bar_x + bar_width // 2 - center_label.get_width() // 2
+        self.screen.blit(center_label, (center_x, bar_y + bar_height + 2))
+        
+        # Max (heating) label
+        max_text = format_power(self.power_scale_max)
+        max_label = self.small_font.render(max_text, True, (255, 150, 150))
+        max_x = bar_x + bar_width - max_label.get_width()
+        self.screen.blit(max_label, (max_x, bar_y + bar_height + 2))
         
     def render_info(self):
         """Render information overlay."""
@@ -796,7 +1000,6 @@ class FluxVisualizer:
             DisplayMode.VELOCITY: "Velocity",
             DisplayMode.GRAVITY: "Gravity",
             DisplayMode.POWER: "Power",
-            DisplayMode.WATER_FRACTION: "Water",
         }
         
         for mode in display_modes:
@@ -843,3 +1046,218 @@ class FluxVisualizer:
         for i, line in enumerate(info_lines):
             text = self.toolbar_font.render(line, True, (160, 160, 160))
             self.screen.blit(text, (self.sidebar_x + 10, info_y + i * 20))
+            
+    def render_selected_cell(self):
+        """Render selected cell highlight and information."""
+        if not self.selected_cell:
+            return
+            
+        cx, cy = self.selected_cell
+        
+        # Draw white highlight box
+        screen_x = cx * self.scale_x
+        screen_y = cy * self.scale_y
+        highlight_rect = pygame.Rect(
+            screen_x, screen_y,
+            self.scale_x, self.scale_y
+        )
+        pygame.draw.rect(self.screen, (255, 255, 255), highlight_rect, 2)
+        
+        # Gather cell information
+        info_lines = [
+            f"Cell: ({cx}, {cy})",
+            f"Position: ({cx * self.state.dx:.1f}, {cy * self.state.dx:.1f}) m",
+            ""
+        ]
+        
+        # Material fractions
+        for mat_idx, mat_type in enumerate(MaterialType):
+            frac = self.state.vol_frac[mat_idx, cy, cx]
+            if frac > 0.01:  # Only show materials with > 1%
+                info_lines.append(f"{mat_type.name}: {frac*100:.1f}%")
+        
+        info_lines.append("")
+        
+        # Physical properties
+        info_lines.extend([
+            f"Temperature: {self.state.temperature[cy, cx]:.1f} K ({self.state.temperature[cy, cx] - 273.15:.1f}°C)",
+            f"Pressure: {self.state.pressure[cy, cx]/1e5:.2f} bar",
+            f"Density: {self.state.density[cy, cx]:.1f} kg/m³",
+            f"Velocity: ({self.state.velocity_x[cy, cx]:.2f}, {self.state.velocity_y[cy, cx]:.2f}) m/s",
+        ])
+        
+        # Gravity and power
+        if hasattr(self.state, 'gravity_x') and hasattr(self.state, 'gravity_y'):
+            gx = self.state.gravity_x[cy, cx]
+            gy = self.state.gravity_y[cy, cx]
+            g_mag = np.sqrt(gx**2 + gy**2)
+            info_lines.append(f"Gravity: {g_mag:.2f} m/s² ({gx:.2f}, {gy:.2f})")
+        
+        if hasattr(self.state, 'power_density'):
+            info_lines.append(f"Power: {self.state.power_density[cy, cx]:.2e} W/m³")
+        
+        # Draw info box in lower left corner
+        info_x = 10
+        bg_height = len(info_lines) * 18 + 10
+        info_y = self.screen.get_height() - bg_height - 10  # Position at bottom
+        
+        # Create semi-transparent background
+        max_width = max(self.small_font.size(line)[0] for line in info_lines)
+        bg_surface = pygame.Surface((max_width + 20, bg_height))
+        bg_surface.set_alpha(200)
+        bg_surface.fill((0, 0, 0))
+        self.screen.blit(bg_surface, (info_x - 5, info_y - 5))
+        
+        # Draw text
+        for i, line in enumerate(info_lines):
+            text = self.small_font.render(line, True, (255, 255, 255))
+            self.screen.blit(text, (info_x, info_y + i * 18))
+            
+    def render_scale_bar(self, min_val: float, max_val: float, unit: str, title: str):
+        """Render a scale bar with smart formatting."""
+        # Position at bottom right of main display area
+        bar_width = 200
+        bar_height = 20
+        margin = 20
+        x = self.screen.get_width() - self.toolbar_width - bar_width - margin
+        y = self.screen.get_height() - bar_height - margin - 30
+        
+        # Create gradient
+        gradient = pygame.Surface((bar_width, bar_height))
+        for i in range(bar_width):
+            # Map position to value
+            t = i / (bar_width - 1)
+            
+            # Use same color mapping as the visualization
+            if title == "Gravity":
+                # Blue-green-red gradient
+                if t < 0.5:
+                    # Blue to green
+                    t2 = t * 2
+                    r = 0
+                    g = int(t2 * 255)
+                    b = int((1 - t2) * 255)
+                else:
+                    # Green to red
+                    t2 = (t - 0.5) * 2
+                    r = int(t2 * 255)
+                    g = int((1 - t2) * 255)
+                    b = 0
+            elif title == "Temperature":
+                # Blue to red through white
+                if t < 0.5:
+                    # Blue to white
+                    t2 = t * 2
+                    r = int(t2 * 255)
+                    g = int(t2 * 255)
+                    b = 255
+                else:
+                    # White to red
+                    t2 = (t - 0.5) * 2
+                    r = 255
+                    g = int((1 - t2) * 255)
+                    b = int((1 - t2) * 255)
+            elif title == "Pressure":
+                # Blue (negative) to red (positive)
+                if t < 0.5:
+                    # Blue side
+                    t2 = t * 2
+                    r = int(t2 * 255)
+                    g = int(t2 * 255)
+                    b = 255
+                else:
+                    # Red side
+                    t2 = (t - 0.5) * 2
+                    r = 255
+                    g = int((1 - t2) * 255)
+                    b = int((1 - t2) * 255)
+            else:
+                # Default grayscale
+                gray = int(t * 255)
+                r = g = b = gray
+                
+            pygame.draw.line(gradient, (r, g, b), (i, 0), (i, bar_height))
+            
+        # Draw gradient bar
+        self.screen.blit(gradient, (x, y))
+        
+        # Draw border
+        pygame.draw.rect(self.screen, (255, 255, 255), (x, y, bar_width, bar_height), 1)
+        
+        # Title
+        title_text = self.font.render(title, True, (255, 255, 255))
+        self.screen.blit(title_text, (x, y - 25))
+        
+        # Min/Max labels with smart formatting
+        min_label = self.format_smart(min_val, unit)
+        max_label = self.format_smart(max_val, unit)
+        
+        min_text = self.small_font.render(min_label, True, (255, 255, 255))
+        max_text = self.small_font.render(max_label, True, (255, 255, 255))
+        
+        self.screen.blit(min_text, (x, y + bar_height + 5))
+        max_rect = max_text.get_rect(right=x + bar_width, top=y + bar_height + 5)
+        self.screen.blit(max_text, max_rect)
+        
+    def format_smart(self, value: float, unit: str) -> str:
+        """Smart formatting with appropriate precision and SI prefixes."""
+        if unit == "W/m³":
+            # Power density
+            return self.format_power_density(value)
+        elif unit == "Pa":
+            # Pressure
+            return self.format_pressure(value)
+        elif unit == "K":
+            # Temperature
+            return f"{value:.0f} K"
+        elif unit == "m/s²":
+            # Acceleration/gravity
+            if abs(value) < 0.01:
+                return f"{value*1000:.1f} mm/s²"
+            elif abs(value) < 1:
+                return f"{value:.3f} m/s²"
+            else:
+                return f"{value:.1f} m/s²"
+        elif unit == "m/s":
+            # Velocity
+            if abs(value) < 0.01:
+                return f"{value*1000:.1f} mm/s"
+            elif abs(value) < 1:
+                return f"{value:.3f} m/s"
+            else:
+                return f"{value:.1f} m/s"
+        else:
+            # Default
+            return f"{value:.3g} {unit}"
+            
+    def format_power_density(self, power: float) -> str:
+        """Format power density with SI prefixes."""
+        abs_power = abs(power)
+        
+        if abs_power == 0:
+            return "0 W/m³"
+        elif abs_power < 1e-3:
+            return f"{power*1e6:.1f} µW/m³"
+        elif abs_power < 1:
+            return f"{power*1e3:.1f} mW/m³"
+        elif abs_power < 1e3:
+            return f"{power:.1f} W/m³"
+        elif abs_power < 1e6:
+            return f"{power/1e3:.1f} kW/m³"
+        elif abs_power < 1e9:
+            return f"{power/1e6:.1f} MW/m³"
+        else:
+            return f"{power/1e9:.1f} GW/m³"
+            
+    def format_pressure(self, pressure: float) -> str:
+        """Format pressure with appropriate units."""
+        abs_pressure = abs(pressure)
+        
+        if abs_pressure < 1000:
+            return f"{pressure:.0f} Pa"
+        elif abs_pressure < 1e5:
+            return f"{pressure/1000:.1f} kPa"
+        elif abs_pressure < 1e6:
+            return f"{pressure/1e5:.2f} bar"
+        else:
+            return f"{pressure/1e6:.1f} MPa"

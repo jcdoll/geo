@@ -27,6 +27,7 @@ class FluxState:
         ny: int,
         dx: float = 50.0,
         n_materials: int = 9,  # Number of material types
+        cell_depth: Optional[float] = None,  # Cell depth for 3D calculations
     ):
         """
         Initialize simulation state.
@@ -36,11 +37,14 @@ class FluxState:
             ny: Number of grid cells in y direction
             dx: Cell size in meters
             n_materials: Number of material types
+            cell_depth: Cell depth in meters (defaults to domain width for cubic simulation)
         """
         self.nx = nx
         self.ny = ny
         self.dx = dx
         self.n_materials = n_materials
+        # Cell depth for 3D calculations (default to domain width for cubic simulation)
+        self.cell_depth = cell_depth if cell_depth is not None else nx * dx
         
         # Time tracking
         self.time = 0.0
@@ -78,6 +82,9 @@ class FluxState:
         # Heat source/sink tracking
         self.heat_source = np.zeros((ny, nx), dtype=np.float32)
         
+        # Power density tracking for visualization (W/m³)
+        self.power_density = np.zeros((ny, nx), dtype=np.float32)
+        
         # Gravity field
         self.gravity_x = np.zeros((ny, nx), dtype=np.float32)
         self.gravity_y = np.zeros((ny, nx), dtype=np.float32)
@@ -100,6 +107,20 @@ class FluxState:
         total = np.where(total > 0, total, 1.0)
         self.vol_frac /= total[np.newaxis, :, :]
         
+    def update_temperature_for_new_materials(self, material_db):
+        """Update temperature in cells where space has been created.
+        
+        When material leaves a cell and is replaced by space, we need to
+        set the temperature to the CMB temperature (2.7K).
+        """
+        # Find cells that are mostly space (>90%)
+        space_mask = self.vol_frac[0] > 0.9  # SPACE is index 0
+        
+        if np.any(space_mask):
+            # Get space default temperature
+            space_props = material_db.get_properties_by_index(0)
+            self.temperature[space_mask] = space_props.default_temperature
+        
     def update_mixture_properties(self, material_db):
         """
         Update mixture properties from volume fractions.
@@ -116,9 +137,6 @@ class FluxState:
         
         # Compute mixture properties
         for mat_idx in range(self.n_materials):
-            if mat_idx == 0:  # Skip space (index 0)
-                continue
-                
             props = material_db.get_properties_by_index(mat_idx)
             phi = self.vol_frac[mat_idx]
             
@@ -130,33 +148,33 @@ class FluxState:
             
         # Harmonic mean for thermal conductivity
         # k_mix = 1 / Σ(φᵢ/kᵢ)
+        # IMPORTANT: Include space in calculation to properly reduce conductivity
         for mat_idx in range(self.n_materials):
-            if mat_idx == 0:  # Skip space
-                continue
-                
             props = material_db.get_properties_by_index(mat_idx)
             phi = self.vol_frac[mat_idx]
             
-            # Add small epsilon to avoid division by zero
-            self.thermal_conductivity += phi / (props.thermal_conductivity + 1e-10)
+            # For materials with very low conductivity, use a minimum value
+            # to avoid numerical issues while still reducing heat transfer
+            k_eff = max(props.thermal_conductivity, 1e-6)
+            self.thermal_conductivity += phi / k_eff
             
         # Invert for harmonic mean (avoid division by zero)
         mask = self.thermal_conductivity > 1e-10
         self.thermal_conductivity[mask] = 1.0 / self.thermal_conductivity[mask]
-        self.thermal_conductivity[~mask] = 0.0
+        self.thermal_conductivity[~mask] = 1e-6  # Minimum conductivity
         
     def get_total_mass(self) -> float:
         """Calculate total mass in the system."""
-        return np.sum(self.density) * self.dx * self.dx
+        return np.sum(self.density) * self.dx * self.dx * self.cell_depth
         
     def get_total_energy(self) -> float:
         """Calculate total thermal energy in the system."""
-        return np.sum(self.density * self.specific_heat * self.temperature) * self.dx * self.dx
+        return np.sum(self.density * self.specific_heat * self.temperature) * self.dx * self.dx * self.cell_depth
         
     def get_material_inventory(self) -> Dict[int, float]:
         """Get total volume of each material type by index."""
         inventory = {}
-        cell_volume = self.dx * self.dx
+        cell_volume = self.dx * self.dx * self.cell_depth
         
         for mat_idx in range(self.n_materials):
             total_volume = np.sum(self.vol_frac[mat_idx]) * cell_volume
@@ -205,16 +223,17 @@ class FluxState:
         self.velocity_x_face[:, 1:-1] = 0.5 * (
             self.velocity_x[:, :-1] + self.velocity_x[:, 1:]
         )
-        # For the two domain boundaries, just copy neighbouring cell value
-        self.velocity_x_face[:, 0] = self.velocity_x[:, 0]
-        self.velocity_x_face[:, -1] = self.velocity_x[:, -1]
+        # Enforce no-penetration boundary conditions (zero normal velocity)
+        self.velocity_x_face[:, 0] = 0.0    # Left boundary
+        self.velocity_x_face[:, -1] = 0.0   # Right boundary
 
         # vy faces (ny+1, nx)
         self.velocity_y_face[1:-1, :] = 0.5 * (
             self.velocity_y[:-1, :] + self.velocity_y[1:, :]
         )
-        self.velocity_y_face[0, :] = self.velocity_y[0, :]
-        self.velocity_y_face[-1, :] = self.velocity_y[-1, :]
+        # Enforce no-penetration boundary conditions (zero normal velocity)
+        self.velocity_y_face[0, :] = 0.0    # Top boundary
+        self.velocity_y_face[-1, :] = 0.0   # Bottom boundary
 
     def update_cell_velocities_from_face(self):
         """Reconstruct cell-centred velocities by averaging neighbouring faces."""

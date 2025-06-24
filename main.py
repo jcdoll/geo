@@ -18,15 +18,16 @@ from scenarios import get_scenario_names
 class FluxSimulationApp:
     """Main application for flux-based geological simulation."""
     
-    def __init__(self, nx: int = 128, ny: int = 96, dx: float = 50.0, scenario: Optional[str] = None):
+    def __init__(self, nx: int = 128, ny: int = 96, dx: float = 50.0, scenario: Optional[str] = None, use_multigrid_heat: bool = False, cell_depth: Optional[float] = None):
         """Initialize the simulation app."""
-        self.sim = FluxSimulation(nx=nx, ny=ny, dx=dx, scenario=scenario)
+        self.sim = FluxSimulation(nx=nx, ny=ny, dx=dx, scenario=scenario, use_multigrid_heat=use_multigrid_heat, cell_depth=cell_depth)
         self.viz = FluxVisualizer(simulation=self.sim)
         
     def run(self):
         """Run the simulation."""
         print(f"\nGrid: {self.sim.state.nx}x{self.sim.state.ny} cells")
         print(f"Domain: {self.sim.state.nx * self.sim.state.dx / 1000:.1f} x {self.sim.state.ny * self.sim.state.dx / 1000:.1f} km")
+        print(f"Cell depth: {self.sim.state.cell_depth / 1000:.1f} km")
         print("(Timestep will be computed dynamically)")
         
         # Run visualizer
@@ -89,6 +90,18 @@ Examples:
         help='Grid height (overrides --size)'
     )
     
+    parser.add_argument(
+        '--multigrid-heat',
+        action='store_true',
+        help='Use multigrid solver for heat transfer (default: ADI solver)'
+    )
+    
+    parser.add_argument(
+        '--depth',
+        type=float,
+        help='Cell depth in meters (default: domain width for cubic simulation)'
+    )
+    
     args = parser.parse_args()
     
     # Determine grid dimensions
@@ -99,7 +112,9 @@ Examples:
         
     # Create and run app
     print(f"Loading scenario: {args.scenario}")
-    app = FluxSimulationApp(nx=nx, ny=ny, dx=args.scale, scenario=args.scenario)
+    if args.multigrid_heat:
+        print("Using multigrid solver for heat transfer")
+    app = FluxSimulationApp(nx=nx, ny=ny, dx=args.scale, scenario=args.scenario, use_multigrid_heat=args.multigrid_heat, cell_depth=args.depth)
     
     try:
         app.run()

@@ -60,8 +60,9 @@ class MaterialProperties:
     albedo: float  # 0-1 (0=perfect absorber, 1=perfect reflector)
     
     # Fields with defaults must come after fields without defaults
-    heat_generation: float = 0.0  # W/m³ (for radioactive materials)
+    heat_generation: float = 0.0  # W/kg (for radioactive materials)
     absorption_coeff: float = 1.0  # For solar radiation
+    default_temperature: float = 288.0  # K - temperature when material is created
     
     # Phase transitions
     transitions: List[TransitionRule] = field(default_factory=list)
@@ -81,15 +82,16 @@ class MaterialDatabase:
         """Initialize material properties based on PHYSICS_FLUX.md tables."""
         props = {}
         
-        # SPACE - vacuum (using tiny values to avoid division by zero)
+        # SPACE - vacuum (using small epsilon values for numerical stability)
         props[MaterialType.SPACE] = MaterialProperties(
-            density=1e-10,  # Nearly zero but not zero
-            viscosity=0.0,
-            thermal_conductivity=1e-10,  # Tiny but non-zero
-            specific_heat=1e-3,  # Small to avoid numerical issues
-            emissivity=1e-10,  # Nearly zero
+            density=1e-3,  # ~0.001 kg/m³ - extremely rarified but stable
+            viscosity=1e-6,  # Very low but non-zero
+            thermal_conductivity=1e-6,  # Minimal heat conduction
+            specific_heat=100.0,  # Small but reasonable for numerical stability
+            emissivity=1e-3,  # Nearly zero emission
             albedo=0.0,
-            absorption_coeff=0.0,
+            absorption_coeff=0.0,  # Zero absorption - perfectly transparent
+            default_temperature=2.7,  # K
             color_rgb=(0, 0, 0),  # Black
         )
         
@@ -102,6 +104,7 @@ class MaterialDatabase:
             emissivity=0.8,
             albedo=0.0,
             absorption_coeff=0.001,  # Nearly transparent
+            default_temperature=288.0,  # K
             color_rgb=(135, 206, 250),  # Light sky blue
         )
         
@@ -114,6 +117,7 @@ class MaterialDatabase:
             emissivity=0.96,
             albedo=0.06,
             absorption_coeff=0.02,  # Moderate absorption
+            default_temperature=288.0,  # K
             color_rgb=(0, 119, 190),  # Deep water blue
             transitions=[
                 TransitionRule(
@@ -148,6 +152,7 @@ class MaterialDatabase:
             emissivity=0.8,
             albedo=0.0,
             absorption_coeff=0.005,  # Slight absorption
+            default_temperature=373.0,  # K
             color_rgb=(240, 248, 255),  # Alice blue (light mist)
             transitions=[
                 TransitionRule(
@@ -172,6 +177,7 @@ class MaterialDatabase:
             emissivity=0.97,
             albedo=0.8,
             absorption_coeff=0.01,  # Semi-transparent
+            default_temperature=263.0,  # K
             color_rgb=(176, 224, 230),  # Powder blue
             transitions=[
                 TransitionRule(
@@ -196,6 +202,7 @@ class MaterialDatabase:
             emissivity=0.95,
             albedo=0.3,
             absorption_coeff=1.0,  # Opaque
+            default_temperature=288.0,  # K
             color_rgb=(139, 90, 43),  # Saddle brown
             transitions=[
                 TransitionRule(
@@ -230,6 +237,7 @@ class MaterialDatabase:
             emissivity=0.95,
             albedo=0.4,
             absorption_coeff=1.0,  # Opaque
+            default_temperature=288.0,  # K
             color_rgb=(238, 203, 173),  # Desert sand
             transitions=[
                 TransitionRule(
@@ -253,7 +261,8 @@ class MaterialDatabase:
             emissivity=0.9,
             albedo=0.15,
             absorption_coeff=1.0,  # Opaque
-            heat_generation=5e-4,  # W/m³ - radioactive decay
+            heat_generation=0.1,  # W/kg - radioactive decay (enriched uranium)
+            default_temperature=288.0,  # K
             color_rgb=(0, 255, 0),  # Bright green for visibility
             # No transitions
         )
@@ -267,6 +276,7 @@ class MaterialDatabase:
             emissivity=0.95,
             albedo=0.9,
             absorption_coeff=1.0,  # Opaque
+            default_temperature=1500.0,  # K
             color_rgb=(255, 69, 0),  # Orange red
             transitions=[
                 TransitionRule(

@@ -47,15 +47,20 @@ class FluxPhysics:
         # 1. Convective acceleration on cell centers (then interpolate to faces)
         ax_conv, ay_conv = self._compute_convective_acceleration()
         
-        # 2. Apply convective forces only (NOT gravity - that goes in pressure solve)
-        st.velocity_x += dt * ax_conv
-        st.velocity_y += dt * ay_conv
+        # 2. Apply convective and gravity forces
+        st.velocity_x += dt * (ax_conv + gx)
+        st.velocity_y += dt * (ay_conv + gy)
         
         # 3. Apply viscous damping
         self.apply_viscous_damping(dt)
         
         # 4. Update face velocities with v* for projection
         st.update_face_velocities_from_cell()
+        
+        # Zero velocities in space regions before projection
+        space_mask = st.density < 1.0
+        st.velocity_x[space_mask] = 0.0
+        st.velocity_y[space_mask] = 0.0
 
         # ------------------------------------------------------------------
         # PROJECTION STAGE: Make velocity field divergence-free
@@ -110,8 +115,14 @@ class FluxPhysics:
         c_grav = np.sqrt(g * dx)  # Local gravity wave speed
         
         # Thermal diffusion limit
-        alpha_max = np.max(self.state.thermal_conductivity / 
-                          (self.state.density * self.state.specific_heat + 1e-10))
+        # Only consider cells with significant mass (not space)
+        mass_mask = self.state.density > 1.0  # kg/m³
+        if np.any(mass_mask):
+            alpha_masked = self.state.thermal_conductivity[mass_mask] / \
+                          (self.state.density[mass_mask] * self.state.specific_heat[mass_mask] + 1e-10)
+            alpha_max = np.max(alpha_masked)
+        else:
+            alpha_max = 0.0
         
         # CFL conditions
         # Use maximum of advection velocity and gravity wave speed

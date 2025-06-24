@@ -11,7 +11,6 @@ import numpy as np
 from typing import Optional
 from state import FluxState
 from materials import MaterialType, MaterialDatabase
-from atmospheric_processes import AtmosphericProcesses
 
 
 class HeatTransfer:
@@ -37,9 +36,6 @@ class HeatTransfer:
         self.radiative_cooling_method = "linearized"  # "linearized" or "newton_raphson"
         self.surface_radiation_depth_fraction = 0.1  # Fraction of cell size for radiation depth
         
-        # Initialize atmospheric processes for greenhouse effect
-        self.atmospheric_processes = AtmosphericProcesses(state)
-        
     def solve_heat_equation(self, dt: float):
         """
         Solve heat equation for one timestep.
@@ -52,11 +48,6 @@ class HeatTransfer:
         Args:
             dt: Time step in seconds
         """
-        # Reset power density tracking EXCEPT for solar heating
-        # Solar heating is applied in simulation.py and should be preserved
-        # We'll accumulate other heat sources on top of it
-        pass  # Don't reset power_density here
-        
         # Step 1: Thermal diffusion
         self.apply_thermal_diffusion(dt)
         
@@ -66,13 +57,24 @@ class HeatTransfer:
         # Step 3: Internal heat generation
         self.apply_heat_generation(dt)
         
-        # TODO: Step 4: Solar heating with DDA ray marching
-        # self.apply_solar_heating(dt)
-        
         # Ensure temperatures stay physical
         self.state.temperature = np.maximum(self.state.temperature, self.t_space)
         self.state.temperature = np.minimum(self.state.temperature, 5000.0)  # Max reasonable temp
         
+        # Force space cells to space temperature
+        space_mask = self.state.vol_frac[MaterialType.SPACE.value] > 0.9
+        self.state.temperature[space_mask] = self.t_space
+        
+        # Apply smoothing to atmospheric cells to prevent instability
+        air_mask = self.state.vol_frac[MaterialType.AIR.value] > 0.5
+        if np.any(air_mask):
+            # Simple 3x3 averaging for air cells
+            from scipy import ndimage
+            kernel = np.array([[0.1, 0.1, 0.1],
+                             [0.1, 0.2, 0.1],
+                             [0.1, 0.1, 0.1]])
+            smoothed = ndimage.convolve(self.state.temperature, kernel, mode='constant', cval=self.t_space)
+            self.state.temperature[air_mask] = smoothed[air_mask]
         
     def apply_thermal_diffusion(self, dt: float):
         """
@@ -145,9 +147,15 @@ class HeatTransfer:
             
             for i in range(nx):
                 if i == 0 or i == nx - 1:
-                    # Boundary conditions
-                    b[i] = 1.0
-                    d[i] = T[j, i]
+                    # Boundary conditions - check for space
+                    if self.state.vol_frac[MaterialType.SPACE.value, j, i] > 0.9:
+                        # Space boundary - fixed temperature
+                        b[i] = 1.0
+                        d[i] = self.t_space
+                    else:
+                        # Neumann BC (no flux)
+                        b[i] = 1.0
+                        d[i] = T[j, i]
                 else:
                     # Interior points
                     r_avg = 0.5 * (r[j, i] + r[j, i-1])
@@ -195,9 +203,15 @@ class HeatTransfer:
             
             for j in range(ny):
                 if j == 0 or j == ny - 1:
-                    # Boundary conditions
-                    b[j] = 1.0
-                    d[j] = T[j, i]
+                    # Boundary conditions - check for space
+                    if self.state.vol_frac[MaterialType.SPACE.value, j, i] > 0.9:
+                        # Space boundary - fixed temperature
+                        b[j] = 1.0
+                        d[j] = self.t_space
+                    else:
+                        # Neumann BC (no flux)
+                        b[j] = 1.0
+                        d[j] = T[j, i]
                 else:
                     # Interior points
                     r_avg = 0.5 * (r[j, i] + r[j-1, i])
@@ -324,8 +338,9 @@ class HeatTransfer:
         density_cooling = density[cooling_mask]
         cp_cooling = cp[cooling_mask]
         
-        # Get dynamic greenhouse effect from atmospheric processes
-        greenhouse_factor = self.atmospheric_processes.calculate_greenhouse_factor()
+        # Greenhouse effect (simplified - could be enhanced)
+        vapor_frac = self.state.vol_frac[MaterialType.WATER_VAPOR.value][exposed_mask][cooling_mask]
+        greenhouse_factor = 1.0 - 0.5 * np.tanh(vapor_frac * 10)
         
         # Linearized Stefan-Boltzmann: Q = h(T - T_space) where h = 4σεT₀³
         T_reference = np.maximum(T_cooling, 300.0)  # Reference temperature
@@ -342,17 +357,6 @@ class HeatTransfer:
         # Update temperatures in the original array
         T[cooling_mask] = T_new
         self.state.temperature[exposed_mask] = T
-        
-        # Track power density (negative for cooling)
-        # Get indices of exposed cells
-        exposed_indices = np.where(exposed_mask)
-        # Get indices of cooling cells within the exposed subset
-        cooling_indices = np.where(cooling_mask)[0]
-        
-        for idx, cooling_idx in enumerate(cooling_indices):
-            j, i = exposed_indices[0][cooling_idx], exposed_indices[1][cooling_idx]
-            # Power density = rate * density * specific heat * thickness
-            self.state.power_density[j, i] -= cooling_rate[idx] * density_cooling[idx] * cp_cooling[idx] * surface_thickness
         
     def _apply_radiative_cooling_newton_raphson(self, dt: float):
         """
@@ -473,21 +477,6 @@ class HeatTransfer:
         # Update temperatures
         self.state.temperature[exposed_mask] = T
         
-        # Track power density (negative for cooling)
-        # Calculate cooling power for each exposed cell
-        exposed_indices = np.where(exposed_mask)
-        cooling_indices = np.where(cooling_mask)[0]
-        
-        for idx, cooling_idx in enumerate(cooling_indices):
-            j, i = exposed_indices[0][cooling_idx], exposed_indices[1][cooling_idx]
-            # Power = Stefan-Boltzmann * emissivity * (T^4 - T_space^4)
-            T_final = T[cooling_idx]
-            cooling_power = self.stefan_boltzmann * emissivity[cooling_idx] * greenhouse_factor[cooling_idx] * \
-                           (T_final**4 - self.t_space**4)
-            # Convert to volumetric power density
-            surface_thickness = self.state.dx * self.surface_radiation_depth_fraction
-            self.state.power_density[j, i] -= cooling_power / surface_thickness
-        
     def apply_heat_generation(self, dt: float):
         """
         Apply internal heat generation from radioactive decay.
@@ -501,11 +490,10 @@ class HeatTransfer:
         # Only process cells with uranium
         if not np.any(uranium_frac > 0):
             return
-        
             
         # Get heat generation rate from material database
         uranium_props = self.material_db.get_properties(MaterialType.URANIUM)
-        heat_gen_rate = uranium_props.heat_generation  # W/kg
+        heat_gen_rate = uranium_props.get('heat_generation', 0.0)  # W/kg
         
         if heat_gen_rate <= 0:
             return
@@ -520,9 +508,6 @@ class HeatTransfer:
         
         # Update temperature
         self.state.temperature += dT
-        
-        # Track power density
-        self.state.power_density += heat_source
         
         # Track total heat generation for diagnostics
         if hasattr(self.state, 'total_heat_generated'):

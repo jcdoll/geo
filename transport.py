@@ -194,6 +194,7 @@ class FluxTransport:
                 
         # Ensure constraints
         self.state.normalize_volume_fractions()
+        
     def diffuse_heat(self, dt: float):
         """
         Apply thermal diffusion (delegated to base class for now).
