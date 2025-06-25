@@ -8,6 +8,7 @@ Gravity and pressure solving are handled by dedicated solver modules.
 import numpy as np
 from typing import Tuple, Optional
 from state import FluxState
+from pressure_solver import PressureSolver
 
 
 class FluxPhysics:
@@ -91,7 +92,6 @@ class FluxPhysics:
         # PROJECTION STAGE: Make velocity field divergence-free
         # ------------------------------------------------------------------
         if self.pressure_solver is None:
-            from pressure_solver import PressureSolver
             self.pressure_solver = PressureSolver(st)
         
         phi = self.pressure_solver.project_velocity(dt, gx=gx, gy=gy, bc_type="neumann")

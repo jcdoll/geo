@@ -212,7 +212,6 @@ class FluxState:
         
         # Add small epsilon to avoid division by zero
         # Use space density as minimum to ensure physical behavior
-        from materials import MaterialDatabase, MaterialType
         mat_db = MaterialDatabase()
         space_density = mat_db.get_properties(MaterialType.SPACE).density
         rho_effective = np.maximum(rho_effective, space_density)

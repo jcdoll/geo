@@ -8,6 +8,7 @@ and real-time parameter adjustment.
 
 import argparse
 import sys
+import traceback
 from typing import Optional
 
 from simulation import FluxSimulation
@@ -123,7 +124,6 @@ Examples:
         return 0
     except Exception as e:
         print(f"\nError: {e}")
-        import traceback
         traceback.print_exc()
         return 1
         

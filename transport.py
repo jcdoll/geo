@@ -6,7 +6,7 @@ Eliminates all loops over materials by processing them simultaneously.
 
 import numpy as np
 from state import FluxState
-from materials import MaterialType
+from materials import MaterialType, MaterialDatabase
 
 
 class FluxTransport:
@@ -134,7 +134,6 @@ class FluxTransport:
         self.state.normalize_volume_fractions()
         
         # Update mixture properties after everything is advected
-        from materials import MaterialDatabase
         mat_db = MaterialDatabase()
         self.state.update_mixture_properties(mat_db)
         
@@ -153,7 +152,6 @@ class FluxTransport:
             old_vol_frac: Volume fractions BEFORE material advection
         """
         # Get material properties
-        from materials import MaterialDatabase
         mat_db = MaterialDatabase()
         
         # Pre-compute thermal properties for each material

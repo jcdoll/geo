@@ -379,7 +379,6 @@ class HeatTransfer:
                           (self.state.vol_frac[MaterialType.WATER_VAPOR.value] > 0.5))
         
         # Surface solids: non-atmospheric, non-space cells adjacent to atmosphere or space
-        from scipy.ndimage import binary_dilation
         kernel_3x3 = np.array([[1, 1, 1],
                                [1, 0, 1],
                                [1, 1, 1]])
@@ -390,7 +389,7 @@ class HeatTransfer:
         
         # Surface is where solids meet atmosphere or space
         atmosphere_or_space = atmosphere_mask | space_mask
-        surface_candidates = binary_dilation(atmosphere_or_space, structure=kernel_3x3)
+        surface_candidates = ndimage.binary_dilation(atmosphere_or_space, structure=kernel_3x3)
         surface_solid_mask = surface_candidates & solid_mask
         
         # Combine: ALL atmosphere cells AND surface solids can radiate
