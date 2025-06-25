@@ -139,6 +139,9 @@ class FluxState:
         self.viscosity.fill(0.0)
         self.emissivity.fill(0.0)
         
+        # First ensure volume fractions are normalized
+        self.normalize_volume_fractions()
+        
         # Compute mixture properties
         for mat_idx in range(self.n_materials):
             props = material_db.get_properties_by_index(mat_idx)
@@ -169,11 +172,16 @@ class FluxState:
         
     def get_total_mass(self) -> float:
         """Calculate total mass in the system."""
-        return np.sum(self.density) * self.dx * self.dx * self.cell_depth
+        # Use float64 to avoid overflow with large volumes
+        cell_volume = self.dx * self.dx * self.cell_depth
+        return float(np.sum(self.density.astype(np.float64)) * cell_volume)
         
     def get_total_energy(self) -> float:
         """Calculate total thermal energy in the system."""
-        return np.sum(self.density * self.specific_heat * self.temperature) * self.dx * self.dx * self.cell_depth
+        # Use float64 for intermediate calculations to avoid overflow
+        energy_density = self.density.astype(np.float64) * self.specific_heat.astype(np.float64) * self.temperature.astype(np.float64)
+        cell_volume = self.dx * self.dx * self.cell_depth
+        return float(np.sum(energy_density) * cell_volume)
         
     def get_material_inventory(self) -> Dict[int, float]:
         """Get total volume of each material type by index."""
@@ -198,22 +206,27 @@ class FluxState:
         Uses harmonic averaging which is the correct discretisation for
         variable-coefficient Poisson problems in a staggered grid.
         """
-        rho = self.density + 1e-12  # avoid divide-by-zero
+        # For beta calculation, use actual density everywhere
+        # This allows materials to move through space
+        rho_effective = np.copy(self.density)
+        
+        # Add small epsilon to avoid division by zero
+        # Use space density as minimum to ensure physical behavior
+        from materials import MaterialDatabase, MaterialType
+        mat_db = MaterialDatabase()
+        space_density = mat_db.get_properties(MaterialType.SPACE).density
+        rho_effective = np.maximum(rho_effective, space_density)
 
         # β_x: shape (ny, nx+1)
         # Interior faces: harmonic mean of left & right cell densities
-        # But clamp minimum density to avoid huge values in space
-        rho_min = 1.0  # kg/m³ - reasonable minimum for numerical stability
-        rho_clamped = np.maximum(rho, rho_min)
-        
-        self.beta_x[:, 1:-1] = 2.0 / (rho_clamped[:, :-1] + rho_clamped[:, 1:])
-        self.beta_x[:, 0] = 1.0 / rho_clamped[:, 0]
-        self.beta_x[:, -1] = 1.0 / rho_clamped[:, -1]
+        self.beta_x[:, 1:-1] = 2.0 / (rho_effective[:, :-1] + rho_effective[:, 1:])
+        self.beta_x[:, 0] = 1.0 / rho_effective[:, 0]
+        self.beta_x[:, -1] = 1.0 / rho_effective[:, -1]
 
         # β_y: shape (ny+1, nx)
-        self.beta_y[1:-1, :] = 2.0 / (rho_clamped[:-1, :] + rho_clamped[1:, :])
-        self.beta_y[0, :] = 1.0 / rho_clamped[0, :]
-        self.beta_y[-1, :] = 1.0 / rho_clamped[-1, :]
+        self.beta_y[1:-1, :] = 2.0 / (rho_effective[:-1, :] + rho_effective[1:, :])
+        self.beta_y[0, :] = 1.0 / rho_effective[0, :]
+        self.beta_y[-1, :] = 1.0 / rho_effective[-1, :]
 
     def update_face_velocities_from_cell(self):
         """Populate face-centred velocities by averaging neighbouring cells.

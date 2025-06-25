@@ -1,18 +1,23 @@
 """
 Solar heating using proper material absorption coefficients with safety checks.
 
-This implementation uses the absorption_coeff property from the material
+This implementation uses the solar_absorption property from the material
 database, ensuring that space (with absorption=0) naturally doesn't heat up.
 """
 
 import numpy as np
+from typing import TYPE_CHECKING
+
 from materials import MaterialType, MaterialDatabase
+
+if TYPE_CHECKING:
+    from state import FluxState
 
 # Create material database instance
 material_db = MaterialDatabase()
 
 
-def apply_solar_heating_proper(state, dt: float, solar_angle: float, solar_constant: float):
+def apply_solar_heating(state: "FluxState", dt: float, solar_angle: float, solar_constant: float) -> None:
     """
     Apply solar heating using material absorption coefficients.
     
@@ -26,118 +31,39 @@ def apply_solar_heating_proper(state, dt: float, solar_angle: float, solar_const
     sun_x = np.sin(solar_angle)
     sun_y = np.cos(solar_angle)
     
-    # Skip if sun is below horizon
-    if sun_y < 0:
+    # Skip if sun is below horizon AND not coming from sides
+    if sun_y < 0 and abs(sun_x) < 0.1:
         return
     
-    # Pre-compute effective absorption for each cell
+    # Pre-compute effective absorption for each cell (vectorized)
     ny, nx = state.temperature.shape
-    effective_absorption = np.zeros((ny, nx))
     
-    # For each cell, compute weighted absorption based on material fractions
-    for j in range(ny):
-        for i in range(nx):
-            absorption = 0.0
-            albedo = 0.0
-            
-            # Weight by volume fraction
-            for mat_idx in range(state.n_materials):
-                vol_frac = state.vol_frac[mat_idx, j, i]
-                if vol_frac > 0:
-                    mat_type = MaterialType(mat_idx)
-                    mat_props = material_db.get_properties(mat_type)
-                    
-                    # Use actual material absorption coefficient
-                    absorption += vol_frac * mat_props.absorption_coeff
-                    albedo += vol_frac * mat_props.albedo
-            
-            # Clamp values to valid ranges
-            absorption = np.clip(absorption, 0.0, 1.0)
-            albedo = np.clip(albedo, 0.0, 1.0)
-            
-            # Effective absorption (accounting for albedo)
-            # Space will have absorption = 0, so effective_absorption = 0
-            effective_absorption[j, i] = absorption * (1.0 - albedo)
+    # Create array for material solar absorption
+    solar_absorptions = np.zeros(state.n_materials)
+    
+    for mat_idx in range(state.n_materials):
+        mat_type = MaterialType(mat_idx)
+        mat_props = material_db.get_properties(mat_type)
+        solar_absorptions[mat_idx] = mat_props.solar_absorption
+    
+    # Compute weighted solar absorption using einsum for efficiency
+    # vol_frac shape: (n_materials, ny, nx)
+    # solar_absorptions shape: (n_materials,)
+    # Result shape: (ny, nx)
+    effective_absorption = np.einsum('myx,m->yx', state.vol_frac, solar_absorptions)
     
     # Ensure no NaN or extreme values
     effective_absorption = np.nan_to_num(effective_absorption, nan=0.0, posinf=1.0, neginf=0.0)
     effective_absorption = np.clip(effective_absorption, 0.0, 1.0)
     
-    # No artificial solar constant limits  # Max 5x normal solar constant
-    
-    # For vertical sun, use optimized column processing
-    if abs(sun_x) < 0.1:
-        _apply_vertical_rays_safe(state, dt, effective_absorption, solar_constant)
-    else:
-        # Angled sun: trace rays properly
-        _apply_angled_rays_safe(state, dt, effective_absorption, solar_constant, sun_x, sun_y)
+    # Apply ray tracing for all sun angles
+    _apply_ray_traced_heating(state, dt, effective_absorption, solar_constant, sun_x, sun_y)
 
 
-def _apply_vertical_rays_safe(state, dt, effective_absorption, solar_constant):
+def _apply_ray_traced_heating(state: "FluxState", dt: float, effective_absorption: np.ndarray, 
+                             solar_constant: float, sun_x: float, sun_y: float) -> None:
     """
-    Apply solar heating for vertical rays with safety checks.
-    
-    Process each column from top to bottom, with rays attenuating
-    as they pass through materials.
-    """
-    ny, nx = state.temperature.shape
-    
-    # No artificial temperature limits
-    
-    # Process each column
-    for i in range(nx):
-        # Start with full solar intensity at top
-        intensity = solar_constant
-        
-        # March down the column
-        for j in range(ny):
-            # Only process if there's still significant intensity
-            if intensity < 1e-6:
-                break
-            
-            # Ensure absorption is in valid range
-            eff_abs = np.clip(effective_absorption[j, i], 0.0, 1.0)
-            
-            # Energy absorbed in this cell
-            absorbed = intensity * eff_abs
-            
-            # Safety check on absorbed energy
-            if not np.isfinite(absorbed) or absorbed < 0:
-                absorbed = 0.0
-            
-            if absorbed > 0 and state.cell_depth > 0:
-                # Convert to volumetric power density (W/m³)
-                volumetric_power = absorbed / state.cell_depth
-                
-                # Limit power density to prevent runaway
-                max_power = 1e9  # 1 GW/m³ is extreme
-                volumetric_power = np.clip(volumetric_power, 0.0, max_power)
-                
-                # Update power density tracking
-                state.power_density[j, i] += volumetric_power
-                
-                # Temperature change
-                if state.density[j, i] > 0 and state.specific_heat[j, i] > 0:
-                    dT = volumetric_power * dt / (state.density[j, i] * state.specific_heat[j, i])
-                    
-                    # No artificial temperature change limits
-                    
-                    # Check for NaN before updating
-                    if np.isfinite(dT):
-                        state.temperature[j, i] += dT
-            
-            # Attenuate intensity for next cell
-            # If effective_absorption is 0 (space), intensity passes through unchanged
-            intensity *= (1.0 - eff_abs)
-            
-            # Ensure intensity doesn't go negative or NaN
-            if not np.isfinite(intensity) or intensity < 0:
-                intensity = 0.0
-
-
-def _apply_angled_rays_safe(state, dt, effective_absorption, solar_constant, sun_x, sun_y):
-    """
-    Apply solar heating for angled rays using DDA ray marching with safety checks.
+    Apply solar heating using DDA ray marching for all sun angles.
     
     Traces rays from sun direction through the grid.
     """
@@ -145,29 +71,51 @@ def _apply_angled_rays_safe(state, dt, effective_absorption, solar_constant, sun
     
     # No artificial temperature limits
     
-    # Ray direction (pointing towards sun)
-    ray_x = -sun_x
-    ray_y = -sun_y
+    # Ray direction (from sun towards planet center)
+    # The sun vector (sun_x, sun_y) points from planet center to sun
+    # Rays go in opposite direction: from sun to planet center
+    # When sun is at angle θ: sun_x = sin(θ), sun_y = cos(θ)
+    # For sun at east (π/2): sun_x = 1, sun_y = 0
+    # Rays should go west (negative x), so ray_x should be -sun_x
+    ray_x = -sun_x  # Opposite of sun vector direction
+    ray_y = -sun_y  # Opposite of sun vector direction
     
     # Determine starting positions based on sun angle
-    if sun_y > 0:  # Sun above horizon
-        # Start from top edge
-        start_positions = [(0, i) for i in range(nx)]
-    else:
-        return  # Sun below horizon
+    start_positions = []
     
-    # Additional starting positions for angled sun
+    if sun_y > 0:  # Sun above horizon
+        # Rays go downward (negative y), so start from top edge
+        start_positions.extend([(0, i) for i in range(nx)])
+    elif sun_y < -0.1:  # Sun below horizon (significant angle)
+        # Rays go upward (positive y), so start from bottom edge
+        start_positions.extend([(ny-1, i) for i in range(nx)])
+    
+    # For angled sun, add side edge positions
     if abs(sun_x) > 0.1:
-        if sun_x > 0:  # Sun from right
-            start_positions.extend([(j, nx-1) for j in range(1, ny)])
-        else:  # Sun from left
-            start_positions.extend([(j, 0) for j in range(1, ny)])
+        if sun_x > 0:  # Sun from east (right side)
+            # Rays go west (left), so start from right edge
+            start_positions.extend([(j, nx-1) for j in range(ny)])
+        else:  # Sun from west (left side)
+            # Rays go east (right), so start from left edge
+            start_positions.extend([(j, 0) for j in range(ny)])
+    
+    # If no starting positions (sun below horizon and not from sides), return
+    if not start_positions:
+        return
     
     # Trace rays using DDA
+    # IMPORTANT: DO NOT add special cases for vertical/horizontal rays!
+    # The general DDA algorithm handles ALL cases correctly.
+    # Special cases just add complexity and maintenance burden.
     for start_j, start_i in start_positions:
-        # Current position
+        # Current position - start at cell center
         x = float(start_i) + 0.5
         y = float(start_j) + 0.5
+        
+        # Small offset to ensure rays traverse cells properly
+        # Without this, vertical rays starting at y=0.5 step to y=-0.5 immediately
+        if abs(ray_y) > abs(ray_x):
+            y = float(start_j) + 0.1 if ray_y < 0 else float(start_j) + 0.9
         
         # Initial intensity
         intensity = solar_constant
@@ -186,36 +134,32 @@ def _apply_angled_rays_safe(state, dt, effective_absorption, solar_constant, sun
         steps = 0
         max_steps = 2 * max(ny, nx)  # Prevent infinite loops
         
-        while steps < max_steps:
-            steps += 1
-            
-            # Current cell
-            i = int(x)
-            j = int(y)
+        while steps < max_steps and intensity > 1e-6:
+            # Current cell - use floor to handle negative coordinates properly
+            i = int(np.floor(x))
+            j = int(np.floor(y))
             
             # Check bounds
             if i < 0 or i >= nx or j < 0 or j >= ny:
-                break
-            
-            # Only process if there's still significant intensity
-            if intensity < 1e-6:
                 break
             
             # Ensure absorption is in valid range
             eff_abs = np.clip(effective_absorption[j, i], 0.0, 1.0)
             
             # Energy absorbed in this cell
-            absorbed = intensity * eff_abs * t_step
+            # Simple absorption: fraction of incoming intensity
+            absorbed = intensity * eff_abs
             
             # Safety check on absorbed energy
             if not np.isfinite(absorbed) or absorbed < 0:
                 absorbed = 0.0
             
-            if absorbed > 0 and state.cell_depth > 0:
+            if absorbed > 0:
                 # Convert to volumetric power density
-                volumetric_power = absorbed / state.cell_depth
-                
-                # No artificial power density limits
+                # Use a realistic absorption depth instead of full cell depth
+                # Most solar absorption happens in top 1-10m for rock/water
+                absorption_depth = min(10.0, state.cell_depth)  # 10m max absorption depth
+                volumetric_power = absorbed / absorption_depth
                 
                 # Update power density
                 state.power_density[j, i] += volumetric_power
@@ -224,14 +168,12 @@ def _apply_angled_rays_safe(state, dt, effective_absorption, solar_constant, sun
                 if state.density[j, i] > 0 and state.specific_heat[j, i] > 0:
                     dT = volumetric_power * dt / (state.density[j, i] * state.specific_heat[j, i])
                     
-                    # No artificial temperature change limits
-                    
                     # Check for NaN before updating
                     if np.isfinite(dT):
                         state.temperature[j, i] += dT
             
-            # Attenuate intensity
-            intensity *= (1.0 - eff_abs * t_step)
+            # Attenuate intensity by the absorbed amount
+            intensity -= absorbed
             
             # Ensure intensity doesn't go negative or NaN
             if not np.isfinite(intensity) or intensity < 0:
@@ -240,3 +182,5 @@ def _apply_angled_rays_safe(state, dt, effective_absorption, solar_constant, sun
             # Step to next cell
             x += x_step
             y += y_step
+            
+            steps += 1

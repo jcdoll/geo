@@ -124,8 +124,8 @@ class FluxTransport:
         # We need the OLD volume fractions to compute initial energy correctly
         old_vol_frac = self.state.vol_frac.copy()
         
-        # Update all volume fractions (except space at index 0)
-        self.state.vol_frac[1:, :, :] -= (flux_div_x[1:] + flux_div_y[1:])
+        # Update all volume fractions (including space so materials can move through it)
+        self.state.vol_frac[:, :, :] -= (flux_div_x + flux_div_y)
         
         # Now advect temperature using the material fluxes
         self._advect_temperature_with_materials(dt, self.flux_x_all, self.flux_y_all, old_vol_frac)

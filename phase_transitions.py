@@ -68,14 +68,31 @@ class PhaseTransitionSystem:
                 pressure_condition = (P >= rule.pressure_min) & (P <= rule.pressure_max)
                 material_present = self.state.vol_frac[source_idx] > 0
                 
-                transition_mask = temp_condition & pressure_condition & material_present
+                # Check water requirement for weathering
+                if rule.water_required:
+                    water_present = self.state.vol_frac[MaterialType.WATER.value] > 0.01  # At least 1% water
+                    transition_mask = temp_condition & pressure_condition & material_present & water_present
+                else:
+                    transition_mask = temp_condition & pressure_condition & material_present
                 
                 if not np.any(transition_mask):
                     continue
                     
                 # Calculate transition amount (limited by available material)
-                max_rate = np.minimum(rule.rate * dt, 1.0)
-                transition_amount = self.state.vol_frac[source_idx] * max_rate
+                # For weathering, apply temperature-dependent rate
+                if rule.water_required and source_type == MaterialType.ROCK and rule.target == MaterialType.SAND:
+                    # This is weathering - use temperature-dependent rate
+                    water_factor = 3.0  # Water present increases weathering rate
+                    weathering_rate = self.material_db.get_weathering_rate(T[transition_mask], water_factor)
+                    # Scale by base rate and timestep
+                    effective_rate = rule.rate * weathering_rate * dt
+                    max_rate = np.minimum(effective_rate, 1.0)
+                else:
+                    # Normal phase transition
+                    max_rate = np.minimum(rule.rate * dt, 1.0)
+                    
+                transition_amount = np.zeros_like(self.state.vol_frac[source_idx])
+                transition_amount[transition_mask] = self.state.vol_frac[source_idx][transition_mask] * max_rate
                 
                 # Apply transition where conditions are met
                 self.state.vol_frac[source_idx][transition_mask] -= transition_amount[transition_mask]

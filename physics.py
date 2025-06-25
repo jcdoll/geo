@@ -47,9 +47,28 @@ class FluxPhysics:
         # 1. Convective acceleration on cell centers (then interpolate to faces)
         ax_conv, ay_conv = self._compute_convective_acceleration()
         
+        # Check for NaN in accelerations
+        if np.any(np.isnan(ax_conv)) or np.any(np.isnan(ay_conv)):
+            print(f"WARNING: NaN in convective acceleration!")
+            print(f"  ax_conv has {np.sum(np.isnan(ax_conv))} NaN values")
+            print(f"  ay_conv has {np.sum(np.isnan(ay_conv))} NaN values")
+        
+        # Check for NaN in gravity
+        if np.any(np.isnan(gx)) or np.any(np.isnan(gy)):
+            print(f"WARNING: NaN in gravity field!")
+            print(f"  gx has {np.sum(np.isnan(gx))} NaN values")
+            print(f"  gy has {np.sum(np.isnan(gy))} NaN values")
+        
         # 2. Apply convective and gravity forces
         st.velocity_x += dt * (ax_conv + gx)
         st.velocity_y += dt * (ay_conv + gy)
+        
+        # Debug: Check if gravity is being applied
+        if np.any(gy > 0):
+            max_gy = np.max(gy)
+            max_dvy = dt * max_gy
+            if max_dvy > 0.1:  # Significant velocity change
+                print(f"DEBUG: Applied gravity gy_max={max_gy:.2f}, dt={dt:.3f}, max velocity change={max_dvy:.2f} m/s")
         
         # 3. Apply viscous damping
         self.apply_viscous_damping(dt)
@@ -57,10 +76,16 @@ class FluxPhysics:
         # 4. Update face velocities with v* for projection
         st.update_face_velocities_from_cell()
         
-        # Zero velocities in space regions before projection
-        space_mask = st.density < 1.0
-        st.velocity_x[space_mask] = 0.0
-        st.velocity_y[space_mask] = 0.0
+        # Debug check before projection
+        if np.any(np.isnan(st.velocity_x)) or np.any(np.isnan(st.velocity_y)):
+            print(f"WARNING: NaN in velocities before projection!")
+            print(f"  vx: min={np.nanmin(st.velocity_x):.2e}, max={np.nanmax(st.velocity_x):.2e}")
+            print(f"  vy: min={np.nanmin(st.velocity_y):.2e}, max={np.nanmax(st.velocity_y):.2e}")
+            print(f"  dt={dt:.3e}, max(gx)={np.max(np.abs(gx)):.2e}, max(gy)={np.max(np.abs(gy)):.2e}")
+            print(f"  max(ax_conv)={np.max(np.abs(ax_conv)):.2e}, max(ay_conv)={np.max(np.abs(ay_conv)):.2e}")
+        
+        # Don't zero velocities in space - let materials fall through space!
+        # Space should have very low viscosity and allow free movement
 
         # ------------------------------------------------------------------
         # PROJECTION STAGE: Make velocity field divergence-free
@@ -73,6 +98,12 @@ class FluxPhysics:
         
         # Note: project_velocity updates face velocities and then 
         # calls update_cell_velocities_from_face() internally
+        
+        # Debug: Check velocities after projection
+        if np.any(gy > 0):
+            max_vy_after = np.max(np.abs(st.velocity_y))
+            if max_vy_after < 0.1:
+                print(f"DEBUG: Velocities zeroed by pressure projection! max_vy={max_vy_after:.4f}")
         
     def apply_viscous_damping(self, dt: float):
         """
@@ -118,9 +149,12 @@ class FluxPhysics:
         # Only consider cells with significant mass (not space)
         mass_mask = self.state.density > 1.0  # kg/m³
         if np.any(mass_mask):
-            alpha_masked = self.state.thermal_conductivity[mass_mask] / \
-                          (self.state.density[mass_mask] * self.state.specific_heat[mass_mask] + 1e-10)
-            alpha_max = np.max(alpha_masked)
+            # Use float64 to avoid overflow in intermediate calculations
+            k = self.state.thermal_conductivity[mass_mask].astype(np.float64)
+            rho = self.state.density[mass_mask].astype(np.float64)
+            cp = self.state.specific_heat[mass_mask].astype(np.float64)
+            alpha_masked = k / (rho * cp + 1e-10)
+            alpha_max = float(np.max(alpha_masked))
         else:
             alpha_max = 0.0
         
@@ -161,6 +195,14 @@ class FluxPhysics:
 
         vx = st.velocity_x
         vy = st.velocity_y
+        
+        # Check for NaN velocities before computation
+        if np.any(np.isnan(vx)) or np.any(np.isnan(vy)):
+            print("WARNING: NaN velocities detected in convective acceleration")
+            print(f"  vx: min={np.nanmin(vx):.2e}, max={np.nanmax(vx):.2e}, nan_count={np.sum(np.isnan(vx))}")
+            print(f"  vy: min={np.nanmin(vy):.2e}, max={np.nanmax(vy):.2e}, nan_count={np.sum(np.isnan(vy))}")
+            # Return zero acceleration to prevent further propagation
+            return np.zeros_like(vx), np.zeros_like(vy)
 
         # Compute gradients with upwind scheme (vectorised)
         dvx_dx = np.zeros_like(vx)

@@ -260,6 +260,38 @@ def setup_ice_world(state: 'FluxState', material_db: MaterialDatabase):
     state.update_mixture_properties(material_db)
 
 
+def setup_falling_rock(state: 'FluxState', material_db: MaterialDatabase):
+    """Test scenario with rock falling through space."""
+    # Clear to space
+    state.vol_frac.fill(0.0)
+    state.vol_frac[MaterialType.SPACE.value] = 1.0
+    
+    # Ground layer at bottom
+    ground_height = 10  # cells
+    state.vol_frac[MaterialType.ROCK.value, -ground_height:, :] = 1.0
+    state.vol_frac[MaterialType.SPACE.value, -ground_height:, :] = 0.0
+    
+    # Falling rock in middle of domain
+    cy, cx = state.ny // 2, state.nx // 2
+    radius = 3
+    
+    for j in range(max(0, cy - radius), min(state.ny, cy + radius + 1)):
+        for i in range(max(0, cx - radius), min(state.nx, cx + radius + 1)):
+            dist = np.sqrt((j - cy)**2 + (i - cx)**2)
+            if dist <= radius:
+                state.vol_frac[MaterialType.ROCK.value, j, i] = 1.0
+                state.vol_frac[MaterialType.SPACE.value, j, i] = 0.0
+    
+    # Set temperatures
+    state.temperature.fill(2.7)  # Space temperature
+    rock_mask = state.vol_frac[MaterialType.ROCK.value] > 0.5
+    state.temperature[rock_mask] = 300.0  # Room temperature for rock
+    
+    # Update properties
+    state.normalize_volume_fractions()
+    state.update_mixture_properties(material_db)
+
+
 # Scenario registry
 SCENARIOS = {
     'empty': setup_empty_world,
@@ -267,6 +299,7 @@ SCENARIOS = {
     'layered': setup_layered_planet,
     'volcanic': setup_volcanic_island,
     'ice': setup_ice_world,
+    'falling_rock': setup_falling_rock,
 }
 
 

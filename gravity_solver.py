@@ -75,14 +75,11 @@ class GravitySolver:
             gx = -gx
             gy = -gy
         else:
-            # Use uniform Earth gravity
+            # Use uniform Earth gravity everywhere (including space)
             gx = np.zeros_like(self.state.density)
             gy = np.ones_like(self.state.density) * 9.81  # Positive is down
             
-            # Zero gravity in space (low density regions)
-            space_mask = self.state.density < 0.1
-            gx[space_mask] = 0.0
-            gy[space_mask] = 0.0
+            # Don't zero gravity in space - let materials fall!
         
         # Store in state
         self.state.gravity_x = gx

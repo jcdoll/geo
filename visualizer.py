@@ -32,7 +32,7 @@ class FluxVisualizer:
         self,
         simulation: FluxSimulation,
         window_width: int = 800,
-        window_height: int = 800,
+        window_height: int = 900,
     ):
         """
         Initialize visualizer.
@@ -63,15 +63,26 @@ class FluxVisualizer:
         self.show_info = True
         self.show_help = False
         self.show_performance = False
+        self.show_debug = False
         
         # Store window dimensions
         self.window_width = window_width
         self.window_height = window_height
         
-        # Grid to screen mapping
+        # Grid to screen mapping - ensure square pixels
         self.grid_surface = pygame.Surface((self.state.nx, self.state.ny))
-        self.scale_x = window_width / self.state.nx
-        self.scale_y = window_height / self.state.ny
+        
+        # Calculate scale to maintain square aspect ratio
+        # Use the smaller scale to ensure the grid fits in the window
+        scale = min(window_width / self.state.nx, window_height / self.state.ny)
+        self.scale_x = scale
+        self.scale_y = scale
+        
+        # Calculate actual display dimensions and center the grid
+        self.display_width = int(self.state.nx * scale)
+        self.display_height = int(self.state.ny * scale)
+        self.display_offset_x = (window_width - self.display_width) // 2
+        self.display_offset_y = (window_height - self.display_height) // 2
         
         # Interaction state
         self.running = True
@@ -98,31 +109,76 @@ class FluxVisualizer:
         # Color maps
         self.init_colormaps()
         
+        # Colormap registry for easy lookup
+        self.colormap_registry = {
+            DisplayMode.TEMPERATURE: self.temp_colors,
+            DisplayMode.PRESSURE: self.pressure_colors,
+            DisplayMode.VELOCITY: self.velocity_colors,
+            DisplayMode.GRAVITY: self.gravity_colors,
+        }
+        
         # Custom event handler for test runner
         self.custom_event_handler = None
         
     def init_colormaps(self):
         """Initialize color maps for different display modes."""
-        # Temperature colormap (blue -> cyan -> green -> yellow -> red)
+        # Temperature colormap (black -> dark red -> red -> orange -> yellow -> white)
+        # Black at space temperature (2.7K) for visual consistency
         self.temp_colors = np.zeros((256, 3), dtype=np.uint8)
         for i in range(256):
-            if i < 64:
-                # Blue to cyan
-                self.temp_colors[i] = [0, i * 4, 255]
+            if i < 10:
+                # Black for very cold (space)
+                self.temp_colors[i] = [0, 0, 0]
+            elif i < 64:
+                # Black to dark red
+                t = (i - 10) / 54.0
+                self.temp_colors[i] = [int(139 * t), 0, 0]
             elif i < 128:
-                # Cyan to green
-                self.temp_colors[i] = [0, 255, 255 - (i - 64) * 4]
+                # Dark red to bright red
+                t = (i - 64) / 64.0
+                self.temp_colors[i] = [139 + int(116 * t), 0, 0]
             elif i < 192:
-                # Green to yellow
-                self.temp_colors[i] = [(i - 128) * 4, 255, 0]
+                # Red to orange
+                t = (i - 128) / 64.0
+                self.temp_colors[i] = [255, int(165 * t), 0]
             else:
-                # Yellow to red
-                self.temp_colors[i] = [255, 255 - (i - 192) * 4, 0]
+                # Orange to yellow to white
+                t = (i - 192) / 64.0
+                self.temp_colors[i] = [255, 165 + int(90 * t), int(255 * t)]
                 
-        # Pressure colormap (purple to cyan gradient)
+        # Pressure colormap (blue negative -> black zero -> red positive)
         self.pressure_colors = np.zeros((256, 3), dtype=np.uint8)
         for i in range(256):
-            self.pressure_colors[i] = [128 - i//2, i, 128 + i//2]
+            if 120 <= i <= 136:  # Near-zero pressure band (black)
+                self.pressure_colors[i] = [0, 0, 0]
+            elif i < 120:  # Negative pressure (blue)
+                t = i / 120.0
+                self.pressure_colors[i] = [0, 0, int(255 * (1 - t))]
+            else:  # Positive pressure (red)
+                t = (i - 136) / 120.0
+                self.pressure_colors[i] = [int(255 * t), 0, 0]
+                
+        # Velocity colormap (black -> red gradient)
+        self.velocity_colors = np.zeros((256, 3), dtype=np.uint8)
+        for i in range(256):
+            if i < 5:
+                # Black for zero/near-zero velocity
+                self.velocity_colors[i] = [0, 0, 0]
+            else:
+                # Black to red gradient
+                t = (i - 5) / 250.0
+                self.velocity_colors[i] = [int(255 * t), 0, 0]
+                
+        # Gravity colormap (black at zero -> red for positive acceleration)
+        self.gravity_colors = np.zeros((256, 3), dtype=np.uint8)
+        for i in range(256):
+            if i < 5:
+                # Black for zero/near-zero gravity
+                self.gravity_colors[i] = [0, 0, 0]
+            else:
+                # Black to red gradient
+                t = (i - 5) / 250.0
+                self.gravity_colors[i] = [int(255 * t), 0, 0]
             
     def run(self):
         """Main visualization loop."""
@@ -257,9 +313,17 @@ class FluxVisualizer:
     def handle_cell_selection(self, pos):
         """Handle right-click cell selection for inspection."""
         x, y = pos
-        # Convert screen coordinates to grid coordinates
-        grid_x = int(x / self.scale_x)
-        grid_y = int(y / self.scale_y)
+        # Convert screen coordinates to grid coordinates, accounting for display offset
+        mouse_x = x - self.display_offset_x
+        mouse_y = y - self.display_offset_y
+        
+        # Check if mouse is within the display area
+        if mouse_x < 0 or mouse_x >= self.display_width or mouse_y < 0 or mouse_y >= self.display_height:
+            self.selected_cell = None
+            return
+            
+        grid_x = int(mouse_x / self.scale_x)
+        grid_y = int(mouse_y / self.scale_y)
         
         # Validate coordinates
         if 0 <= grid_x < self.state.nx and 0 <= grid_y < self.state.ny:
@@ -295,22 +359,83 @@ class FluxVisualizer:
                 return
             mat_button_y += 28
             
-        # Check display mode buttons
+        # Check display mode buttons - 2 columns
         display_button_y = mat_button_y + 30  # After materials section
         display_modes = list(DisplayMode)
+        button_width = (self.toolbar_width - 3 * self.button_margin) // 2
+        button_height = 22
+        
         for i, mode in enumerate(display_modes):
-            if (x >= self.sidebar_x + self.button_margin and
-                x <= self.sidebar_x + self.toolbar_width - self.button_margin and
-                y >= display_button_y and y <= display_button_y + 22):
+            col = i % 2
+            row = i // 2
+            
+            mode_rect = pygame.Rect(
+                self.sidebar_x + self.button_margin + col * (button_width + self.button_margin),
+                display_button_y + row * (button_height + 3),
+                button_width,
+                button_height
+            )
+            
+            if mode_rect.collidepoint(x, y):
                 self.display_mode = mode
                 return
-            display_button_y += 25
+        
+        # Calculate where display modes end
+        num_rows = (len(display_modes) + 1) // 2
+        display_section_end = display_button_y + num_rows * (button_height + 3)
+            
+        # Check physics module checkboxes - after display modes
+        physics_section_y = display_section_end + 30  # Match render_toolbar
+        checkbox_y = physics_section_y + 35
+        checkbox_size = 20  # Matches render_toolbar
+        checkbox_margin = 10
+        
+        physics_modules = [
+            ("enable_gravity", self.simulation.enable_gravity),
+            ("enable_momentum", self.simulation.enable_momentum),
+            ("enable_advection", self.simulation.enable_advection),
+            ("enable_heat_transfer", self.simulation.enable_heat_transfer),
+            ("enable_uranium_heating", self.simulation.enable_uranium_heating),
+            ("enable_solar_heating", self.simulation.enable_solar_heating),
+            ("enable_phase_transitions", self.simulation.enable_phase_transitions),
+            ("enable_atmospheric", self.simulation.enable_atmospheric),
+        ]
+        
+        for attr_name, current_value in physics_modules:
+            checkbox_rect = pygame.Rect(
+                self.sidebar_x + checkbox_margin,
+                checkbox_y,
+                checkbox_size,
+                checkbox_size
+            )
+            
+            # Check if click is on this checkbox or the text label
+            label_rect = pygame.Rect(
+                checkbox_rect.right + 8,
+                checkbox_rect.top,
+                self.toolbar_width - checkbox_margin - checkbox_size - 8,
+                checkbox_size
+            )
+            
+            if checkbox_rect.collidepoint(x, y) or label_rect.collidepoint(x, y):
+                # Toggle the physics module
+                setattr(self.simulation, attr_name, not current_value)
+                return
+                
+            checkbox_y += checkbox_size + 8
     
     def apply_tool(self, mouse_pos: Tuple[int, int], button: int):
         """Apply interactive tool at mouse position."""
-        # Convert mouse to grid coordinates
-        gx = int(mouse_pos[0] / self.scale_x)
-        gy = int(mouse_pos[1] / self.scale_y)
+        # Convert mouse to grid coordinates, accounting for display offset
+        mouse_x = mouse_pos[0] - self.display_offset_x
+        mouse_y = mouse_pos[1] - self.display_offset_y
+        
+        # Check if mouse is within the display area
+        if mouse_x < 0 or mouse_x >= self.display_width or mouse_y < 0 or mouse_y >= self.display_height:
+            return
+            
+        gx = int(mouse_x / self.scale_x)
+        gy = int(mouse_y / self.scale_y)
         
         if 0 <= gx < self.state.nx and 0 <= gy < self.state.ny:
             # Create circular mask
@@ -448,8 +573,102 @@ class FluxVisualizer:
         if self.selected_cell:
             self.render_selected_cell()
             
+        # Draw sun direction indicator
+        if self.simulation.enable_solar_heating:
+            self.render_sun_indicator()
+            
         pygame.display.flip()
+    
+    def render_sun_indicator(self):
+        """Render sun-planet system indicator in top right corner."""
+        # Position in top right of display area, with margin
+        margin = 40
+        radius = 25
+        center_x = self.display_offset_x + self.display_width - margin - radius
+        center_y = self.display_offset_y + margin + radius
         
+        # Get sun angle from simulation
+        sun_angle = self.simulation.solar_angle
+        
+        # Draw thin circle showing planet's orbital path
+        pygame.draw.circle(self.screen, (150, 150, 150), (center_x, center_y), radius, 1)
+        
+        # Draw sun in center (yellow)
+        pygame.draw.circle(self.screen, (255, 255, 0), (center_x, center_y), 8)
+        pygame.draw.circle(self.screen, (255, 200, 0), (center_x, center_y), 8, 2)
+        
+        # Calculate planet position on orbit
+        # The sun angle tells us where the sun appears from the planet's perspective
+        # If sun_angle = 0 (sun overhead), planet is at bottom of orbit
+        # If sun_angle = π/2 (sun from east), planet is at west of orbit
+        # If sun_angle = -π/2 (sun from west), planet is at east of orbit
+        # Planet angle is opposite to sun angle
+        planet_angle = sun_angle + np.pi
+        planet_x = center_x + radius * np.sin(planet_angle)
+        planet_y = center_y + radius * np.cos(planet_angle)
+        
+        # Draw planet (dark circle)
+        pygame.draw.circle(self.screen, (50, 50, 50), (int(planet_x), int(planet_y)), 5)
+        pygame.draw.circle(self.screen, (100, 100, 100), (int(planet_x), int(planet_y)), 5, 1)
+        
+        # Draw a small arrow showing sunlight direction on the planet
+        # Arrow points from sun towards planet
+        arrow_len = 12
+        arrow_dir_x = planet_x - center_x
+        arrow_dir_y = planet_y - center_y
+        arrow_norm = np.sqrt(arrow_dir_x**2 + arrow_dir_y**2)
+        if arrow_norm > 0:
+            arrow_dir_x /= arrow_norm
+            arrow_dir_y /= arrow_norm
+            
+            # Arrow start and end
+            arrow_start_x = planet_x - arrow_dir_x * (5 + arrow_len)
+            arrow_start_y = planet_y - arrow_dir_y * (5 + arrow_len)
+            arrow_end_x = planet_x - arrow_dir_x * 5
+            arrow_end_y = planet_y - arrow_dir_y * 5
+            
+            # Draw arrow
+            pygame.draw.line(self.screen, (255, 200, 0), 
+                           (int(arrow_start_x), int(arrow_start_y)),
+                           (int(arrow_end_x), int(arrow_end_y)), 2)
+        
+        # Draw labels
+        sun_text = self.small_font.render("SUN", True, (255, 255, 255))
+        text_rect = sun_text.get_rect(center=(center_x, center_y + radius + 20))
+        self.screen.blit(sun_text, text_rect)
+        
+        # Optional: Show angle in degrees for debugging
+        if self.show_debug:
+            angle_deg = (sun_angle * 180 / np.pi) % 360
+            angle_text = self.small_font.render(f"{angle_deg:.0f}°", True, (200, 200, 200))
+            angle_rect = angle_text.get_rect(center=(center_x, center_y + radius + 35))
+            self.screen.blit(angle_text, angle_rect)
+        
+    def _render_field(self, rgb: np.ndarray, min_val: float, max_val: float, unit: str, title: str):
+        """Common field rendering logic.
+        
+        Args:
+            rgb: RGB array with shape (ny, nx, 3)
+            min_val: Minimum value for scale bar
+            max_val: Maximum value for scale bar
+            unit: Unit string for scale bar
+            title: Title for scale bar
+        """
+        # Render to surface
+        pygame.surfarray.blit_array(self.grid_surface, rgb.swapaxes(0, 1))
+        
+        # Scale to display size
+        scaled = pygame.transform.scale(
+            self.grid_surface,
+            (self.display_width, self.display_height)
+        )
+        
+        # Blit to screen
+        self.screen.blit(scaled, (self.display_offset_x, self.display_offset_y))
+        
+        # Add scale bar
+        self.render_scale_bar(min_val, max_val, unit, title)
+    
     def render_material_dominant(self):
         """Render dominant material per cell."""
         # Find material with highest volume fraction at each cell
@@ -467,9 +686,9 @@ class FluxVisualizer:
         pygame.surfarray.blit_array(self.grid_surface, rgb.swapaxes(0, 1))
         scaled = pygame.transform.scale(
             self.grid_surface, 
-            (int(self.state.nx * self.scale_x), int(self.state.ny * self.scale_y))
+            (self.display_width, self.display_height)
         )
-        self.screen.blit(scaled, (0, 0))
+        self.screen.blit(scaled, (self.display_offset_x, self.display_offset_y))
         
     def render_material_composite(self):
         """Render composite material colors based on volume fractions."""
@@ -489,86 +708,59 @@ class FluxVisualizer:
         pygame.surfarray.blit_array(self.grid_surface, rgb.swapaxes(0, 1))
         scaled = pygame.transform.scale(
             self.grid_surface,
-            (int(self.state.nx * self.scale_x), int(self.state.ny * self.scale_y))
+            (self.display_width, self.display_height)
         )
-        self.screen.blit(scaled, (0, 0))
+        self.screen.blit(scaled, (self.display_offset_x, self.display_offset_y))
         
     def render_temperature(self):
         """Render temperature field."""
-        # Auto-scale based on actual values
         T = self.state.temperature
         T_min, T_max = np.min(T), np.max(T)
+        
+        # Normalize and apply colormap
         if T_max > T_min:
             T_norm = np.clip((T - T_min) / (T_max - T_min) * 255, 0, 255).astype(np.uint8)
         else:
             T_norm = np.ones_like(T, dtype=np.uint8) * 128
         
-        # Apply colormap
         rgb = self.temp_colors[T_norm]
         
-        # Render
-        pygame.surfarray.blit_array(self.grid_surface, rgb.swapaxes(0, 1))
-        scaled = pygame.transform.scale(
-            self.grid_surface,
-            (int(self.state.nx * self.scale_x), int(self.state.ny * self.scale_y))
-        )
-        self.screen.blit(scaled, (0, 0))
-        
-        # Add scale bar
-        self.render_scale_bar(T_min, T_max, "K", "Temperature")
+        # Common rendering
+        self._render_field(rgb, T_min, T_max, "K", "Temperature")
         
     def render_pressure(self):
         """Render pressure field."""
-        # Get pressure range
         P = self.state.pressure
         P_min, P_max = np.min(P), np.max(P)
         P_range = max(abs(P_min), abs(P_max))
         
+        # Normalize for symmetric colormap
         if P_range > 0:
-            # Normalize to show both positive and negative
             P_norm = np.clip((P + P_range) / (2 * P_range) * 255, 0, 255).astype(np.uint8)
         else:
             P_norm = np.ones_like(P, dtype=np.uint8) * 128
         
-        # Apply colormap
         rgb = self.pressure_colors[P_norm]
         
-        # Render
-        pygame.surfarray.blit_array(self.grid_surface, rgb.swapaxes(0, 1))
-        scaled = pygame.transform.scale(
-            self.grid_surface,
-            (int(self.state.nx * self.scale_x), int(self.state.ny * self.scale_y))
-        )
-        self.screen.blit(scaled, (0, 0))
-        
-        # Add scale bar
-        self.render_scale_bar(P_min, P_max, "Pa", "Pressure")
+        # Common rendering
+        self._render_field(rgb, P_min, P_max, "Pa", "Pressure")
         
     def render_velocity(self):
         """Render velocity magnitude."""
-        # Compute velocity magnitude
         v_mag = np.sqrt(self.state.velocity_x**2 + self.state.velocity_y**2)
         v_min = 0
         v_max = np.max(v_mag)
         
+        # Normalize
         if v_max > 0:
             v_norm = np.clip(v_mag / v_max * 255, 0, 255).astype(np.uint8)
         else:
             v_norm = np.zeros_like(v_mag, dtype=np.uint8)
         
-        # Simple grayscale for now
-        rgb = np.stack([v_norm, v_norm, v_norm], axis=2)
+        rgb = self.velocity_colors[v_norm]
         
-        # Render
-        pygame.surfarray.blit_array(self.grid_surface, rgb.swapaxes(0, 1))
-        scaled = pygame.transform.scale(
-            self.grid_surface,
-            (int(self.state.nx * self.scale_x), int(self.state.ny * self.scale_y))
-        )
-        self.screen.blit(scaled, (0, 0))
-        
-        # Add scale bar
-        self.render_scale_bar(v_min, v_max, "m/s", "Velocity")
+        # Common rendering
+        self._render_field(rgb, v_min, v_max, "m/s", "Velocity")
         
     def render_gravity(self):
         """Render gravitational field magnitude."""
@@ -597,24 +789,12 @@ class FluxVisualizer:
         else:
             g_norm = np.zeros_like(g_mag)
         
-        # Blue-green-red colormap (like CA version)
-        rgb = np.zeros((self.state.ny, self.state.nx, 3), dtype=np.uint8)
-        # 0 -> blue, 0.5 -> green, 1 -> red
-        rgb[:, :, 2] = ((1 - g_norm) * 255).astype(np.uint8)  # Blue
-        green_factor = 4 * g_norm * (1 - g_norm)  # Peak at 0.5
-        rgb[:, :, 1] = (green_factor * 255).astype(np.uint8)  # Green
-        rgb[:, :, 0] = (g_norm * 255).astype(np.uint8)  # Red
+        # Convert normalized values to colormap indices
+        g_indices = np.clip(g_norm * 255, 0, 255).astype(np.uint8)
+        rgb = self.gravity_colors[g_indices]
         
-        # Render
-        pygame.surfarray.blit_array(self.grid_surface, rgb.swapaxes(0, 1))
-        scaled = pygame.transform.scale(
-            self.grid_surface,
-            (int(self.state.nx * self.scale_x), int(self.state.ny * self.scale_y))
-        )
-        self.screen.blit(scaled, (0, 0))
-        
-        # Add scale bar
-        self.render_scale_bar(g_min, g_max, "m/s²", "Gravity")
+        # Common rendering
+        self._render_field(rgb, g_min, g_max, "m/s²", "Gravity")
         
     def render_power(self):
         """Render power generation/dissipation with diverging color scale."""
@@ -681,41 +861,46 @@ class FluxVisualizer:
             else:
                 power_norm = np.zeros_like(power)
                 
-            # Apply diverging colormap: blue (cooling) -> white (neutral) -> red (heating)
+            # Apply diverging colormap: blue (cooling) -> black (zero) -> red (heating)
             # Vectorized implementation for better performance
             
-            # For positive values (heating): interpolate from white to red
-            heating_mask = power_norm > 0
+            # Initialize to black (for zero/near-zero values)
+            rgb.fill(0)
+            
+            # Define threshold for "near zero" to show as black
+            zero_threshold = 0.05  # 5% of normalized range
+            
+            # For positive values (heating): black to red
+            heating_mask = power_norm > zero_threshold
             if np.any(heating_mask):
-                # Red stays at 255
-                rgb[heating_mask, 0] = 255
-                # Green and blue fade from 255 (white) to 0 (red)
-                fade_factor = 1.0 - power_norm[heating_mask]
-                rgb[heating_mask, 1] = (255 * fade_factor).astype(np.uint8)
-                rgb[heating_mask, 2] = (255 * fade_factor).astype(np.uint8)
+                # Normalize positive values from threshold to 1
+                pos_norm = (power_norm[heating_mask] - zero_threshold) / (1.0 - zero_threshold)
+                # Red channel increases from 0 to 255
+                rgb[heating_mask, 0] = (255 * pos_norm).astype(np.uint8)
+                # Green and blue stay at 0
+                rgb[heating_mask, 1] = 0
+                rgb[heating_mask, 2] = 0
             
-            # For negative values (cooling): interpolate from white to blue
-            cooling_mask = power_norm < 0
+            # For negative values (cooling): black to blue
+            cooling_mask = power_norm < -zero_threshold
             if np.any(cooling_mask):
-                # Blue stays at 255
-                rgb[cooling_mask, 2] = 255
-                # Red and green fade from 255 (white) to 0 (blue)
-                fade_factor = 1.0 - np.abs(power_norm[cooling_mask])
-                rgb[cooling_mask, 0] = (255 * fade_factor).astype(np.uint8)
-                rgb[cooling_mask, 1] = (255 * fade_factor).astype(np.uint8)
+                # Normalize negative values from -threshold to -1
+                neg_norm = (np.abs(power_norm[cooling_mask]) - zero_threshold) / (1.0 - zero_threshold)
+                # Blue channel increases from 0 to 255
+                rgb[cooling_mask, 2] = (255 * neg_norm).astype(np.uint8)
+                # Red and green stay at 0
+                rgb[cooling_mask, 0] = 0
+                rgb[cooling_mask, 1] = 0
             
-            # For zero values: pure white
-            zero_mask = power_norm == 0
-            if np.any(zero_mask):
-                rgb[zero_mask] = 255
+            # Values between -threshold and +threshold remain black (already set)
             
             # Store scale values for the scale bar
             self.power_scale_min = -max_abs_power
             self.power_scale_max = max_abs_power
             self.power_scale_type = "symmetric_log"
         else:
-            # No significant power, show white (neutral)
-            rgb.fill(255)
+            # No significant power, show black (zero)
+            rgb.fill(0)
             self.power_scale_min = 0
             self.power_scale_max = 0
             self.power_scale_type = "zero"
@@ -724,42 +909,50 @@ class FluxVisualizer:
         pygame.surfarray.blit_array(self.grid_surface, rgb.swapaxes(0, 1))
         scaled = pygame.transform.scale(
             self.grid_surface,
-            (int(self.state.nx * self.scale_x), int(self.state.ny * self.scale_y))
+            (self.display_width, self.display_height)
         )
-        self.screen.blit(scaled, (0, 0))
+        self.screen.blit(scaled, (self.display_offset_x, self.display_offset_y))
         
         # Draw power scale bar
         self.draw_power_scale_bar()
         
     def draw_power_scale_bar(self):
         """Draw scale bar for power density with diverging scale."""
-        # Position at bottom left
-        bar_x = 10
-        bar_y = self.window_height - 60
+        # Position at bottom right (consistent with other scale bars)
         bar_width = 200
         bar_height = 20
+        margin = 20
+        bar_x = self.screen.get_width() - self.toolbar_width - bar_width - margin
+        bar_y = self.screen.get_height() - bar_height - margin - 30
         
-        if self.power_scale_type == "zero":
+        if not hasattr(self, 'power_scale_type') or self.power_scale_type == "zero":
             # No power to display
             text = self.font.render("Power: 0 W/m³", True, (255, 255, 255))
             self.screen.blit(text, (bar_x, bar_y - 25))
             return
         
-        # Draw gradient bar with proper blue-white-red colormap
+        # Draw gradient bar with proper blue-black-red colormap
         for i in range(bar_width):
             # Map position to normalized value [-1, 1]
             norm_value = 2.0 * i / bar_width - 1.0
             
-            if norm_value > 0:  # Heating side (white to red)
-                r = 255  # Red stays at maximum
-                g = int(255 * (1.0 - norm_value))  # Green fades from white to red
-                b = int(255 * (1.0 - norm_value))  # Blue fades from white to red
-            elif norm_value < 0:  # Cooling side (white to blue)
-                r = int(255 * (1.0 - abs(norm_value)))  # Red fades from white to blue
-                g = int(255 * (1.0 - abs(norm_value)))  # Green fades from white to blue
-                b = 255  # Blue stays at maximum
-            else:  # Center (white)
-                r = g = b = 255
+            # Define threshold for black center region
+            zero_threshold = 0.05
+            
+            if norm_value > zero_threshold:  # Heating side (black to red)
+                # Normalize from threshold to 1
+                t = (norm_value - zero_threshold) / (1.0 - zero_threshold)
+                r = int(255 * t)  # Red increases
+                g = 0  # Green stays at 0
+                b = 0  # Blue stays at 0
+            elif norm_value < -zero_threshold:  # Cooling side (black to blue)
+                # Normalize from -threshold to -1
+                t = (abs(norm_value) - zero_threshold) / (1.0 - zero_threshold)
+                r = 0  # Red stays at 0
+                g = 0  # Green stays at 0
+                b = int(255 * t)  # Blue increases
+            else:  # Center region (black)
+                r = g = b = 0
                 
             color = (r, g, b)
             pygame.draw.line(self.screen, color, 
@@ -1001,7 +1194,7 @@ class FluxVisualizer:
         display_title_rect = display_title.get_rect(center=(self.sidebar_x + self.toolbar_width // 2, mat_button_y + 15))
         self.screen.blit(display_title, display_title_rect)
         
-        # Display mode buttons
+        # Display mode buttons - 2 columns to save space
         display_button_y = mat_button_y + 30
         display_modes = list(DisplayMode)
         mode_names = {
@@ -1014,13 +1207,21 @@ class FluxVisualizer:
             DisplayMode.POWER: "Power",
         }
         
-        for mode in display_modes:
+        # Calculate button dimensions for 2 columns
+        button_width = (self.toolbar_width - 3 * self.button_margin) // 2
+        button_height = 22
+        
+        for i, mode in enumerate(display_modes):
+            # Calculate position - 2 columns
+            col = i % 2
+            row = i // 2
+            
             # Button background
             mode_rect = pygame.Rect(
-                self.sidebar_x + self.button_margin,
-                display_button_y,
-                self.toolbar_width - 2 * self.button_margin,
-                22
+                self.sidebar_x + self.button_margin + col * (button_width + self.button_margin),
+                display_button_y + row * (button_height + 3),
+                button_width,
+                button_height
             )
             
             # Highlight selected mode
@@ -1035,29 +1236,69 @@ class FluxVisualizer:
             mode_text = self.toolbar_font.render(mode_names.get(mode, mode.value), True, (180, 180, 180))
             mode_text_rect = mode_text.get_rect(center=(mode_rect.centerx, mode_rect.centery))
             self.screen.blit(mode_text, mode_text_rect)
+        
+        # Calculate where display modes end (for next section)
+        num_rows = (len(display_modes) + 1) // 2  # Round up
+        display_section_end = display_button_y + num_rows * (button_height + 3)
             
-            display_button_y += 25
-            
-        # Info section at bottom
-        info_y = self.screen.get_height() - 120
+        # Physics toggle section at bottom
+        physics_section_y = display_section_end + 30  # Position after display modes with margin
         
         # Divider line
         pygame.draw.line(self.screen, (60, 60, 60), 
-                         (self.sidebar_x + 10, info_y - 10),
-                         (self.sidebar_x + self.toolbar_width - 10, info_y - 10), 1)
+                         (self.sidebar_x + 10, physics_section_y - 10),
+                         (self.sidebar_x + self.toolbar_width - 10, physics_section_y - 10), 1)
         
-        # Simulation info
-        info_lines = [
-            f"Grid: {self.state.nx}x{self.state.ny}",
-            f"Cell Size: {self.state.dx}m",
-            f"Time: {self.state.time:.1f}s",
-            f"Step: {self.simulation.step_count}",
-            f"FPS: {self.simulation.fps:.1f}",
+        # Physics title
+        physics_title = self.font.render("PHYSICS MODULES", True, (200, 200, 200))
+        physics_title_rect = physics_title.get_rect(center=(self.sidebar_x + self.toolbar_width // 2, physics_section_y + 10))
+        self.screen.blit(physics_title, physics_title_rect)
+        
+        # Physics module checkboxes - larger and more readable
+        checkbox_y = physics_section_y + 35
+        checkbox_size = 20  # Increased from 16
+        checkbox_margin = 10  # Increased from 5
+        
+        physics_modules = [
+            ("Gravity", self.simulation.enable_gravity),
+            ("Momentum", self.simulation.enable_momentum),
+            ("Advection", self.simulation.enable_advection),
+            ("Heat Transfer", self.simulation.enable_heat_transfer),
+            ("Uranium Heat", self.simulation.enable_uranium_heating),
+            ("Solar Heating", self.simulation.enable_solar_heating),
+            ("Phase Trans.", self.simulation.enable_phase_transitions),
+            ("Atmospheric", self.simulation.enable_atmospheric),
         ]
         
-        for i, line in enumerate(info_lines):
-            text = self.toolbar_font.render(line, True, (160, 160, 160))
-            self.screen.blit(text, (self.sidebar_x + 10, info_y + i * 20))
+        for module_name, enabled in physics_modules:
+            # Draw checkbox
+            checkbox_rect = pygame.Rect(
+                self.sidebar_x + checkbox_margin,
+                checkbox_y,
+                checkbox_size,
+                checkbox_size
+            )
+            
+            # Background with better contrast
+            pygame.draw.rect(self.screen, (60, 60, 60), checkbox_rect)
+            pygame.draw.rect(self.screen, (120, 120, 120), checkbox_rect, 2)
+            
+            # Check mark if enabled - larger and clearer
+            if enabled:
+                # Draw a thicker checkmark
+                check_points = [
+                    (checkbox_rect.left + 4, checkbox_rect.centery),
+                    (checkbox_rect.left + checkbox_size // 3 + 1, checkbox_rect.bottom - 4),
+                    (checkbox_rect.right - 4, checkbox_rect.top + 4)
+                ]
+                pygame.draw.lines(self.screen, (0, 255, 0), False, check_points, 3)
+            
+            # Module name - larger font
+            module_text = self.small_font.render(module_name, True, (220, 220, 220))
+            module_rect = module_text.get_rect(midleft=(checkbox_rect.right + 8, checkbox_rect.centery))
+            self.screen.blit(module_text, module_rect)
+            
+            checkbox_y += checkbox_size + 8  # More spacing between items
             
     def render_selected_cell(self):
         """Render selected cell highlight and information."""
@@ -1067,8 +1308,8 @@ class FluxVisualizer:
         cx, cy = self.selected_cell
         
         # Draw white highlight box
-        screen_x = cx * self.scale_x
-        screen_y = cy * self.scale_y
+        screen_x = cx * self.scale_x + self.display_offset_x
+        screen_y = cy * self.scale_y + self.display_offset_y
         highlight_rect = pygame.Rect(
             screen_x, screen_y,
             self.scale_x, self.scale_y
@@ -1131,8 +1372,9 @@ class FluxVisualizer:
         bar_width = 200
         bar_height = 20
         margin = 20
-        x = self.screen.get_width() - self.toolbar_width - bar_width - margin
-        y = self.screen.get_height() - bar_height - margin - 30
+        # Position relative to the actual display area, not the whole window
+        x = self.display_offset_x + self.display_width - bar_width - margin
+        y = self.display_offset_y + self.display_height - bar_height - margin - 30
         
         # Create gradient
         gradient = pygame.Surface((bar_width, bar_height))
@@ -1140,53 +1382,9 @@ class FluxVisualizer:
             # Map position to value
             t = i / (bar_width - 1)
             
-            # Use same color mapping as the visualization
-            if title == "Gravity":
-                # Blue-green-red gradient
-                if t < 0.5:
-                    # Blue to green
-                    t2 = t * 2
-                    r = 0
-                    g = int(t2 * 255)
-                    b = int((1 - t2) * 255)
-                else:
-                    # Green to red
-                    t2 = (t - 0.5) * 2
-                    r = int(t2 * 255)
-                    g = int((1 - t2) * 255)
-                    b = 0
-            elif title == "Temperature":
-                # Blue to red through white
-                if t < 0.5:
-                    # Blue to white
-                    t2 = t * 2
-                    r = int(t2 * 255)
-                    g = int(t2 * 255)
-                    b = 255
-                else:
-                    # White to red
-                    t2 = (t - 0.5) * 2
-                    r = 255
-                    g = int((1 - t2) * 255)
-                    b = int((1 - t2) * 255)
-            elif title == "Pressure":
-                # Blue (negative) to red (positive)
-                if t < 0.5:
-                    # Blue side
-                    t2 = t * 2
-                    r = int(t2 * 255)
-                    g = int(t2 * 255)
-                    b = 255
-                else:
-                    # Red side
-                    t2 = (t - 0.5) * 2
-                    r = 255
-                    g = int((1 - t2) * 255)
-                    b = int((1 - t2) * 255)
-            else:
-                # Default grayscale
-                gray = int(t * 255)
-                r = g = b = gray
+            # Get color from appropriate colormap
+            color = self._get_scale_bar_color(title, t, min_val, max_val)
+            r, g, b = color
                 
             pygame.draw.line(gradient, (r, g, b), (i, 0), (i, bar_height))
             
@@ -1211,6 +1409,51 @@ class FluxVisualizer:
         max_rect = max_text.get_rect(right=x + bar_width, top=y + bar_height + 5)
         self.screen.blit(max_text, max_rect)
         
+    def _get_scale_bar_color(self, title: str, t: float, min_val: float, max_val: float) -> tuple:
+        """Get color for scale bar position based on visualization type.
+        
+        Args:
+            title: Name of the visualization (Temperature, Pressure, etc.)
+            t: Normalized position (0-1) along the scale bar
+            min_val: Minimum value of the scale
+            max_val: Maximum value of the scale
+            
+        Returns:
+            (r, g, b) tuple
+        """
+        # Map title to colormap
+        colormap_mapping = {
+            "Temperature": self.temp_colors,
+            "Velocity": self.velocity_colors,
+            "Gravity": self.gravity_colors,
+        }
+        
+        # Simple colormaps - direct mapping
+        if title in colormap_mapping:
+            idx = int(t * 255)
+            color = colormap_mapping[title][idx]
+            return (color[0], color[1], color[2])
+        
+        # Pressure needs special handling for negative/positive ranges
+        elif title == "Pressure":
+            if min_val < 0 and max_val > 0:
+                # Full range - use entire colormap
+                idx = int(t * 255)
+            elif max_val <= 0:
+                # All negative - use blue portion (0-120)
+                idx = int(t * 120)
+            else:
+                # All positive - use red portion (136-255)
+                idx = int(136 + t * 119)
+            
+            color = self.pressure_colors[idx]
+            return (color[0], color[1], color[2])
+        
+        # Default grayscale
+        else:
+            gray = int(t * 255)
+            return (gray, gray, gray)
+    
     def format_smart(self, value: float, unit: str) -> str:
         """Smart formatting with appropriate precision and SI prefixes."""
         if unit == "W/m³":

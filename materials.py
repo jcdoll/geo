@@ -57,11 +57,10 @@ class MaterialProperties:
     emissivity: float  # 0-1 for radiative cooling
     
     # Optical properties
-    albedo: float  # 0-1 (0=perfect absorber, 1=perfect reflector)
+    solar_absorption: float  # 0-1 (fraction of incident solar radiation absorbed)
     
     # Fields with defaults must come after fields without defaults
     heat_generation: float = 0.0  # W/kg (for radioactive materials)
-    absorption_coeff: float = 1.0  # For solar radiation
     default_temperature: float = 288.0  # K - temperature when material is created
     
     # Phase transitions
@@ -89,8 +88,7 @@ class MaterialDatabase:
             thermal_conductivity=1e-6,  # Minimal heat conduction
             specific_heat=100.0,  # Small but reasonable for numerical stability
             emissivity=1e-3,  # Nearly zero emission
-            albedo=0.0,
-            absorption_coeff=0.0,  # Zero absorption - perfectly transparent
+            solar_absorption=0.0,  # No solar interaction
             default_temperature=2.7,  # K
             color_rgb=(0, 0, 0),  # Black
         )
@@ -102,8 +100,7 @@ class MaterialDatabase:
             thermal_conductivity=0.025,
             specific_heat=1005.0,
             emissivity=0.8,
-            albedo=0.0,
-            absorption_coeff=0.001,  # Nearly transparent
+            solar_absorption=0.01,  # Small absorption for atmospheric heating
             default_temperature=288.0,  # K
             color_rgb=(135, 206, 250),  # Light sky blue
         )
@@ -115,8 +112,7 @@ class MaterialDatabase:
             thermal_conductivity=0.6,
             specific_heat=4186.0,
             emissivity=0.96,
-            albedo=0.06,
-            absorption_coeff=0.02,  # Moderate absorption
+            solar_absorption=0.019,  # ~94% absorbed (1.9% of incident light)
             default_temperature=288.0,  # K
             color_rgb=(0, 119, 190),  # Deep water blue
             transitions=[
@@ -150,8 +146,7 @@ class MaterialDatabase:
             thermal_conductivity=0.02,
             specific_heat=2080.0,
             emissivity=0.8,
-            albedo=0.0,
-            absorption_coeff=0.005,  # Slight absorption
+            solar_absorption=0.02,  # Greenhouse gas absorption
             default_temperature=373.0,  # K
             color_rgb=(240, 248, 255),  # Alice blue (light mist)
             transitions=[
@@ -175,8 +170,7 @@ class MaterialDatabase:
             thermal_conductivity=2.2,
             specific_heat=2100.0,
             emissivity=0.97,
-            albedo=0.8,
-            absorption_coeff=0.01,  # Semi-transparent
+            solar_absorption=0.002,  # Highly reflective, little absorption
             default_temperature=263.0,  # K
             color_rgb=(176, 224, 230),  # Powder blue
             transitions=[
@@ -200,8 +194,7 @@ class MaterialDatabase:
             thermal_conductivity=3.0,
             specific_heat=1000.0,
             emissivity=0.95,
-            albedo=0.3,
-            absorption_coeff=1.0,  # Opaque
+            solar_absorption=0.7,  # Absorbs most sunlight
             default_temperature=288.0,  # K
             color_rgb=(139, 90, 43),  # Saddle brown
             transitions=[
@@ -235,8 +228,7 @@ class MaterialDatabase:
             thermal_conductivity=0.3,
             specific_heat=830.0,
             emissivity=0.95,
-            albedo=0.4,
-            absorption_coeff=1.0,  # Opaque
+            solar_absorption=0.6,  # Lighter colored, reflects more
             default_temperature=288.0,  # K
             color_rgb=(238, 203, 173),  # Desert sand
             transitions=[
@@ -259,8 +251,7 @@ class MaterialDatabase:
             thermal_conductivity=27.0,
             specific_heat=116.0,
             emissivity=0.9,
-            albedo=0.15,
-            absorption_coeff=1.0,  # Opaque
+            solar_absorption=0.85,  # Dark metal, absorbs most light
             heat_generation=0.1,  # W/kg - radioactive decay (enriched uranium)
             default_temperature=288.0,  # K
             color_rgb=(0, 255, 0),  # Bright green for visibility
@@ -274,8 +265,7 @@ class MaterialDatabase:
             thermal_conductivity=1.5,
             specific_heat=1200.0,
             emissivity=0.95,
-            albedo=0.9,
-            absorption_coeff=1.0,  # Opaque
+            solar_absorption=0.8,  # Hot lava should absorb sunlight, not reflect it!
             default_temperature=1500.0,  # K
             color_rgb=(255, 69, 0),  # Orange red
             transitions=[

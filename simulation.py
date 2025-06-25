@@ -18,10 +18,10 @@ from pressure_solver import PressureSolver
 from multigrid import SmootherType
 from heat_transfer import HeatTransfer
 from transport import FluxTransport
-from solar_heating import apply_solar_heating_proper
+from solar_heating import apply_solar_heating
 from atmospheric_processes import AtmosphericProcesses
 from phase_transitions import PhaseTransitionSystem
-
+from gravity_solver import SolverMethod
 
 class FluxSimulation:
     """Main simulation class that orchestrates all physics modules."""
@@ -35,6 +35,7 @@ class FluxSimulation:
         use_multigrid_heat: bool = False,
         cell_depth: Optional[float] = None,
         smoother_type: SmootherType = SmootherType.JACOBI,
+        init_gravity_ramp: bool = True,
     ):
         """
         Initialize flux-based simulation.
@@ -47,6 +48,7 @@ class FluxSimulation:
             use_multigrid_heat: Use multigrid solver for heat transfer (default: False, uses ADI)
             cell_depth: Cell depth in meters (defaults to domain width for cubic simulation)
             smoother_type: Which smoother to use for pressure solver (default: JACOBI)
+            init_gravity_ramp: Use gradual gravity ramping during initialization (default: True)
         """
         # Core components
         self.state = FluxState(nx, ny, dx, cell_depth=cell_depth)
@@ -56,14 +58,13 @@ class FluxSimulation:
             
         # Physics modules
         # Initialize gravity solver with DFT method (no boundary artifacts)
-        from gravity_solver import SolverMethod
         self.gravity_solver = GravitySolver(self.state, method=SolverMethod.DFT)
         self.pressure_solver = PressureSolver(self.state, smoother_type)
         
         # Choose heat transfer solver
         self.use_multigrid_heat = use_multigrid_heat
         solver_method = "multigrid" if use_multigrid_heat else "adi"
-        self.heat_transfer = HeatTransfer(self.state, solver_method=solver_method)
+        self.heat_transfer = HeatTransfer(self.state, solver_method=solver_method, simulation=self)
             
         self.physics = FluxPhysics(self.state)
         self.material_db = MaterialDatabase()
@@ -89,14 +90,16 @@ class FluxSimulation:
         self.solar_constant = 1361.0  # W/m²
         self.t_space = 2.7  # K (cosmic background)
         
-        # Store scenario for reset
+        # Store scenario and init params for reset
         self.scenario = scenario
+        self.init_gravity_ramp = init_gravity_ramp
         
         # Debug flags to disable individual physics processes
         self.enable_gravity = True
         self.enable_momentum = True
         self.enable_advection = True
         self.enable_heat_transfer = True
+        self.enable_uranium_heating = True  # Separate from heat transfer
         self.enable_solar_heating = True
         self.enable_phase_transitions = True
         self.enable_atmospheric = True
@@ -119,8 +122,24 @@ class FluxSimulation:
         use_multigrid = self.use_multigrid_heat
         smoother = self.pressure_solver.smoother_type
         
+        # Preserve physics enable/disable flags
+        saved_flags = {
+            'enable_gravity': self.enable_gravity,
+            'enable_momentum': self.enable_momentum,
+            'enable_advection': self.enable_advection,
+            'enable_heat_transfer': self.enable_heat_transfer,
+            'enable_uranium_heating': self.enable_uranium_heating,
+            'enable_solar_heating': self.enable_solar_heating,
+            'enable_phase_transitions': self.enable_phase_transitions,
+            'enable_atmospheric': self.enable_atmospheric,
+        }
+        
         # Reinitialize
         self.__init__(nx, ny, dx, scenario=scenario_to_use, use_multigrid_heat=use_multigrid, smoother_type=smoother)
+        
+        # Restore physics flags
+        for flag_name, flag_value in saved_flags.items():
+            setattr(self, flag_name, flag_value)
         
     def _solve_initial_state(self):
         """Solve gravity, pressure, and velocity fields for initial state.
@@ -136,19 +155,12 @@ class FluxSimulation:
         It works even with zero initial velocity - the projection enforces incompressibility
         and produces the correct pressure field.
         """
-        # Step 1: Solve gravity field
-        gx, gy = self.gravity_solver.solve_gravity()
-        self.state.gravity_x[:] = gx
-        self.state.gravity_y[:] = gy
-        
-        # Step 2: Solve for pressure-velocity coupling
-        # Use a small timestep for initialization
-        dt_init = 0.01  # Small timestep for initialization
-        
-        # Update momentum with gravity - the velocity projection method
-        # will solve for the pressure field that enforces incompressibility
-        # This works even starting from zero velocity!
-        self.physics.update_momentum(gx, gy, dt_init)
+        # Run timestep with dt=0 and initialization flag
+        # This will:
+        # 1. Calculate gravity field
+        # 2. Establish pressure equilibrium (with optional ramping)
+        # 3. Calculate initial power density from all heat sources
+        self.timestep(0.0, is_initialization=True)
         
     def step_forward(self):
         """Execute one simulation timestep."""
@@ -177,18 +189,17 @@ class FluxSimulation:
         if self.last_step_time > 0:
             self.fps = 1.0 / self.last_step_time
             
-    def timestep(self, dt: float):
+    def timestep(self, dt: float, is_initialization: bool = False):
         """
         Execute one timestep using operator splitting.
         
         Args:
-            dt: Time step in seconds
+            dt: Time step in seconds (0 for initialization)
+            is_initialization: True when called from _solve_initial_state
         """
         # Initialize timing if needed
         if not hasattr(self, 'step_timings'):
             self.step_timings = {}
-            
-        import time
         
         # Reset power density tracking for this timestep
         self.state.power_density.fill(0.0)
@@ -197,6 +208,8 @@ class FluxSimulation:
         t0 = time.perf_counter()
         if self.enable_gravity:
             gx, gy = self.gravity_solver.solve_gravity()
+            self.state.gravity_x[:] = gx
+            self.state.gravity_y[:] = gy
         else:
             gx, gy = self.state.gravity_x, self.state.gravity_y  # Use existing values
         self.step_timings['gravity'] = time.perf_counter() - t0
@@ -204,12 +217,30 @@ class FluxSimulation:
         # 2. Momentum update (projection enforces incompressibility)
         t0 = time.perf_counter()
         if self.enable_momentum:
-            self.physics.update_momentum(gx, gy, dt)
+            if is_initialization and self.init_gravity_ramp:
+                # Gradually establish pressure equilibrium for initialization
+                n_init_steps = 10
+                dt_init = 0.001  # Very small timestep for gentle initialization
+                
+                for i in range(n_init_steps):
+                    # Gradually ramp up the gravity force to avoid shock
+                    ramp_factor = (i + 1) / n_init_steps
+                    gx_ramped = gx * ramp_factor
+                    gy_ramped = gy * ramp_factor
+                    
+                    # Update momentum with ramped gravity
+                    self.physics.update_momentum(gx_ramped, gy_ramped, dt_init)
+                    
+                    # Also update face coefficients each step to ensure consistency
+                    self.state.update_face_coefficients()
+            elif dt > 0:
+                # Normal momentum update
+                self.physics.update_momentum(gx, gy, dt)
         self.step_timings['momentum'] = time.perf_counter() - t0
         
         # 4. Advection (flux-based transport)
         t0 = time.perf_counter()
-        if self.enable_advection:
+        if self.enable_advection and dt > 0:
             self.transport.advect_materials_vectorized(dt)
         self.step_timings['advection'] = time.perf_counter() - t0
         
@@ -219,27 +250,35 @@ class FluxSimulation:
             self.heat_transfer.solve_heat_equation(dt)
         self.step_timings['heat_transfer'] = time.perf_counter() - t0
         
+        # 5b. Uranium heating (separate from general heat transfer)
+        t0 = time.perf_counter()
+        # Always calculate uranium heating for power density display,
+        # but only apply temperature changes if enabled
+        self.heat_transfer.apply_heat_generation(dt, apply_heating=self.enable_uranium_heating)
+        self.step_timings['uranium_heating'] = time.perf_counter() - t0
+        
         # 6. Solar heating (using proper material absorption)
         t0 = time.perf_counter()
         if self.enable_solar_heating:
-            apply_solar_heating_proper(self.state, dt, self.solar_angle, self.solar_constant)
+            apply_solar_heating(self.state, dt, self.solar_angle, self.solar_constant)
         self.step_timings['solar_heating'] = time.perf_counter() - t0
         
         # 7. Phase transitions (general system handles all material transitions)
         t0 = time.perf_counter()
-        if self.enable_phase_transitions:
+        if self.enable_phase_transitions and dt > 0:
             self.phase_transitions.apply_transitions(dt)
         self.step_timings['phase_transitions'] = time.perf_counter() - t0
         
         # 8. Atmospheric processes (convection only - phase transitions handled above)
         t0 = time.perf_counter()
-        if self.enable_atmospheric:
+        if self.enable_atmospheric and dt > 0:
             self.atmospheric_processes.apply_convection()
         self.step_timings['atmospheric_processes'] = time.perf_counter() - t0
         
         # 9. Update mixture properties
         t0 = time.perf_counter()
-        self.state.update_mixture_properties(self.material_db)
+        if dt > 0 or is_initialization:
+            self.state.update_mixture_properties(self.material_db)
         self.step_timings['update_properties'] = time.perf_counter() - t0
         
         # 10. Final safety check - ensure no NaN/inf values propagated
@@ -252,131 +291,7 @@ class FluxSimulation:
                                                    neginf=self.t_space)
         
         # No artificial limits on power density - let physics determine the values
-        
-    def apply_solar_heating(self, dt: float):
-        """
-        Apply solar heating using DDA ray marching.
-        
-        Traces rays from the sun through the atmosphere and deposits
-        energy based on material absorption coefficients.
-        """
-        # Solar direction (angle from vertical)
-        sun_x = np.sin(self.solar_angle)
-        sun_y = np.cos(self.solar_angle)
-        
-        # Determine which boundary rays enter from
-        if sun_y > 0:  # Sun above horizon
-            # Spawn rays from top boundary
-            for i in range(self.state.nx):
-                self._trace_solar_ray(i, 0, sun_x, sun_y, dt)
-        else:  # Sun below horizon (night)
-            return  # No solar heating at night
-            
-        # Also spawn rays from side boundaries if sun is at an angle
-        if abs(sun_x) > 0.1:
-            if sun_x > 0:  # Sun from right
-                for j in range(self.state.ny):
-                    self._trace_solar_ray(self.state.nx-1, j, sun_x, sun_y, dt)
-            else:  # Sun from left
-                for j in range(self.state.ny):
-                    self._trace_solar_ray(0, j, sun_x, sun_y, dt)
-                    
-    def _trace_solar_ray(self, start_x: int, start_y: int, 
-                        sun_x: float, sun_y: float, dt: float):
-        """
-        Trace a single solar ray using DDA algorithm.
-        
-        Args:
-            start_x, start_y: Starting position
-            sun_x, sun_y: Sun direction (normalized)
-            dt: Time step
-        """
-        # Initial intensity
-        intensity = self.solar_constant
-        
-        # Ray direction (opposite of sun direction - rays go from sun to ground)
-        dx = -sun_x
-        dy = -sun_y
-        
-        # Current position
-        x, y = float(start_x), float(start_y)
-        
-        # DDA parameters
-        if abs(dx) > abs(dy):
-            # X-major
-            step_x = 1.0 if dx > 0 else -1.0
-            step_y = dy / abs(dx)
-        else:
-            # Y-major
-            step_y = 1.0 if dy > 0 else -1.0
-            step_x = dx / abs(dy)
-            
-        # Material absorption coefficients from PHYSICS_FLUX.md
-        absorption_coeffs = {
-            MaterialType.AIR: 0.001,
-            MaterialType.WATER_VAPOR: 0.005,
-            MaterialType.WATER: 0.02,
-            MaterialType.ICE: 0.01,
-            MaterialType.SPACE: 0.0,
-            # All rocks/solids are opaque
-            MaterialType.ROCK: 1.0,
-            MaterialType.SAND: 1.0,
-            MaterialType.URANIUM: 1.0,
-            MaterialType.MAGMA: 1.0,
-        }
-        
-        # March along ray
-        while 0 <= x < self.state.nx and 0 <= y < self.state.ny and intensity > 1e-6:
-            ix, iy = int(x), int(y)
-            
-            # Skip space cells
-            if self.state.density[iy, ix] < 0.1:
-                x += step_x
-                y += step_y
-                continue
-                
-            # Compute absorption from material mixture
-            total_absorption = 0.0
-            weighted_albedo = 0.0
-            for mat_type in MaterialType:
-                vol_frac = self.state.vol_frac[mat_type.value, iy, ix]
-                if vol_frac > 0:
-                    total_absorption += vol_frac * absorption_coeffs.get(mat_type, 0.1)
-                    # Get material albedo
-                    mat_props = self.material_db.get_properties(mat_type)
-                    weighted_albedo += vol_frac * mat_props.albedo
-                    
-            # Apply material albedo (1 - albedo = fraction absorbed)
-            effective_absorption = total_absorption * (1.0 - weighted_albedo)
-            
-            # Energy absorbed in this cell
-            absorbed = intensity * effective_absorption
-            
-            # Convert to volumetric power density (W/m³)
-            # Power absorbed per unit area, divided by cell depth
-            volumetric_power = absorbed / self.state.cell_depth
-            
-            # Update power density tracking
-            self.state.power_density[iy, ix] += volumetric_power
-            
-            # Convert to temperature change
-            if self.state.density[iy, ix] > 0 and self.state.specific_heat[iy, ix] > 0:
-                dT = volumetric_power * dt / (self.state.density[iy, ix] * 
-                                             self.state.specific_heat[iy, ix])
-                self.state.temperature[iy, ix] += dT
-                
-            # Attenuate ray
-            intensity *= (1.0 - effective_absorption)
-            
-            # Stop if we hit opaque material
-            if effective_absorption > 0.99:
-                break
-                
-            # Step to next cell
-            x += step_x
-            y += step_y
-            
-        
+
     def get_info(self) -> Dict[str, Any]:
         """Get simulation information for display."""
         return {

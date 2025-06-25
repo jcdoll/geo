@@ -65,29 +65,9 @@ class PressureSolver:
         # RHS for Poisson equation
         rhs = div / dt
         
-        # Zero RHS in space regions - they should maintain zero pressure
-        # Use a more conservative threshold to catch interface cells
-        space_mask = st.density < 1.0  # Increased from 0.1
-        rhs[space_mask] = 0.0
-        
-        # Also zero out velocities in pure space regions to prevent artifacts
-        pure_space_mask = st.density < 0.01
-        if np.any(pure_space_mask):
-            # Find cells that are pure space
-            j_space, i_space = np.where(pure_space_mask)
-            
-            # Zero out face velocities touching these cells
-            for j, i in zip(j_space, i_space):
-                # X-faces
-                if i > 0:
-                    st.velocity_x_face[j, i] = 0.0
-                if i < st.nx:
-                    st.velocity_x_face[j, i+1] = 0.0
-                # Y-faces
-                if j > 0:
-                    st.velocity_y_face[j, i] = 0.0
-                if j < st.ny:
-                    st.velocity_y_face[j+1, i] = 0.0
+        # Don't modify RHS or velocities in space regions
+        # Let the incompressible solver handle space naturally as a very low density fluid
+        # This allows materials to fall through space by displacing it
         
         # Solve variable-coefficient Poisson equation
         # Use very relaxed settings for real-time performance
@@ -126,10 +106,7 @@ class PressureSolver:
         # Update cell-centered velocities from face velocities
         st.update_cell_velocities_from_face()
         
-        # Ensure velocities remain zero in space regions
-        space_mask = st.density < 1.0
-        st.velocity_x[space_mask] = 0.0
-        st.velocity_y[space_mask] = 0.0
+        # REMOVED: Don't zero velocities in space - let materials fall through!
         
         # Accumulate pressure correction
         st.pressure += phi
@@ -165,10 +142,10 @@ class PressureSolver:
             (st.velocity_y_face[1:, :] - st.velocity_y_face[:-1, :]) / dx
         )
         
-        # Zero divergence in space regions (they don't participate in incompressibility)
-        # Use same threshold as in project_velocity for consistency
-        space_mask = st.density < 1.0
-        div[space_mask] = 0.0
+        # Let space participate in incompressibility - materials need to displace it!
+        # Only zero divergence in truly empty regions (no material at all)
+        # space_mask = st.density < 0.1
+        # div[space_mask] = 0.0
         
         return div
         

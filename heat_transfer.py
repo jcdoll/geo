@@ -15,17 +15,19 @@ from multigrid import solve_mac_poisson_vectorized, BoundaryCondition
 class HeatTransfer:
     """Heat transfer solver with support for ADI and multigrid methods."""
     
-    def __init__(self, state, solver_method: str = "adi"):
+    def __init__(self, state, solver_method: str = "adi", simulation=None):
         """
         Initialize heat transfer solver.
         
         Args:
             state: FluxState instance
             solver_method: "adi" or "multigrid" (default: "adi")
+            simulation: Reference to parent simulation (optional, for accessing flags)
         """
         self.state = state
         self.material_db = MaterialDatabase()
         self.solver_method = solver_method
+        self.simulation = simulation
         
         # Physical constants
         self.stefan_boltzmann = 5.67e-8  # W/(m²·K⁴)
@@ -68,11 +70,8 @@ class HeatTransfer:
         else:  # multigrid uses different radiation method
             self._apply_radiation_boundary_multigrid(dt)
         
-        # Step 3: Internal heat generation
-        if self.solver_method == "adi":
-            self.apply_heat_generation(dt)
-        else:  # multigrid
-            self._apply_heat_sources_multigrid(dt)
+        # Step 3: Internal heat generation - MOVED TO SIMULATION.PY
+        # Now controlled by separate enable_uranium_heating flag
         
         # Step 4: Force space cells to cosmic background temperature
         space_mask = self.state.vol_frac[MaterialType.SPACE.value] > 0.9
@@ -129,8 +128,13 @@ class HeatTransfer:
             air_mask = self.state.vol_frac[MaterialType.AIR.value] > 0.5
             
             # Maximum diffusivity based on stability limit
-            max_alpha = 0.25 * dx * dx / dt  # CFL-like condition
-            max_alpha_air = 0.05 * dx * dx / dt  # Much stricter for air
+            # Handle dt=0 case during initialization
+            if dt > 0:
+                max_alpha = 0.25 * dx * dx / dt  # CFL-like condition
+                max_alpha_air = 0.05 * dx * dx / dt  # Much stricter for air
+            else:
+                # During initialization, skip diffusion
+                return
             
             # Apply different limits for air vs other materials
             alpha = np.clip(alpha, 0, max_alpha)
@@ -367,31 +371,30 @@ class HeatTransfer:
         
     def apply_radiative_cooling(self, dt: float):
         """Apply radiative cooling with correct power density calculation."""
-        # Find exposed surfaces - following CA implementation
+        # Find exposed surfaces
         space_mask = self.state.vol_frac[MaterialType.SPACE.value] > 0.9
         
-        # Identify atmosphere cells
+        # ALL atmosphere cells can radiate (not just outer atmosphere)
         atmosphere_mask = ((self.state.vol_frac[MaterialType.AIR.value] > 0.5) | 
                           (self.state.vol_frac[MaterialType.WATER_VAPOR.value] > 0.5))
         
-        # Use convolution to find cells adjacent to space
-        from scipy.ndimage import convolve, binary_dilation
-        kernel = np.array([[1, 1, 1],
-                          [1, 0, 1],
-                          [1, 1, 1]])
+        # Surface solids: non-atmospheric, non-space cells adjacent to atmosphere or space
+        from scipy.ndimage import binary_dilation
+        kernel_3x3 = np.array([[1, 1, 1],
+                               [1, 0, 1],
+                               [1, 1, 1]])
         
-        # Outer atmosphere: atmospheric cells adjacent to space
-        space_neighbors = binary_dilation(space_mask, structure=kernel)
-        outer_atmo_mask = atmosphere_mask & space_neighbors
-        
-        # Surface solids: non-atmospheric, non-space cells adjacent to outer atmosphere or space
+        # Find surface by dilating atmosphere+space and intersecting with solids
         non_space_mask = ~space_mask
         solid_mask = non_space_mask & ~atmosphere_mask & (self.state.density > 0.1)
-        surface_candidates = binary_dilation(outer_atmo_mask | space_mask, structure=kernel)
+        
+        # Surface is where solids meet atmosphere or space
+        atmosphere_or_space = atmosphere_mask | space_mask
+        surface_candidates = binary_dilation(atmosphere_or_space, structure=kernel_3x3)
         surface_solid_mask = surface_candidates & solid_mask
         
-        # Combine: both outer atmosphere AND surface solids can radiate
-        exposed_mask = outer_atmo_mask | surface_solid_mask
+        # Combine: ALL atmosphere cells AND surface solids can radiate
+        exposed_mask = atmosphere_mask | surface_solid_mask
         
         if not np.any(exposed_mask):
             return
@@ -446,8 +449,14 @@ class HeatTransfer:
         # Now update power density for exposed cells
         self.state.power_density[exposed_mask] -= volumetric_cooling_full
         
-    def apply_heat_generation(self, dt: float):
-        """Apply internal heat generation from radioactive decay."""
+    def apply_heat_generation(self, dt: float, apply_heating: bool = True):
+        """Apply internal heat generation from radioactive decay.
+        
+        Args:
+            dt: Time step in seconds
+            apply_heating: If True, apply temperature changes. If False, only update power density.
+        """
+            
         # Get radioactive material fractions
         uranium_frac = self.state.vol_frac[MaterialType.URANIUM.value]
         
@@ -466,22 +475,20 @@ class HeatTransfer:
         # heat_gen_rate (W/kg) * density (kg/m³) * volume_fraction = W/m³
         heat_source = heat_gen_rate * self.state.density * uranium_frac
         
-        # No artificial heat generation limits
+        # Temperature change only if enabled and dt > 0
+        if apply_heating and dt > 0:
+            valid_mask = (self.state.density > 0) & (self.state.specific_heat > 0)
+            if np.any(valid_mask):
+                dT = np.zeros_like(self.state.temperature)
+                dT[valid_mask] = (heat_source[valid_mask] * dt / 
+                                (self.state.density[valid_mask] * self.state.specific_heat[valid_mask]))
+                
+                # Apply temperature change
+                self.state.temperature += dT
         
-        # Temperature change
-        valid_mask = (self.state.density > 0) & (self.state.specific_heat > 0)
-        if np.any(valid_mask):
-            dT = np.zeros_like(self.state.temperature)
-            dT[valid_mask] = (heat_source[valid_mask] * dt / 
-                            (self.state.density[valid_mask] * self.state.specific_heat[valid_mask]))
-            
-            # No artificial temperature increase limits
-            
-            # Apply temperature change
-            self.state.temperature += dT
-            
-            # Track power density (positive for heating)
-            self.state.power_density += heat_source
+        # Track power density for visualization
+        # Multiply by apply_heating flag so power shows 0 when uranium heating is disabled
+        self.state.power_density += heat_source * float(apply_heating)
             
     # ========== Multigrid-specific methods ==========
     
