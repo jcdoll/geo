@@ -3,6 +3,7 @@ Fully vectorized multigrid solver for MAC (Marker-and-Cell) grids.
 
 This version eliminates ALL loops in performance-critical sections.
 Includes multiple smoothers (red-black, Jacobi) and configurable interface.
+FIXED: Correct Neumann BC implementation using ghost cell method.
 """
 
 import numpy as np
@@ -22,18 +23,88 @@ class SmootherType(Enum):
     JACOBI = "jacobi"
 
 
-def apply_bc(phi: np.ndarray, bc_type: BoundaryCondition):
-    """Apply boundary conditions."""
-    if bc_type == BoundaryCondition.NEUMANN:
-        phi[0, :] = phi[1, :]
-        phi[-1, :] = phi[-2, :]
-        phi[:, 0] = phi[:, 1]
-        phi[:, -1] = phi[:, -2]
-    else:  # DIRICHLET
-        phi[0, :] = 0.0
-        phi[-1, :] = 0.0
-        phi[:, 0] = 0.0
-        phi[:, -1] = 0.0
+def apply_bc_dirichlet(phi: np.ndarray):
+    """Apply Dirichlet boundary conditions."""
+    phi[0, :] = 0.0
+    phi[-1, :] = 0.0
+    phi[:, 0] = 0.0
+    phi[:, -1] = 0.0
+
+
+def _apply_neumann_bc_stencils(phi, rhs, beta_x, beta_y, dx2, ny, nx):
+    """Apply Neumann BC through modified stencils at boundaries."""
+    # Left boundary (j=0, i=1:ny-1)
+    if ny > 2:
+        be = beta_x[1:-1, 1]
+        bn = beta_y[2:ny, 0]
+        bs = beta_y[1:ny-1, 0]
+        denom = 2*be + bn + bs
+        mask = denom > 1e-12
+        phi[1:-1, 0] = np.where(mask,
+            (2*be * phi[1:-1, 1] + bn * phi[2:, 0] + bs * phi[:-2, 0] - dx2 * rhs[1:-1, 0]) / denom,
+            phi[1:-1, 0])
+    
+    # Right boundary (j=nx-1, i=1:ny-1)
+    if ny > 2:
+        bw = beta_x[1:-1, nx-1]
+        bn = beta_y[2:ny, nx-1]
+        bs = beta_y[1:ny-1, nx-1]
+        denom = 2*bw + bn + bs
+        mask = denom > 1e-12
+        phi[1:-1, -1] = np.where(mask,
+            (2*bw * phi[1:-1, -2] + bn * phi[2:, -1] + bs * phi[:-2, -1] - dx2 * rhs[1:-1, -1]) / denom,
+            phi[1:-1, -1])
+    
+    # Top boundary (i=0, j=1:nx-1)
+    if nx > 2:
+        be = beta_x[0, 2:nx]
+        bw = beta_x[0, 1:nx-1]
+        bn = beta_y[1, 1:-1]
+        denom = be + bw + 2*bn
+        mask = denom > 1e-12
+        phi[0, 1:-1] = np.where(mask,
+            (be * phi[0, 2:] + bw * phi[0, :-2] + 2*bn * phi[1, 1:-1] - dx2 * rhs[0, 1:-1]) / denom,
+            phi[0, 1:-1])
+    
+    # Bottom boundary (i=ny-1, j=1:nx-1)
+    if nx > 2:
+        be = beta_x[ny-1, 2:nx]
+        bw = beta_x[ny-1, 1:nx-1]
+        bs = beta_y[ny-1, 1:-1]
+        denom = be + bw + 2*bs
+        mask = denom > 1e-12
+        phi[-1, 1:-1] = np.where(mask,
+            (be * phi[-1, 2:] + bw * phi[-1, :-2] + 2*bs * phi[-2, 1:-1] - dx2 * rhs[-1, 1:-1]) / denom,
+            phi[-1, 1:-1])
+    
+    # Corners (only 4 points, minimal performance impact)
+    # Top-left (0,0)
+    be = beta_x[0, 1]
+    bn = beta_y[1, 0]
+    denom = 2*be + 2*bn
+    if denom > 1e-12:
+        phi[0, 0] = (2*be * phi[0, 1] + 2*bn * phi[1, 0] - dx2 * rhs[0, 0]) / denom
+    
+    # Top-right (0, nx-1)
+    bw = beta_x[0, nx-1]
+    bn = beta_y[1, nx-1]
+    denom = 2*bw + 2*bn
+    if denom > 1e-12:
+        phi[0, -1] = (2*bw * phi[0, -2] + 2*bn * phi[1, -1] - dx2 * rhs[0, -1]) / denom
+    
+    # Bottom-left (ny-1, 0)
+    be = beta_x[ny-1, 1]
+    bs = beta_y[ny-1, 0]
+    denom = 2*be + 2*bs
+    if denom > 1e-12:
+        phi[-1, 0] = (2*be * phi[-1, 1] + 2*bs * phi[-2, 0] - dx2 * rhs[-1, 0]) / denom
+    
+    # Bottom-right (ny-1, nx-1)
+    bw = beta_x[ny-1, nx-1]
+    bs = beta_y[ny-1, nx-1]
+    denom = 2*bw + 2*bs
+    if denom > 1e-12:
+        phi[-1, -1] = (2*bw * phi[-1, -2] + 2*bs * phi[-2, -1] - dx2 * rhs[-1, -1]) / denom
 
 
 def smooth_redblack_mac_vectorized(
@@ -51,6 +122,8 @@ def smooth_redblack_mac_vectorized(
     Uses face-centered coefficients:
     - beta_x: shape (ny, nx+1) - x-face coefficients  
     - beta_y: shape (ny+1, nx) - y-face coefficients
+    
+    For Neumann BC: Uses correct ghost cell stencils at boundaries
     """
     ny, nx = phi.shape
     dx2 = dx * dx
@@ -108,7 +181,12 @@ def smooth_redblack_mac_vectorized(
         phi_c[black_mask] = phi_new[black_mask]
         
         # Apply boundary conditions
-        apply_bc(phi, bc_type)
+        if bc_type == BoundaryCondition.NEUMANN:
+            # Modified stencils at boundaries
+            _apply_neumann_bc_stencils(phi, rhs, beta_x, beta_y, dx2, ny, nx)
+        else:
+            # Dirichlet: set boundaries to zero
+            apply_bc_dirichlet(phi)
 
 
 def smooth_jacobi_mac_vectorized(
@@ -170,7 +248,134 @@ def smooth_jacobi_mac_vectorized(
         phi[1:-1, 1:-1] = (1 - omega) * phi_c + omega * phi_new
         
         # Apply boundary conditions
-        apply_bc(phi, bc_type)
+        if bc_type == BoundaryCondition.NEUMANN:
+            # Modified stencils at boundaries
+            _apply_neumann_bc_stencils(phi, rhs, beta_x, beta_y, dx2, ny, nx)
+        else:
+            # Dirichlet: set boundaries to zero
+            apply_bc_dirichlet(phi)
+
+
+def _compute_boundary_residuals_neumann(residual, phi, rhs, beta_x, beta_y, dx2, ny, nx):
+    """Compute residuals at boundaries for Neumann BC."""
+    # Left boundary
+    if ny > 2:
+        be = beta_x[1:-1, 1]
+        bn = beta_y[2:ny, 0]
+        bs = beta_y[1:ny-1, 0]
+        laplacian = (
+            2*be * phi[1:-1, 1] + bn * phi[2:, 0] + bs * phi[:-2, 0] -
+            (2*be + bn + bs) * phi[1:-1, 0]
+        ) / dx2
+        residual[1:-1, 0] = rhs[1:-1, 0] - laplacian
+    
+    # Right boundary
+    if ny > 2:
+        bw = beta_x[1:-1, nx-1]
+        bn = beta_y[2:ny, nx-1]
+        bs = beta_y[1:ny-1, nx-1]
+        laplacian = (
+            2*bw * phi[1:-1, -2] + bn * phi[2:, -1] + bs * phi[:-2, -1] -
+            (2*bw + bn + bs) * phi[1:-1, -1]
+        ) / dx2
+        residual[1:-1, -1] = rhs[1:-1, -1] - laplacian
+    
+    # Top boundary
+    if nx > 2:
+        be = beta_x[0, 2:nx]
+        bw = beta_x[0, 1:nx-1]
+        bn = beta_y[1, 1:-1]
+        laplacian = (
+            be * phi[0, 2:] + bw * phi[0, :-2] + 2*bn * phi[1, 1:-1] -
+            (be + bw + 2*bn) * phi[0, 1:-1]
+        ) / dx2
+        residual[0, 1:-1] = rhs[0, 1:-1] - laplacian
+    
+    # Bottom boundary
+    if nx > 2:
+        be = beta_x[ny-1, 2:nx]
+        bw = beta_x[ny-1, 1:nx-1]
+        bs = beta_y[ny-1, 1:-1]
+        laplacian = (
+            be * phi[-1, 2:] + bw * phi[-1, :-2] + 2*bs * phi[-2, 1:-1] -
+            (be + bw + 2*bs) * phi[-1, 1:-1]
+        ) / dx2
+        residual[-1, 1:-1] = rhs[-1, 1:-1] - laplacian
+    
+    # Corners
+    # Top-left
+    be = beta_x[0, 1]
+    bn = beta_y[1, 0]
+    laplacian = (2*be * phi[0, 1] + 2*bn * phi[1, 0] - (2*be + 2*bn) * phi[0, 0]) / dx2
+    residual[0, 0] = rhs[0, 0] - laplacian
+    
+    # Top-right
+    bw = beta_x[0, nx-1]
+    bn = beta_y[1, nx-1]
+    laplacian = (2*bw * phi[0, -2] + 2*bn * phi[1, -1] - (2*bw + 2*bn) * phi[0, -1]) / dx2
+    residual[0, -1] = rhs[0, -1] - laplacian
+    
+    # Bottom-left
+    be = beta_x[ny-1, 1]
+    bs = beta_y[ny-1, 0]
+    laplacian = (2*be * phi[-1, 1] + 2*bs * phi[-2, 0] - (2*be + 2*bs) * phi[-1, 0]) / dx2
+    residual[-1, 0] = rhs[-1, 0] - laplacian
+    
+    # Bottom-right
+    bw = beta_x[ny-1, nx-1]
+    bs = beta_y[ny-1, nx-1]
+    laplacian = (2*bw * phi[-1, -2] + 2*bs * phi[-2, -1] - (2*bw + 2*bs) * phi[-1, -1]) / dx2
+    residual[-1, -1] = rhs[-1, -1] - laplacian
+
+
+def compute_residual_mac_vectorized(
+    phi: np.ndarray,
+    rhs: np.ndarray,
+    beta_x: np.ndarray,
+    beta_y: np.ndarray,
+    dx: float,
+    bc_type: BoundaryCondition = BoundaryCondition.NEUMANN
+) -> np.ndarray:
+    """
+    Fully vectorized residual computation for MAC grid.
+    
+    r = rhs - A*phi where A*phi = -∇·(β∇φ)
+    
+    For Neumann BC: Uses modified stencils at boundaries
+    For Dirichlet BC: Assumes phi=0 at boundaries
+    """
+    dx2 = dx * dx
+    ny, nx = phi.shape
+    residual = np.zeros_like(phi)
+    
+    # Compute Laplacian for interior points - fully vectorized
+    ny_int = ny - 2
+    nx_int = nx - 2
+    
+    if ny_int > 0 and nx_int > 0:
+        # Extract coefficients
+        bx_e = beta_x[1:1+ny_int, 2:2+nx_int]
+        bx_w = beta_x[1:1+ny_int, 1:1+nx_int]
+        by_n = beta_y[2:2+ny_int, 1:1+nx_int]
+        by_s = beta_y[1:1+ny_int, 1:1+nx_int]
+        
+        laplacian = (
+            bx_e * phi[1:-1, 2:] +       # East flux
+            bx_w * phi[1:-1, :-2] +      # West flux
+            by_n * phi[2:, 1:-1] +       # North flux
+            by_s * phi[:-2, 1:-1] -      # South flux
+            (bx_e + bx_w + by_n + by_s) * phi[1:-1, 1:-1]  # Center
+        ) / dx2
+        
+        # Residual
+        residual[1:-1, 1:-1] = rhs[1:-1, 1:-1] - laplacian
+    
+    if bc_type == BoundaryCondition.NEUMANN:
+        # Compute residuals at boundaries with modified stencils
+        _compute_boundary_residuals_neumann(residual, phi, rhs, beta_x, beta_y, dx2, ny, nx)
+    # For Dirichlet, boundary residuals remain zero
+    
+    return residual
 
 
 def restrict_full_weighting_vectorized(fine: np.ndarray) -> np.ndarray:
@@ -268,46 +473,6 @@ def restrict_face_coeffs_mac_vectorized(
     return restrict_face_coeffs_mac_ultra_vectorized(beta_x, beta_y)
 
 
-def compute_residual_mac_vectorized(
-    phi: np.ndarray,
-    rhs: np.ndarray,
-    beta_x: np.ndarray,
-    beta_y: np.ndarray,
-    dx: float
-) -> np.ndarray:
-    """
-    Fully vectorized residual computation for MAC grid.
-    
-    r = rhs - A*phi where A*phi = -∇·(β∇φ)
-    """
-    dx2 = dx * dx
-    residual = np.zeros_like(phi)
-    
-    # Compute Laplacian for interior points - fully vectorized
-    ny, nx = phi.shape
-    ny_int = ny - 2
-    nx_int = nx - 2
-    
-    # Extract coefficients
-    bx_e = beta_x[1:1+ny_int, 2:2+nx_int]
-    bx_w = beta_x[1:1+ny_int, 1:1+nx_int]
-    by_n = beta_y[2:2+ny_int, 1:1+nx_int]
-    by_s = beta_y[1:1+ny_int, 1:1+nx_int]
-    
-    laplacian = (
-        bx_e * phi[1:-1, 2:] +       # East flux
-        bx_w * phi[1:-1, :-2] +      # West flux
-        by_n * phi[2:, 1:-1] +       # North flux
-        by_s * phi[:-2, 1:-1] -      # South flux
-        (bx_e + bx_w + by_n + by_s) * phi[1:-1, 1:-1]  # Center
-    ) / dx2
-    
-    # Residual
-    residual[1:-1, 1:-1] = rhs[1:-1, 1:-1] - laplacian
-    
-    return residual
-
-
 # Alternative: Even more vectorized face coefficient restriction
 def restrict_face_coeffs_mac_ultra_vectorized(
     beta_x: np.ndarray, 
@@ -378,7 +543,7 @@ def v_cycle_mac(
     ny, nx = phi.shape
     if level < max_level and min(ny, nx) > 3:
         # Compute residual
-        residual = compute_residual_mac_vectorized(phi, rhs, beta_x, beta_y, dx)
+        residual = compute_residual_mac_vectorized(phi, rhs, beta_x, beta_y, dx, bc_type)
         
         # Restrict
         residual_coarse = restrict_full_weighting_vectorized(residual)
@@ -418,7 +583,7 @@ def solve_mac_poisson_vectorized(
     """
     Solve variable-coefficient Poisson equation on MAC grid.
     
-    Fully vectorized implementation.
+    Now with correct Neumann BC implementation!
     """
     ny, nx = rhs.shape
     
@@ -466,7 +631,7 @@ def solve_mac_poisson_vectorized(
         )
         
         # Check convergence
-        residual = compute_residual_mac_vectorized(phi_pad, rhs_pad, beta_x_pad, beta_y_pad, dx)
+        residual = compute_residual_mac_vectorized(phi_pad, rhs_pad, beta_x_pad, beta_y_pad, dx, bc_type)
         res_norm = np.linalg.norm(residual[:ny, :nx])
         
         if verbose:
@@ -527,7 +692,7 @@ def mg_cycle_mac_vectorized_configurable(
         level['res'] = compute_residual_mac_vectorized(
             level['phi'], level['rhs'],
             level['beta_x'], level['beta_y'],
-            level['dx']
+            level['dx'], bc_type
         )
         
         # Restrict residual
@@ -674,7 +839,7 @@ def solve_mac_poisson_configurable(
         
         # Check convergence
         res = compute_residual_mac_vectorized(
-            phi, rhs_pad, beta_x_pad, beta_y_pad, dx
+            phi, rhs_pad, beta_x_pad, beta_y_pad, dx, bc_type
         )
         res_norm = np.linalg.norm(res)
         
