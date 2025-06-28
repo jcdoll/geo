@@ -9,28 +9,45 @@ import numpy as np
 from typing import Tuple, Optional
 from state import FluxState
 from pressure_solver import PressureSolver
+from pressure_solver_allspeed import AllSpeedPressureSolver
+from pressure_solver_lowmach import LowMachPressureSolver
 
 
 class FluxPhysics:
     """Handles momentum physics for flux simulation."""
     
-    def __init__(self, state: FluxState):
+    def __init__(self, state: FluxState, implicit_gravity: bool = True, 
+                 solver_type: str = "lowmach"):
         """
         Initialize physics integration.
         
         Args:
             state: FluxState instance to operate on
+            implicit_gravity: Use implicit gravity treatment for stability (default: True)
+            solver_type: Pressure solver type ("standard", "allspeed", "lowmach")
         """
         self.state = state
         self.G = 6.67430e-11  # Gravitational constant
         self.pressure_solver = None  # Lazy init
+        self.implicit_gravity = implicit_gravity
+        self.solver_type = solver_type
+        
+        # For backward compatibility
+        self.use_allspeed = (solver_type == "allspeed")
         
     def update_momentum(self, gx: np.ndarray, gy: np.ndarray, dt: float):
         """Update momentum using MAC projection scheme.
 
+        Explicit gravity mode:
         1. Predictor: v* = v + dt*(advection + gravity + viscosity)
         2. Projection: solve for φ and correct velocities to be divergence-free
         3. Pressure update: P = P + φ
+        
+        Implicit gravity mode (default):
+        1. Predictor: v* = v + dt*(advection + viscosity)
+        2. Projection with gravity: solve for φ with gravity source term
+        3. Apply gravity correction: v = v* + dt*g - dt*β∇φ
+        4. Pressure update: P = P + φ
         """
 
         st = self.state
@@ -60,9 +77,14 @@ class FluxPhysics:
             print(f"  gx has {np.sum(np.isnan(gx))} NaN values")
             print(f"  gy has {np.sum(np.isnan(gy))} NaN values")
         
-        # 2. Apply convective and gravity forces
-        st.velocity_x += dt * (ax_conv + gx)
-        st.velocity_y += dt * (ay_conv + gy)
+        # 2. Apply convective forces
+        st.velocity_x += dt * ax_conv
+        st.velocity_y += dt * ay_conv
+        
+        # Apply gravity explicitly only if not using implicit gravity
+        if not self.implicit_gravity:
+            st.velocity_x += dt * gx
+            st.velocity_y += dt * gy
         
         # Debug: Check if gravity is being applied
         if np.any(gy > 0):
@@ -92,9 +114,29 @@ class FluxPhysics:
         # PROJECTION STAGE: Make velocity field divergence-free
         # ------------------------------------------------------------------
         if self.pressure_solver is None:
-            self.pressure_solver = PressureSolver(st)
+            if self.solver_type == "lowmach":
+                self.pressure_solver = LowMachPressureSolver(st)
+            elif self.solver_type == "allspeed":
+                self.pressure_solver = AllSpeedPressureSolver(st)
+            else:
+                self.pressure_solver = PressureSolver(st)
         
-        phi = self.pressure_solver.project_velocity(dt, gx=gx, gy=gy, bc_type="neumann")
+        # Pass gravity fields when using implicit gravity
+        if self.implicit_gravity:
+            phi = self.pressure_solver.project_velocity(dt, gx=gx, gy=gy, 
+                                                      bc_type="neumann", 
+                                                      implicit_gravity=True)
+            # Note: Gravity is handled inside project_velocity for implicit scheme
+            # The projection solver accounts for gravity in the source term
+        else:
+            # Standard projection without gravity source term
+            phi = self.pressure_solver.project_velocity(dt, bc_type="neumann", 
+                                                      implicit_gravity=False)
+        
+        # Print convergence info if monitoring is enabled
+        if self.pressure_solver.enable_monitoring and self.pressure_solver.last_iterations > 0:
+            print(f"  Pressure solver: {self.pressure_solver.last_iterations} iterations, "
+                  f"residual={self.pressure_solver.last_residual:.2e}")
         
         # Note: project_velocity updates face velocities and then 
         # calls update_cell_velocities_from_face() internally
@@ -116,15 +158,25 @@ class FluxPhysics:
         Args:
             dt: Time step
         """
-        # Viscosity provides resistance to motion
-        # v_new = v_old * (1 - viscosity * dt / dx²)
-        # This is a first-order approximation to viscous diffusion
-        dx2 = self.state.dx * self.state.dx
-        damping = 1.0 - self.state.viscosity * dt / dx2
+        st = self.state
+        dx2 = st.dx * st.dx
+        
+        # Standard material viscosity
+        damping = 1.0 - st.viscosity * dt / dx2
         damping = np.clip(damping, 0.0, 1.0)  # Ensure stability
         
-        self.state.velocity_x *= damping
-        self.state.velocity_y *= damping
+        # When using all-speed method, add extra damping in low-density regions
+        if self.use_allspeed:
+            # In space/low-density regions, add artificial viscosity
+            # This represents molecular viscosity in rarified gases
+            space_mask = st.density < 1.0  # kg/m³
+            if np.any(space_mask):
+                # Strong damping in space to prevent velocity runaway
+                space_damping = np.exp(-dt / 0.1)  # 0.1 second damping time
+                damping[space_mask] = np.minimum(damping[space_mask], space_damping)
+        
+        st.velocity_x *= damping
+        st.velocity_y *= damping
         
     def apply_cfl_limit(self) -> float:
         """
@@ -141,9 +193,33 @@ class FluxPhysics:
             np.abs(self.state.velocity_y).max()
         )
         
-        # Gravity wave speed (for incompressible flow)
-        g = 9.81  # m/s^2
-        c_grav = np.sqrt(g * dx)  # Local gravity wave speed
+        # Advection CFL limit
+        if vmax > 0:
+            dt_advection = 0.5 * dx / vmax
+        else:
+            dt_advection = float('inf')
+        
+        # Gravity acceleration limit
+        gmax = max(np.max(np.abs(self.state.gravity_x)), 
+                   np.max(np.abs(self.state.gravity_y)))
+        
+        if self.implicit_gravity:
+            # Implicit gravity is more stable but still has limits
+            # Allow larger velocity changes but not infinite
+            if gmax > 0:
+                # Allow larger velocity change for implicit method
+                max_dv = 2.0 * dx  # Allow up to 2 cell sizes per timestep
+                dt_gravity = max_dv / gmax
+            else:
+                dt_gravity = float('inf')
+        else:
+            # Explicit gravity needs strict limits
+            if gmax > 0:
+                # Limit velocity change to fraction of dx per timestep
+                max_dv = 0.1 * dx  # Allow at most 10% of cell size velocity change
+                dt_gravity = max_dv / gmax
+            else:
+                dt_gravity = float('inf')
         
         # Thermal diffusion limit
         # Only consider cells with significant mass (not space)
@@ -155,27 +231,23 @@ class FluxPhysics:
             cp = self.state.specific_heat[mass_mask].astype(np.float64)
             alpha_masked = k / (rho * cp + 1e-10)
             alpha_max = float(np.max(alpha_masked))
+            if alpha_max > 0:
+                dt_diffusion = 0.25 * dx * dx / alpha_max
+            else:
+                dt_diffusion = float('inf')
         else:
-            alpha_max = 0.0
+            dt_diffusion = float('inf')
         
-        # CFL conditions
-        # Use maximum of advection velocity and gravity wave speed
-        c_max = max(vmax, c_grav)
-        if c_max > 0:
-            dt_advection = 0.5 * dx / c_max
-        else:
-            dt_advection = 1.0
-            
-        if alpha_max > 0:
-            dt_diffusion = 0.25 * dx * dx / alpha_max
-        else:
-            dt_diffusion = 1.0
-            
-        # Take minimum with safety factor
-        dt = 0.8 * min(dt_advection, dt_diffusion)
+        # Take minimum of all limits with safety factor
+        dt = 0.8 * min(dt_advection, dt_gravity, dt_diffusion)
         
         # Clamp to reasonable range
-        dt = np.clip(dt, 0.001, 1.0)
+        # For implicit gravity, use more conservative max timestep
+        if self.implicit_gravity:
+            max_dt = 1000.0  # 1000 seconds max for stability
+        else:
+            max_dt = 0.1 * 365.25 * 24 * 3600  # 0.1 year for explicit
+        dt = np.clip(dt, 0.001, max_dt)
         
         return dt
 
@@ -222,3 +294,14 @@ class FluxPhysics:
         ay = -(vx * dvy_dx + vy * dvy_dy)
 
         return ax, ay
+    
+    def enable_solver_monitoring(self, enable: bool = True):
+        """Enable or disable convergence monitoring for the pressure solver."""
+        if self.pressure_solver:
+            self.pressure_solver.enable_monitoring = enable
+    
+    def get_solver_stats(self):
+        """Get convergence statistics from the pressure solver."""
+        if self.pressure_solver:
+            return self.pressure_solver.get_convergence_stats()
+        return None

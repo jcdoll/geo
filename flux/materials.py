@@ -82,8 +82,11 @@ class MaterialDatabase:
         props = {}
         
         # SPACE - vacuum (using small epsilon values for numerical stability)
+        # NOTE: Increased density from 1e-3 to 0.1 to reduce density ratios
+        # This prevents numerical instability in the pressure solver while still
+        # allowing materials to fall through space naturally
         props[MaterialType.SPACE] = MaterialProperties(
-            density=1e-3,  # ~0.001 kg/m³ - extremely rarified but stable
+            density=0.1,  # 0.1 kg/m³ - like very thin atmosphere
             viscosity=1e-6,  # Very low but non-zero
             thermal_conductivity=1e-6,  # Minimal heat conduction
             specific_heat=100.0,  # Small but reasonable for numerical stability

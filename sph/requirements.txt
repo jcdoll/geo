@@ -1,20 +1,20 @@
 # Core requirements
 numpy>=1.20.0
 matplotlib>=3.3.0
+
+# Visualization
 pygame>=2.0.0
+vispy>=0.9.0  # Optional: GPU-accelerated visualization
 
 # Performance optimization
 numba>=0.54.0  # Optional but highly recommended: 10-50x speedup
 cupy-cuda12x  # Optional: GPU acceleration (requires CUDA 12.x)
 
-# Visualization (optional)
-vispy>=0.9.0  # GPU-accelerated visualization for SPH
-
 # Testing
 pytest>=6.0.0
 pytest-cov>=2.0.0
 
-# Note: For systems with different CUDA versions:
-# - CUDA 11.x: pip install cupy-cuda11x
-# - CUDA 12.x: pip install cupy-cuda12x
-# - No CUDA: Skip cupy installation
+# Note on CuPy installation:
+# - For CUDA 11.x: pip install cupy-cuda11x
+# - For CUDA 12.x: pip install cupy-cuda12x
+# - For CPU-only: Skip cupy installation

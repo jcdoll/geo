@@ -35,7 +35,8 @@ class FluxSimulation:
         use_multigrid_heat: bool = False,
         cell_depth: Optional[float] = None,
         smoother_type: SmootherType = SmootherType.JACOBI,
-        init_gravity_ramp: bool = True,
+        init_gravity_ramp: bool = False,
+        implicit_gravity: bool = True,
     ):
         """
         Initialize flux-based simulation.
@@ -49,6 +50,7 @@ class FluxSimulation:
             cell_depth: Cell depth in meters (defaults to domain width for cubic simulation)
             smoother_type: Which smoother to use for pressure solver (default: JACOBI)
             init_gravity_ramp: Use gradual gravity ramping during initialization (default: True)
+            implicit_gravity: Use implicit gravity treatment for stability with large density ratios (default: True)
         """
         # Core components
         self.state = FluxState(nx, ny, dx, cell_depth=cell_depth)
@@ -66,7 +68,7 @@ class FluxSimulation:
         solver_method = "multigrid" if use_multigrid_heat else "adi"
         self.heat_transfer = HeatTransfer(self.state, solver_method=solver_method, simulation=self)
             
-        self.physics = FluxPhysics(self.state)
+        self.physics = FluxPhysics(self.state, implicit_gravity=implicit_gravity)
         self.material_db = MaterialDatabase()
         
         # Initialize atmospheric processes module
@@ -93,6 +95,7 @@ class FluxSimulation:
         # Store scenario and init params for reset
         self.scenario = scenario
         self.init_gravity_ramp = init_gravity_ramp
+        self.implicit_gravity = implicit_gravity
         
         # Debug flags to disable individual physics processes
         self.enable_gravity = True
@@ -108,6 +111,10 @@ class FluxSimulation:
         if scenario is not False:  # Allow False to skip setup
             setup_scenario(scenario, self.state, self.material_db)
             
+            # CRITICAL: Update face coefficients after scenario setup
+            # This must happen before any physics calculations!
+            self.state.update_face_coefficients()
+            
             # Solve initial gravity, pressure, and velocity fields
             self._solve_initial_state()
             
@@ -121,6 +128,7 @@ class FluxSimulation:
         nx, ny, dx = self.state.nx, self.state.ny, self.state.dx
         use_multigrid = self.use_multigrid_heat
         smoother = self.pressure_solver.smoother_type
+        implicit_grav = self.implicit_gravity
         
         # Preserve physics enable/disable flags
         saved_flags = {
@@ -135,7 +143,8 @@ class FluxSimulation:
         }
         
         # Reinitialize
-        self.__init__(nx, ny, dx, scenario=scenario_to_use, use_multigrid_heat=use_multigrid, smoother_type=smoother)
+        self.__init__(nx, ny, dx, scenario=scenario_to_use, use_multigrid_heat=use_multigrid, 
+                     smoother_type=smoother, implicit_gravity=implicit_grav)
         
         # Restore physics flags
         for flag_name, flag_value in saved_flags.items():
@@ -220,7 +229,6 @@ class FluxSimulation:
             if is_initialization and self.init_gravity_ramp:
                 # Gradually establish pressure equilibrium for initialization
                 n_init_steps = 10
-                dt_init = 0.001  # Very small timestep for gentle initialization
                 
                 for i in range(n_init_steps):
                     # Gradually ramp up the gravity force to avoid shock
@@ -228,8 +236,22 @@ class FluxSimulation:
                     gx_ramped = gx * ramp_factor
                     gy_ramped = gy * ramp_factor
                     
+                    # Store ramped gravity temporarily for CFL calculation
+                    gx_orig, gy_orig = self.state.gravity_x.copy(), self.state.gravity_y.copy()
+                    self.state.gravity_x[:] = gx_ramped
+                    self.state.gravity_y[:] = gy_ramped
+                    
+                    # Calculate appropriate timestep for current ramped gravity
+                    dt_init = self.physics.apply_cfl_limit()
+                    # Use even smaller timestep during initialization for stability
+                    dt_init = min(dt_init, 0.01)
+                    
                     # Update momentum with ramped gravity
                     self.physics.update_momentum(gx_ramped, gy_ramped, dt_init)
+                    
+                    # Restore original gravity
+                    self.state.gravity_x[:] = gx_orig
+                    self.state.gravity_y[:] = gy_orig
                     
                     # Also update face coefficients each step to ensure consistency
                     self.state.update_face_coefficients()

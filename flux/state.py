@@ -206,26 +206,20 @@ class FluxState:
         Uses harmonic averaging which is the correct discretisation for
         variable-coefficient Poisson problems in a staggered grid.
         """
-        # For beta calculation, use actual density everywhere
-        # This allows materials to move through space
-        rho_effective = np.copy(self.density)
-        
-        # Add small epsilon to avoid division by zero
-        # Use space density as minimum to ensure physical behavior
-        mat_db = MaterialDatabase()
-        space_density = mat_db.get_properties(MaterialType.SPACE).density
-        rho_effective = np.maximum(rho_effective, space_density)
+        # Small epsilon to avoid division by zero
+        epsilon = 1e-10
+        rho_safe = np.maximum(self.density, epsilon)
 
         # β_x: shape (ny, nx+1)
         # Interior faces: harmonic mean of left & right cell densities
-        self.beta_x[:, 1:-1] = 2.0 / (rho_effective[:, :-1] + rho_effective[:, 1:])
-        self.beta_x[:, 0] = 1.0 / rho_effective[:, 0]
-        self.beta_x[:, -1] = 1.0 / rho_effective[:, -1]
+        self.beta_x[:, 1:-1] = 2.0 / (rho_safe[:, :-1] + rho_safe[:, 1:])
+        self.beta_x[:, 0] = 1.0 / rho_safe[:, 0]
+        self.beta_x[:, -1] = 1.0 / rho_safe[:, -1]
 
         # β_y: shape (ny+1, nx)
-        self.beta_y[1:-1, :] = 2.0 / (rho_effective[:-1, :] + rho_effective[1:, :])
-        self.beta_y[0, :] = 1.0 / rho_effective[0, :]
-        self.beta_y[-1, :] = 1.0 / rho_effective[-1, :]
+        self.beta_y[1:-1, :] = 2.0 / (rho_safe[:-1, :] + rho_safe[1:, :])
+        self.beta_y[0, :] = 1.0 / rho_safe[0, :]
+        self.beta_y[-1, :] = 1.0 / rho_safe[-1, :]
 
     def update_face_velocities_from_cell(self):
         """Populate face-centred velocities by averaging neighbouring cells.

@@ -1,134 +1,146 @@
 #!/usr/bin/env python3
 """
-Flux-based geological simulation - Main entry point.
+Main entry point for SPH geological simulation.
 
-This provides an interactive simulation with various preset scenarios
-and real-time parameter adjustment.
+Usage:
+    python main.py                    # Run with default planet scenario
+    python main.py --scenario water   # Run water drop scenario
+    python main.py --size 100         # Set simulation size
+    python main.py --backend numba    # Use Numba backend
 """
 
 import argparse
 import sys
-import traceback
-from typing import Optional
+import os
 
-from simulation import FluxSimulation
-from visualizer import FluxVisualizer
-from scenarios import get_scenario_names
+# Add sph to path for direct execution
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-
-class FluxSimulationApp:
-    """Main application for flux-based geological simulation."""
-    
-    def __init__(self, nx: int = 128, ny: int = 96, dx: float = 50.0, scenario: Optional[str] = None, use_multigrid_heat: bool = False, cell_depth: Optional[float] = None):
-        """Initialize the simulation app."""
-        self.sim = FluxSimulation(nx=nx, ny=ny, dx=dx, scenario=scenario, use_multigrid_heat=use_multigrid_heat, cell_depth=cell_depth)
-        self.viz = FluxVisualizer(simulation=self.sim)
-        
-    def run(self):
-        """Run the simulation."""
-        print(f"\nGrid: {self.sim.state.nx}x{self.sim.state.ny} cells")
-        print(f"Domain: {self.sim.state.nx * self.sim.state.dx / 1000:.1f} x {self.sim.state.ny * self.sim.state.dx / 1000:.1f} km")
-        print(f"Cell depth: {self.sim.state.cell_depth / 1000:.1f} km")
-        print("(Timestep will be computed dynamically)")
-        
-        # Run visualizer
-        self.viz.run()
+from sph.visualizer import SPHVisualizer
+from sph import scenarios
+import sph
 
 
 def main():
-    """Main entry point."""
-    # Get available scenarios
-    scenarios = get_scenario_names()
-    
-    parser = argparse.ArgumentParser(
-        description="Flux-based geological simulation",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Scenarios:
-  planet    - Circular planet with atmosphere and water pools
-  layered   - Earth-like planet with flat layers (atmosphere, ocean, crust)
-  volcanic  - Volcanic island with magma chamber
-  ice       - Ice world with subsurface ocean
-  empty     - Empty space for sandbox mode
-
-Examples:
-  python main.py                    # Default planet
-  python main.py --scenario volcanic --size 150
-  python main.py --scenario empty --size 200 --scale 100
-        """
-    )
-    
+    parser = argparse.ArgumentParser(description="SPH Geological Simulation")
     parser.add_argument(
-        '--scenario', '-s',
-        choices=scenarios,
-        default='planet',
-        help='Initial scenario to load (default: planet)'
+        "--scenario", 
+        default="planet",
+        choices=["planet", "water", "thermal", "volcanic", "layered"],
+        help="Initial scenario to load (default: planet)"
     )
-    
     parser.add_argument(
-        '--size',
+        "--size", 
+        type=int, 
+        default=100,
+        help="Domain size in meters (default: 100)"
+    )
+    parser.add_argument(
+        "--particles",
         type=int,
-        default=128,
-        help='Grid size (square, default: 128)'
+        default=None,
+        help="Number of particles (default: auto based on scenario)"
     )
-    
     parser.add_argument(
-        '--scale',
-        type=float,
-        default=50.0,
-        help='Cell size in meters (default: 50.0)'
+        "--backend",
+        choices=["cpu", "numba", "gpu", "auto"],
+        default="auto",
+        help="Computation backend (default: auto)"
     )
-    
     parser.add_argument(
-        '--width',
+        "--fps",
         type=int,
-        help='Grid width (overrides --size)'
-    )
-    
-    parser.add_argument(
-        '--height', 
-        type=int,
-        help='Grid height (overrides --size)'
-    )
-    
-    parser.add_argument(
-        '--multigrid-heat',
-        action='store_true',
-        help='Use multigrid solver for heat transfer (default: ADI solver)'
-    )
-    
-    parser.add_argument(
-        '--depth',
-        type=float,
-        help='Cell depth in meters (default: domain width for cubic simulation)'
+        default=60,
+        help="Target FPS (default: 60)"
     )
     
     args = parser.parse_args()
     
-    # Determine grid dimensions
-    if args.width and args.height:
-        nx, ny = args.width, args.height
+    # Set backend
+    if args.backend == "auto":
+        # Will be set based on particle count
+        backend = None
     else:
-        nx = ny = args.size
-        
-    # Create and run app
-    print(f"Loading scenario: {args.scenario}")
-    if args.multigrid_heat:
-        print("Using multigrid solver for heat transfer")
-    app = FluxSimulationApp(nx=nx, ny=ny, dx=args.scale, scenario=args.scenario, use_multigrid_heat=args.multigrid_heat, cell_depth=args.depth)
+        if not sph.set_backend(args.backend):
+            print(f"Warning: Backend '{args.backend}' not available, using default")
+            backend = None
+        else:
+            backend = args.backend
+            print(f"Using {args.backend.upper()} backend")
     
-    try:
-        app.run()
-    except KeyboardInterrupt:
-        print("\nSimulation terminated by user")
-        return 0
-    except Exception as e:
-        print(f"\nError: {e}")
-        traceback.print_exc()
-        return 1
-        
-    return 0
+    # Create scenario
+    print(f"Loading scenario: {args.scenario}")
+    
+    # Import enhanced planet scenario
+    from sph.scenarios.planet_with_atmosphere import (
+        create_planet_with_atmosphere, create_simple_ocean_world
+    )
+    
+    # Scenario functions with better planets
+    scenario_funcs = {
+        "planet": lambda: scenarios.create_planet_simple(
+            radius=args.size * 0.4,
+            particle_spacing=args.size * 0.01,  # Finer spacing for more particles
+            center=(0.0, 0.0)
+        ),
+        "water": lambda: create_simple_ocean_world(
+            radius=args.size * 0.3,
+            particle_spacing=args.size * 0.02,
+            ocean_fraction=0.4,
+            center=(0.0, 0.0)
+        ),
+        "thermal": lambda: scenarios.create_planet_simple(
+            radius=args.size * 0.3,
+            particle_spacing=args.size * 0.02,
+            center=(0.0, 0.0)
+        ),
+        "volcanic": lambda: scenarios.create_planet_earth_like(
+            radius=args.size * 0.4,
+            particle_spacing=args.size * 0.02,
+            center=(0.0, 0.0)
+        ),
+        "layered": lambda: scenarios.create_planet_earth_like(
+            radius=args.size * 0.4,
+            particle_spacing=args.size * 0.02,
+            center=(0.0, 0.0)
+        ),
+    }
+    
+    # Create particles
+    particles, n_active = scenario_funcs[args.scenario]()
+    
+    # Override particle count if specified
+    if args.particles and args.particles < n_active:
+        n_active = args.particles
+        print(f"Using {n_active} particles (reduced from {particles.position_x.shape[0]})")
+    
+    # Auto-select backend if not specified
+    if backend is None:
+        backend = sph.auto_select_backend(n_active)
+        print(f"Auto-selected {backend.upper()} backend for {n_active} particles")
+    
+    # Print info
+    sph.print_backend_info()
+    print(f"\nSimulation info:")
+    print(f"  Particles: {n_active}")
+    print(f"  Domain: {args.size}x{args.size} m")
+    print(f"  Scenario: {args.scenario}")
+    print(f"  Target FPS: {args.fps}")
+    
+    # Create and run visualizer
+    viz = SPHVisualizer(
+        particles=particles,
+        n_active=n_active,
+        domain_size=(args.size, args.size),
+        window_size=(800, 900),  # Extra height for toolbar
+        target_fps=args.fps
+    )
+    
+    print("\nStarting visualization...")
+    print("Press H for help, ESC to exit")
+    
+    viz.run()
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
