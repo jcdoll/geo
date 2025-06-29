@@ -155,8 +155,6 @@ class FluidDynamicsHydrostatic:
 
 def test_hydrostatic_equilibrium():
     """Test that water achieves hydrostatic equilibrium."""
-    from core_state import CoreState
-    
     # Create test grid
     sim = CoreState(width=10, height=30, cell_size=50.0)
     

@@ -3,6 +3,7 @@
 
 import numpy as np
 import pytest
+from scipy import ndimage
 from geo_game import GeoGame as GeoSimulation
 from materials import MaterialType
 
@@ -60,7 +61,6 @@ def test_fluid_blob_stability():
     
     # Check connectivity - water should stay mostly connected
     # Note: Some fragmentation is expected on coarse discrete grids (50-100m cells)
-    from scipy import ndimage
     labeled, num_features = ndimage.label(final_water)
     assert num_features <= 10, f"Water split into {num_features} disconnected parts (expected some fragmentation on coarse grid)"
 

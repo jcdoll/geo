@@ -13,6 +13,8 @@ from .api import (
     compute_density,
     compute_forces,
     compute_gravity,
+    compute_pressure,
+    integrate,
     create_spatial_hash,
     
     # Backend management
@@ -41,6 +43,8 @@ __all__ = [
     'compute_density',
     'compute_forces',
     'compute_gravity',
+    'compute_pressure',
+    'integrate',
     'create_spatial_hash',
     
     # Backend management

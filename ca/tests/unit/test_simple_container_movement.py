@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+from scipy import ndimage
 from geo_game import GeoGame as GeoSimulation
 from materials import MaterialType
 
@@ -102,8 +103,6 @@ def test_container_diagnostics():
     sim._update_material_properties()
     
     # Test the flood fill detection
-    from scipy import ndimage
-    
     # Get rigid body mask
     labels, num_groups = sim.fluid_dynamics.identify_rigid_groups()
     group_mask = (labels == 1)  # First group

@@ -5,8 +5,12 @@ either the original Poisson solver or direct hydrostatic integration.
 """
 
 import numpy as np
+import types
 from pressure_hydrostatic import compute_hydrostatic_pressure
 from pressure_solver import solve_pressure
+from core_state import CoreState
+from fluid_dynamics import FluidDynamics
+from materials import MaterialType
 
 
 def compute_forces_with_hydrostatic(self, use_hydrostatic=True):
@@ -92,7 +96,6 @@ def apply_hydrostatic_patch(fluid_dynamics_instance):
         apply_hydrostatic_patch(my_fluid_dynamics)
         # Now compute_forces will use hydrostatic pressure by default
     """
-    import types
     fluid_dynamics_instance.compute_forces = types.MethodType(
         compute_forces_with_hydrostatic, 
         fluid_dynamics_instance
@@ -102,10 +105,6 @@ def apply_hydrostatic_patch(fluid_dynamics_instance):
 
 def test_patch():
     """Test the patched compute_forces method."""
-    from core_state import CoreState
-    from fluid_dynamics import FluidDynamics
-    from materials import MaterialType
-    
     # Create test simulation
     sim = CoreState(width=10, height=30, cell_size=50.0)
     

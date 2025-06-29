@@ -1,7 +1,11 @@
 import numpy as np
 import pytest
 
-from geo.gravity_solver import solve_potential, potential_to_gravity, G_SI
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+
+from gravity_solver import solve_potential, potential_to_gravity, G_SI
 
 
 def laplacian(field: np.ndarray, dx: float) -> np.ndarray:

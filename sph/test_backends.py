@@ -3,6 +3,11 @@
 Test script to verify Numba and GPU backends are working correctly.
 """
 
+import os
+# Set architecture for RTX 5080 compatibility BEFORE importing cupy
+os.environ['CUDA_ARCH_LIST'] = '8.9'
+os.environ['CUPY_CUDA_COMPILE_WITH_DEBUG'] = '0'
+
 import numpy as np
 import sys
 import pytest

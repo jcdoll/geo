@@ -38,6 +38,34 @@ def _compute_gravity_cpu(particles: ParticleArrays, n_active: int,
                         G: float = 6.67430e-11, softening: float = 0.1):
     compute_gravity_direct_batched(particles, n_active, G, softening)
 
+@backend_function("compute_pressure")
+@for_backend(Backend.CPU)
+def _compute_pressure_cpu(particles: ParticleArrays, n_active: int,
+                         rest_density: float = 1000.0, sound_speed: float = 100.0):
+    # Tait equation of state
+    gamma = 7.0
+    B = rest_density * sound_speed**2 / gamma
+    density = particles.density[:n_active]
+    particles.pressure[:n_active] = B * ((density / rest_density) ** gamma - 1.0)
+
+@backend_function("integrate")
+@for_backend(Backend.CPU)
+def _integrate_cpu(particles: ParticleArrays, n_active: int, dt: float, damping: float = 0.0):
+    # Leapfrog integration
+    mass = particles.mass[:n_active]
+    accel_x = particles.force_x[:n_active] / mass
+    accel_y = particles.force_y[:n_active] / mass
+    
+    particles.velocity_x[:n_active] += accel_x * dt
+    particles.velocity_y[:n_active] += accel_y * dt
+    
+    if damping > 0:
+        particles.velocity_x[:n_active] *= (1.0 - damping * dt)
+        particles.velocity_y[:n_active] *= (1.0 - damping * dt)
+    
+    particles.position_x[:n_active] += particles.velocity_x[:n_active] * dt
+    particles.position_y[:n_active] += particles.velocity_y[:n_active] * dt
+
 # Try to import and register Numba implementations
 try:
     from .physics.density_numba import compute_density_numba_wrapper
@@ -62,6 +90,34 @@ try:
                               G: float = 6.67430e-11, softening: float = 0.1):
         compute_gravity_numba_wrapper(particles, n_active, G, softening)
     
+    @backend_function("compute_pressure")
+    @for_backend(Backend.NUMBA)
+    def _compute_pressure_numba(particles: ParticleArrays, n_active: int,
+                               rest_density: float = 1000.0, sound_speed: float = 100.0):
+        # Same as CPU but will be JIT compiled when called from Numba context
+        gamma = 7.0
+        B = rest_density * sound_speed**2 / gamma
+        density = particles.density[:n_active]
+        particles.pressure[:n_active] = B * ((density / rest_density) ** gamma - 1.0)
+    
+    @backend_function("integrate")
+    @for_backend(Backend.NUMBA)
+    def _integrate_numba(particles: ParticleArrays, n_active: int, dt: float, damping: float = 0.0):
+        # Same as CPU but will be JIT compiled when called from Numba context
+        mass = particles.mass[:n_active]
+        accel_x = particles.force_x[:n_active] / mass
+        accel_y = particles.force_y[:n_active] / mass
+        
+        particles.velocity_x[:n_active] += accel_x * dt
+        particles.velocity_y[:n_active] += accel_y * dt
+        
+        if damping > 0:
+            particles.velocity_x[:n_active] *= (1.0 - damping * dt)
+            particles.velocity_y[:n_active] *= (1.0 - damping * dt)
+        
+        particles.position_x[:n_active] += particles.velocity_x[:n_active] * dt
+        particles.position_y[:n_active] += particles.velocity_y[:n_active] * dt
+    
 except ImportError:
     pass
 
@@ -71,6 +127,35 @@ try:
     from .physics.forces_gpu import compute_forces_gpu
     # Note: These are already decorated with @backend_function
     
+except ImportError:
+    pass
+
+# Try to import PyTorch GPU implementations (RTX 5080 compatible)
+try:
+    import torch
+    if torch.cuda.is_available():
+        # Standard implementations
+        from .physics.density_torch import compute_density_torch
+        from .physics.forces_torch import compute_forces_torch
+        
+        # Try to import optimized implementations
+        try:
+            from .physics.density_torch_optimized import compute_density_torch_optimized
+            from .physics.forces_torch_optimized import compute_forces_torch_optimized
+            from .physics.spatial_hash_torch import find_neighbors_torch
+            # These are already decorated with @backend_function
+        except ImportError:
+            pass
+        
+        # Try to import unified GPU implementation
+        try:
+            from .physics.gpu_unified import (compute_density_unified, compute_forces_unified,
+                                            integrate_unified, compute_pressure_unified)
+            # These are already decorated with @backend_function
+        except ImportError:
+            pass
+        
+        print(f"PyTorch GPU backend available: {torch.cuda.get_device_name(0)}")
 except ImportError:
     pass
 
@@ -133,6 +218,42 @@ def compute_gravity(particles: ParticleArrays, n_active: int = None,
     dispatch("compute_gravity", particles, n_active, G, softening, backend=backend)
 
 
+def compute_pressure(particles: ParticleArrays, n_active: int = None,
+                    rest_density: float = 1000.0, sound_speed: float = 100.0,
+                    backend: Optional[str] = None):
+    """Compute pressure using equation of state.
+    
+    Args:
+        particles: Particle arrays
+        n_active: Number of active particles
+        rest_density: Rest density
+        sound_speed: Sound speed
+        backend: Override backend
+    """
+    if n_active is None:
+        n_active = len(particles.position_x)
+    
+    dispatch("compute_pressure", particles, n_active, rest_density, sound_speed, backend=backend)
+
+
+def integrate(particles: ParticleArrays, n_active: int = None,
+             dt: float = 0.001, damping: float = 0.0,
+             backend: Optional[str] = None):
+    """Integrate particle positions and velocities.
+    
+    Args:
+        particles: Particle arrays
+        n_active: Number of active particles
+        dt: Time step
+        damping: Damping coefficient
+        backend: Override backend
+    """
+    if n_active is None:
+        n_active = len(particles.position_x)
+    
+    dispatch("integrate", particles, n_active, dt, damping, backend=backend)
+
+
 # Spatial hash factory that respects backend
 def create_spatial_hash(domain_size: tuple, cell_size: float,
                        max_per_cell: int = 100, domain_min: tuple = None) -> object:
@@ -165,6 +286,8 @@ __all__ = [
     'compute_density',
     'compute_forces', 
     'compute_gravity',
+    'compute_pressure',
+    'integrate',
     'create_spatial_hash',
     
     # Backend management

@@ -8,6 +8,8 @@ Don't try to solve for static hydrostatic pressure. Instead:
 
 import numpy as np
 from materials import MaterialType
+from core_state import CoreState
+from fluid_dynamics import FluidDynamics
 
 
 def calculate_initial_pressure_estimate(sim):
@@ -57,9 +59,6 @@ def monkey_patch_pressure_calculation(fluid_dynamics_instance):
 
 def test_dynamic_equilibrium():
     """Test that system reaches equilibrium dynamically."""
-    from core_state import CoreState
-    from fluid_dynamics import FluidDynamics
-    
     # Create test
     sim = CoreState(width=10, height=30, cell_size=50.0)
     

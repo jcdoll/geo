@@ -66,6 +66,14 @@ class SPHVisualizer:
         # Physics
         self.kernel = CubicSplineKernel(dim=2)
         self.material_db = MaterialDatabase()
+        
+        # Try to use GPU backend if available
+        import sph
+        try:
+            sph.set_backend('gpu')
+            print(f"Using GPU backend: {sph.get_backend()}")
+        except:
+            pass  # GPU not available, will use default
         # Create spatial hash with proper bounds for centered domain
         # Domain extends from -size/2 to +size/2
         domain_min = (-domain_size[0] / 2, -domain_size[1] / 2)
@@ -348,6 +356,13 @@ class SPHVisualizer:
         # Add water-specific behavior
         from sph.physics.water_behavior import add_water_cohesion_forces
         add_water_cohesion_forces(self.particles, self.n_active, cohesion_strength=0.3)
+        
+        # Add cohesion for solid materials (disabled for now due to stability issues)
+        # TODO: Re-enable after fixing pressure calculation
+        # from sph.physics.cohesion_vectorized import compute_cohesive_forces_vectorized
+        # compute_cohesive_forces_vectorized(self.particles, self.kernel, self.n_active, 
+        #                                   self.material_db, cutoff_factor=1.5,
+        #                                   temperature_softening=True)
         
         self.step_timings['forces'] = time.perf_counter() - t_forces
         
