@@ -78,4 +78,49 @@ Next steps:
 
 
 Future work (add remaining items here):
-1) TODO
+  1. GPU acceleration improvements - Fix RTX 5080 compatibility issues and optimize GPU kernels for SPH
+  2. Barnes-Hut tree for SPH gravity - Implement O(N log N) gravity calculation instead of current O(N²)
+  3. Adaptive timestepping - Implement CFL-based timestep adjustment for all three implementations
+  4. Parallel processing - Add multi-core support for CA and flux implementations
+
+  Physics Completeness:
+
+  5. Atmospheric circulation - Add wind patterns and moist convection to CA/flux
+  6. Phase transitions - Implement proper melting/freezing with latent heat for all materials
+  7. Erosion and sedimentation - Add surface processes for geological realism
+  8. Variable material properties - Temperature-dependent viscosity, thermal conductivity
+
+  Code Quality & Architecture:
+
+  9. Unified physics interface - Create common API across CA, flux, and SPH for easier comparison
+  10. Remove deprecated code - Clean up old CA implementation files marked as deprecated
+  11. Consolidate duplicate functionality - Many similar calculations exist across implementations
+  12. Numerical stability monitoring - Add automatic detection and recovery from instabilities
+
+  Testing & Validation:
+
+  13. Conservation law tests - Automated verification of mass, momentum, and energy conservation
+  14. Physical validation suite - Compare against analytical solutions and experimental data
+  15. Long-term stability tests - Extended runs to verify geological timescale behavior
+  16. Cross-implementation comparison - Systematic comparison of CA vs flux vs SPH results
+
+  Documentation:
+
+  17. Parameter tuning guide - Document how to adjust parameters for different scenarios
+  18. Material property reference - Comprehensive list with sources and validation
+  19. Troubleshooting guide - Common issues and solutions for each implementation
+  20. Implementation guides - Step-by-step instructions for adding new physics features
+
+  Visualization & UI:
+
+  21. 3D visualization option - Current 2D view limits understanding of some phenomena
+  22. Real-time data plotting - Graphs of temperature, pressure, velocity profiles
+  23. Interactive parameter adjustment - Modify simulation parameters during runtime
+  24. Export capabilities - Save simulation data for external analysis
+
+  Future Research Directions:
+
+  25. Machine learning integration - Use ML for parameter optimization or surrogate modeling
+  26. Multi-scale modeling - Couple different spatial/temporal scales
+  27. Chemical reactions - Add mineralogy and chemical transformations
+  28. Planetary formation scenarios - Initial conditions for accretion disk simulations
