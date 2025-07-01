@@ -286,8 +286,7 @@ class WaterBlobScenario(TestScenario):
         sim.enable_atmospheric_processes = False  # Disable solar radiation and atmosphere
         sim.enable_material_processes = False  # Disable any material phase changes
         sim.enable_heat_transfer = False  # Disable ALL heat transfer
-        sim.enable_pressure_solver = True  # Enable for fluid dynamics
-        sim.enable_gravity_solver = False  # Disable gravity solver
+        # CA doesn't have pressure solver - uses density-based swapping
         
         
         sim._properties_dirty = True

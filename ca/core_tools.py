@@ -94,17 +94,9 @@ class CoreToolsMixin:
         self.temperature = np.maximum(self.temperature, self.temperature + temp_addition)
 
     def apply_tectonic_stress(self, x: int, y: int, radius: int, pressure_increase: float):
-        """Persistently increase pressure in a circular region (MPa)."""
-        for dy in range(-radius, radius + 1):
-            for dx in range(-radius, radius + 1):
-                if dx * dx + dy * dy <= radius * radius:
-                    ny, nx = y + dy, x + dx
-                    if 0 <= ny < self.height and 0 <= nx < self.width:
-                        self.pressure_offset[ny, nx] += pressure_increase
-
-        # Recompute pressure with new offset if a solve method exists
-        if hasattr(self, "fluid_dynamics"):
-            self.fluid_dynamics.calculate_planetary_pressure()
+        """CA doesn't calculate pressure - this is a no-op for compatibility."""
+        # CA uses density-based swapping, not pressure calculation
+        pass
 
     def delete_material_blob(self, x: int, y: int, radius: int = 1):
         """Replace a circular blob with **SPACE**."""
@@ -196,8 +188,8 @@ class CoreToolsMixin:
             'max_thermal_diffusivity': getattr(self, '_max_thermal_diffusivity', 0.0),
             'avg_temperature': float(np.mean(self.temperature) - 273.15),  # °C
             'max_temperature': float(np.max(self.temperature) - 273.15),   # °C
-            'avg_pressure': float(np.mean(self.pressure) / 1e6),  # Convert Pa to MPa
-            'max_pressure': float(np.max(self.pressure) / 1e6),   # Convert Pa to MPa
+            'avg_pressure': 0.0,  # CA doesn't calculate pressure
+            'max_pressure': 0.0,  # CA doesn't calculate pressure
             'material_composition': sorted_materials,
             'history_length': len(getattr(self, 'history', [])),
         }
@@ -216,7 +208,6 @@ class CoreToolsMixin:
         width = self.width
         height = self.height
         cell_size = getattr(self, 'cell_size', 50.0)
-        quality = getattr(self, 'quality', 1)
         
         # Reset time and history
         self.time = 0.0

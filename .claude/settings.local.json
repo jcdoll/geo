@@ -115,7 +115,12 @@
       "Bash(/usr/local/cuda/bin/nvcc:*)",
       "Bash(conda activate:*)",
       "Bash(.venv/bin/python:*)",
-      "Bash(../../.venv/bin/python test_backends.py)"
+      "Bash(../../.venv/bin/python test_backends.py)",
+      "Bash(sed:*)",
+      "Bash(. .venv/bin/activate)",
+      "Bash(/home/jcdoll/miniconda3/envs/geo/bin/python ca/test_multigrid_performance.py)",
+      "Bash(/usr/bin/python3 -m pip list)",
+      "Bash(bash:*)"
     ],
     "deny": []
   }

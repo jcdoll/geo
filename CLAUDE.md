@@ -181,7 +181,7 @@ except ImportError:
 - Material cache cleanup is automatically handled but tested in `test_material_cache_cleanup.py`
 
 ### Grid Conventions
-- Default grid: 100x60 cells at 50m cell size (5km x 3km domain)
+- Default grid: 100x60 cells at 1m cell size (100m x 60m domain)
 - Coordinate system: (0,0) at top-left, +x right, +y down
 - Arrays use [y, x] indexing following numpy convention
 
@@ -240,8 +240,8 @@ except ImportError:
 - **TODO**: Replace multigrid gravity solver with FFT-based implementation from ca/gravity_solver.py
 
 ### Surface Tension
-- **REMOVED FROM CODEBASE**: Surface tension is fundamentally incompatible with geological-scale grids (50m cells)
-- The scale mismatch is extreme - molecular forces (nanometers) vs geological cells (50 meters) 
+- **REMOVED FROM CODEBASE**: Surface tension is fundamentally incompatible with geological-scale grids (1m cells)
+- The scale mismatch is extreme - molecular forces (nanometers) vs geological cells (1 meter) 
 - See PHYSICS.md for detailed explanation of why surface tension cannot work at these scales
 - Water behaves correctly as a bulk fluid under gravity without surface tension
 

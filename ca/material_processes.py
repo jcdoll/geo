@@ -21,7 +21,11 @@ class MaterialProcesses:
         self.sim = simulation
     
     def apply_metamorphism(self):
-        """Apply metamorphic transformations based on pressure and temperature"""
+        """Apply metamorphic transformations based on temperature only
+        
+        Note: Pressure-based transitions are not possible in CA simulation
+        as we cannot properly calculate pressure fields without velocity fields.
+        """
         # Find all non-space cells
         non_space_mask = (self.sim.material_types != MaterialType.SPACE)
         non_space_coords = np.where(non_space_mask)
@@ -34,11 +38,10 @@ class MaterialProcesses:
             y, x = non_space_coords[0][i], non_space_coords[1][i]
             current_material = self.sim.material_types[y, x]
             current_temp = self.sim.temperature[y, x] - 273.15  # Convert to Celsius
-            current_pressure = self.sim.pressure[y, x]
             
-            # Get applicable transition
+            # Get applicable transition based on temperature
             material_props = self.sim.material_db.get_properties(current_material)
-            transition = material_props.get_applicable_transition(current_temp, current_pressure)
+            transition = material_props.get_applicable_transition(current_temp)
             
             if transition:
                 # Apply transition
@@ -53,11 +56,14 @@ class MaterialProcesses:
                 
                 # Special handling for cooling magma
                 elif current_material == MaterialType.MAGMA:
-                    # Determine cooling product based on conditions
-                    cooling_product = self.sim.material_db.get_cooling_product(
-                        current_temp, current_pressure, "mafic"
-                    )
-                    self.sim.material_types[y, x] = cooling_product
+                    # Use the transition rules from the material properties
+                    magma_props = self.sim.material_db.get_properties(MaterialType.MAGMA)
+                    cooling_transition = magma_props.get_applicable_transition(current_temp)
+                    if cooling_transition:
+                        self.sim.material_types[y, x] = cooling_transition.target
+                    else:
+                        # Default to basalt if no transition found
+                        self.sim.material_types[y, x] = MaterialType.BASALT
                     
                     # Set temperature to room temperature for new solid
                     self.sim.temperature[y, x] = 300.0  # Room temperature
@@ -99,9 +105,8 @@ class MaterialProcesses:
         if not np.any(surface_mask):
             return False
             
-        # Get temperature and pressure arrays
+        # Get temperature array
         temp_celsius = self.sim.temperature - 273.15
-        pressure_mpa = self.sim.pressure / 1e6  # Convert Pa to MPa
         
         changes_made = False
         
@@ -122,8 +127,9 @@ class MaterialProcesses:
                 
             # Get material properties and weathering transitions
             material_props = self.sim.material_db.get_properties(material_type)
+            # In CA, we only consider temperature-based weathering transitions
             weathering_transitions = [t for t in material_props.transitions 
-                                    if t.min_pressure <= 10 and t.probability < 1.0]
+                                    if t.probability < 1.0]
             
             if not weathering_transitions:
                 continue
@@ -135,7 +141,6 @@ class MaterialProcesses:
                 
             # Vectorized environmental enhancement calculations
             temps = temp_celsius[surface_coords]
-            pressures = pressure_mpa[surface_coords]
             
             # 1. Chemical weathering enhancement (vectorized)
             chemical_enhancement = np.ones_like(temps)
@@ -171,11 +176,9 @@ class MaterialProcesses:
             
             # Apply weathering transitions (vectorized probability checks)
             for transition in weathering_transitions:
-                # Check which cells meet P-T conditions for this transition
+                # Check which cells meet temperature conditions for this transition
                 applicable_mask = ((temps >= transition.min_temp) & 
-                                 (temps <= transition.max_temp) & 
-                                 (pressures >= transition.min_pressure) & 
-                                 (pressures <= transition.max_pressure))
+                                 (temps <= transition.max_temp))
                 
                 if not np.any(applicable_mask):
                     continue
@@ -217,7 +220,6 @@ class MaterialProcesses:
                     if np.any(remaining_mask):
                         surface_coords = (surface_coords[0][remaining_mask], surface_coords[1][remaining_mask])
                         temps = temps[remaining_mask]
-                        pressures = pressures[remaining_mask]
                         chemical_enhancement = chemical_enhancement[remaining_mask]
                         water_enhancement = water_enhancement[remaining_mask]
                         physical_enhancement = physical_enhancement[remaining_mask]

@@ -21,65 +21,13 @@ class AtmosphericProcesses:
         self.sim = simulation
     
     def apply_atmospheric_convection(self):
-        """Apply atmospheric convection mixing"""
-        # Find atmospheric cells
-        atmosphere_mask = (
-            (self.sim.material_types == MaterialType.AIR) |
-            (self.sim.material_types == MaterialType.WATER_VAPOR)
-        )
+        """Atmospheric convection mixing - DISABLED
         
-        if not np.any(atmosphere_mask):
-            return
-        
-        # Simple vertical mixing - mix with cell above
-        for y in range(1, self.sim.height):
-            for x in range(self.sim.width):
-                if atmosphere_mask[y, x] and atmosphere_mask[y-1, x]:
-                    # Mix temperatures
-                    temp_diff = self.sim.temperature[y-1, x] - self.sim.temperature[y, x]
-                    mixing_amount = temp_diff * self.sim.atmospheric_convection_mixing
-                    
-                    self.sim.temperature[y, x] += mixing_amount
-                    self.sim.temperature[y-1, x] -= mixing_amount
+        Convection effects are now handled through enhanced thermal conductivity
+        of atmospheric materials rather than explicit mixing.
+        """
+        pass
     
-    def calculate_planetary_albedo(self, surface_candidates: np.ndarray, solar_intensity_factor: np.ndarray) -> float:
-        """Calculate weighted average planetary albedo"""
-        # Create albedo lookup table if not exists
-        if not hasattr(self.sim, '_albedo_lookup'):
-            self.sim._albedo_lookup = {}
-            for material_type in MaterialType:
-                self.sim._albedo_lookup[material_type] = self.sim.material_db.get_properties(material_type).albedo
-        
-        # Calculate albedo for all cells
-        albedo = np.zeros((self.sim.height, self.sim.width))
-        non_space_mask = (self.sim.material_types != MaterialType.SPACE)
-        non_space_coords = np.where(non_space_mask)
-        
-        if len(non_space_coords[0]) > 0:
-            # Get material types for all non-space cells
-            materials = self.sim.material_types[non_space_coords]
-            
-            # Vectorized albedo lookup
-            albedo_values = np.array([self.sim._albedo_lookup[mat] for mat in materials.flat])
-            
-            # Handle frozen water special case - vectorized
-            water_mask = (materials == MaterialType.WATER)
-            frozen_mask = water_mask & (self.sim.temperature[non_space_coords] < 273.15)
-            if np.any(frozen_mask):
-                ice_albedo = self.sim._albedo_lookup[MaterialType.ICE]
-                albedo_values[frozen_mask] = ice_albedo
-            
-            # Apply albedo values to grid
-            albedo[non_space_coords] = albedo_values
-        
-        # Calculate weighted average albedo for the planet
-        surface_weights = surface_candidates.astype(float) * solar_intensity_factor
-        if np.sum(surface_weights) > 0:
-            planet_albedo = np.average(albedo[surface_candidates], weights=surface_weights[surface_candidates])
-        else:
-            planet_albedo = 0.2  # Default
-        
-        return planet_albedo
     
     def calculate_greenhouse_effect(self) -> float:
         """Calculate dynamic greenhouse effect based on water vapor content"""

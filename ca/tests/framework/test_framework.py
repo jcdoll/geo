@@ -125,7 +125,7 @@ class ScenarioRunner:
             self.sim_width, 
             self.sim_height, 
             cell_size=100.0,
-            quality=1, 
+ 
             log_level="WARNING"
         )
         

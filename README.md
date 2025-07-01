@@ -2,6 +2,21 @@
 
 This repository contains three different approaches to simulating geological processes at planetary scales. Each implementation has different strengths and limitations.
 
+This was an experiment in using Claude Code to generate a significant project.
+
+Project conclusions:
+* Simulating a planet is hard
+* All options have significant upsides and downsides given the arbitrary constraints that I imposed (>3 fps)
+* CA only really works with arbitrary cell swapping rules, because matter is discretized and so you can't solve for velocity and pressure in any meaningful way
+    * In general solving for pressure in an accurate manner was a huge challenge, requiring velocity projection methods in the end
+* The flux solver came close, except for handling the large density variation between rock and space (stiff system)
+* SPH requires loose coupling between particles to go fast (for large timesteps) but it needs strong coupling to mimic solid-solid interactions
+
+Claude Code conclusions:
+* Poor IDE feedback compared with Cursor and Windsurf is a huge negative
+* Even Opus 4 does incorrect things - fails to read CLAUDE.md, repeats the same error multiple times within a single session, fails to listen
+* This was very useful to just pump out a huge amount of code to test ideas, but the quality was relatively poor
+
 ## Implementations
 
 ### 1. CA (Cellular Automata) - Simple and Stable

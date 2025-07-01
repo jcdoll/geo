@@ -378,7 +378,33 @@ where `n_hat` is the outward normal from A to B. Equal and opposite forces are a
 ---
 
 
-## PRESSURE PHYSICS
+## PRESSURE PHYSICS (NOT IMPLEMENTED IN CA)
+
+### WHY PRESSURE IS NOT CALCULATED IN CELLULAR AUTOMATA
+
+The CA (Cellular Automata) approach cannot properly calculate pressure fields because:
+
+1. **No velocity fields**: CA uses discrete material swapping rather than continuous velocity fields. Without velocity, we cannot compute pressure gradients or enforce incompressibility (∇·v = 0).
+
+2. **No momentum conservation**: Materials swap positions instantaneously based on density differences. There's no momentum equation to link pressure to acceleration.
+
+3. **Discrete vs continuous**: Pressure requires solving continuous PDEs (Poisson equation). CA's discrete swapping rules cannot represent continuous pressure variations.
+
+4. **Material interfaces**: Sharp material boundaries in CA create numerical instabilities in pressure calculations. The discrete step functions poorly represent continuous density gradients.
+
+5. **Hydrostatic equilibrium impossible**: Without proper velocity-pressure coupling, static fluids cannot achieve force balance (∇P = ρg).
+
+### IMPLICATIONS
+
+Without pressure:
+- No realistic fluid dynamics (incompressible flow)
+- No accurate buoyancy forces (only density-based swapping)
+- No pressure-dependent phase transitions
+- Material transitions are temperature-only
+
+This fundamental limitation led to the development of the flux-based approach, which properly handles continuous fields and conservation laws.
+
+### ORIGINAL PRESSURE PHYSICS THEORY (FOR REFERENCE)
 
 ### THEORY
 
@@ -1205,8 +1231,8 @@ To minimise axial artefacts the engine uses pre-computed circular kernels for al
 |--------|------|---------|
 | `_circular_kernel_3x3` | 3 × 3 (8-neighbour) | Fast neighbour look-ups (e.g., atmospheric absorption) – default when `neighbor_count = 8` |
 | `_circular_kernel_5x5` | 5 × 5 (includes radius 2 offsets) | Isotropic candidate gathering for collapse, buoyancy, stratification – always used |
-| `_collapse_kernel_4`   | 3 × 3 cross-shape | Strict 4-neighbour collapse for Manhattan-style movement – used when `neighbor_count = 4` (set automatically for `quality = 3`) |
-| `_collapse_kernel_8`   | 3 × 3 full ring | Allows diagonal collapse moves – default (`neighbor_count = 8`, quality 1-2) |
+| `_collapse_kernel_4`   | 3 × 3 cross-shape | Strict 4-neighbour collapse for Manhattan-style movement |
+| `_collapse_kernel_8`   | 3 × 3 full ring | Allows diagonal collapse moves – default (`neighbor_count = 8`) |
 | `_laplacian_kernel_radius1` (implicit) | 3 × 3 | Classic 8-neighbour Laplacian (explicit diffusion, fast) – selected when `diffusion_stencil = "radius1"` |
 | `_laplacian_kernel_radius2` | 5 × 5, 13-point | Nearly isotropic Laplacian – default (`diffusion_stencil = "radius2"`) |
 

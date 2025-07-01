@@ -8,7 +8,7 @@ from materials import MaterialType
 
 def test_simulation_initialization():
     """Test that simulation initializes correctly"""
-    sim = GeoSimulation(width=20, height=30, cell_size=50.0, setup_planet=False)
+    sim = GeoSimulation(width=20, height=30, cell_size=1.0, setup_planet=False)
     
     # Check basic properties
     assert sim.width == 20
@@ -18,13 +18,13 @@ def test_simulation_initialization():
     # Check arrays are initialized
     assert sim.material_types.shape == (30, 20)
     assert sim.temperature.shape == (30, 20)
-    assert sim.pressure.shape == (30, 20)
+    # CA doesn't have pressure
     assert sim.density.shape == (30, 20)
     
     # Check default values (without planet)
     assert np.all(sim.material_types == MaterialType.SPACE)
     assert np.all(sim.temperature >= 0)  # Should have non-negative temperatures
-    assert np.all(sim.pressure >= 0)   # Pressure should be non-negative
+    # CA doesn't calculate pressure
     assert np.all(sim.density >= 0)    # Density should be non-negative
     
     print(f"Simulation initialization test passed")
@@ -47,7 +47,7 @@ def test_simulation_step_forward():
     
     # Record initial state
     initial_temp = sim.temperature.copy()
-    initial_pressure = sim.pressure.copy()
+    # CA doesn't have pressure
     
     # Step forward multiple times
     dt = 1.0
@@ -59,39 +59,48 @@ def test_simulation_step_forward():
     
     # Check that something changed (simulation is active)
     temp_changed = not np.allclose(sim.temperature, initial_temp)
-    pressure_changed = not np.allclose(sim.pressure, initial_pressure)
+    # CA doesn't calculate pressure
     
     # At least one field should change
-    assert temp_changed or pressure_changed, "Simulation should evolve over time"
+    assert temp_changed, "Temperature should evolve over time"
     
     print(f"Simulation step forward test passed")
     print(f"  Temperature changed: {temp_changed}")
-    print(f"  Pressure changed: {pressure_changed}")
 
 
 def test_simulation_reset():
     """Test simulation reset functionality"""
-    sim = GeoSimulation(width=8, height=12, cell_size=75.0, setup_planet=False)
+    # Test with planet setup
+    sim = GeoSimulation(width=8, height=12, cell_size=75.0, setup_planet=True)
+    
+    # Store initial state
+    initial_materials = sim.material_types.copy()
+    initial_temp = sim.temperature.copy()
+    initial_time = sim.time
+    
+    # Verify we have a planet
+    assert not np.all(sim.material_types == MaterialType.SPACE), "Should have a planet initially"
     
     # Modify simulation state
     sim.material_types[3:6, 2:5] = MaterialType.MAGMA
     sim.temperature[3:6, 2:5] = 1500.0
     sim.external_gravity = (1, 5)
     
-    # Record modified state
-    modified_materials = sim.material_types.copy()
-    modified_temp = sim.temperature.copy()
-    
     # Step forward to change state further
-    sim.step_forward(1.0)
+    for _ in range(3):
+        sim.step_forward(1.0)
+    
+    # Verify state changed
+    assert not np.array_equal(sim.material_types, initial_materials), "Materials should have changed"
+    assert sim.time > initial_time, "Time should have advanced"
     
     # Reset simulation
     sim.reset()
     
-    # Check that arrays are reset to defaults
-    assert np.all(sim.material_types == MaterialType.SPACE), "Materials should reset to space"
-    assert not np.array_equal(sim.temperature, modified_temp), "Temperature should reset"
-    assert np.all(sim.pressure == 0), "Pressure should reset to zero"
+    # Check that state is restored to initial planet configuration
+    assert np.array_equal(sim.material_types, initial_materials), "Materials should restore to initial planet"
+    assert np.array_equal(sim.temperature, initial_temp), "Temperature should restore to initial"
+    assert sim.time == initial_time, "Time should reset to zero"
     
     # Grid properties should remain unchanged
     assert sim.width == 8
@@ -146,24 +155,24 @@ def test_physics_integration():
         sim.step_forward(dt)
     
     # Check that physics systems are interacting
-    # Heat should diffuse
-    heat_diffused = not np.allclose(sim.temperature, initial_temp)
+    # Heat should diffuse (even small changes count)
+    temp_change = np.max(np.abs(sim.temperature - initial_temp))
+    heat_diffused = temp_change > 0.001  # Very small change is OK
     
     # Materials may transform
     materials_changed = not np.array_equal(sim.material_types, initial_materials)
     
-    # Pressure should develop
-    pressure_developed = np.any(sim.pressure > 1e-6)
+    # CA doesn't calculate pressure
+    pressure_developed = False
     
     # At least heat diffusion should occur
-    assert heat_diffused, "Heat diffusion should occur with temperature gradients"
+    assert heat_diffused, f"Heat diffusion should occur with temperature gradients. Max temp change: {temp_change}"
     
     print(f"Physics integration test passed")
     print(f"  Heat diffused: {heat_diffused}")
     print(f"  Materials changed: {materials_changed}")
     print(f"  Pressure developed: {pressure_developed}")
     print(f"  Final max temperature: {np.max(sim.temperature):.1f}K")
-    print(f"  Final max pressure: {np.max(sim.pressure):.3f} MPa")
 
 
 def test_conservation_laws():

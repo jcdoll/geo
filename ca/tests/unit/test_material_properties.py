@@ -33,14 +33,9 @@ def test_material_properties():
         density=1000.0,
         thermal_conductivity=0.6,
         specific_heat=4186.0,
-        strength=50.0,
-        porosity=0.1,
         color_rgb=(100, 100, 100),
         emissivity=0.9,
-        albedo=0.3,
         thermal_expansion=1e-5,
-        kinematic_viscosity=1e-6,
-        rigidity_coeff=0.0
     )
     
     # Check all properties are accessible
@@ -51,7 +46,6 @@ def test_material_properties():
     assert props.porosity == 0.1
     assert props.color_rgb == (100, 100, 100)
     assert props.emissivity == 0.9
-    assert props.albedo == 0.3
     assert props.thermal_expansion == 1e-5
     assert props.kinematic_viscosity == 1e-6
     assert props.rigidity_coeff == 0.0
@@ -81,7 +75,6 @@ def test_material_database():
         # Check other physical properties
         assert 0 <= props.porosity <= 1, f"Porosity must be between 0 and 1 for {material_type}"
         assert 0 <= props.emissivity <= 1, f"Emissivity must be between 0 and 1 for {material_type}"
-        assert 0 <= props.albedo <= 1, f"Albedo must be between 0 and 1 for {material_type}"
     
     print(f"MaterialDatabase completeness test passed")
     print(f"  Verified properties for {len(MaterialType)} materials")

@@ -2,7 +2,6 @@
 
 This package contains all test scenarios organized by category:
 - fluids.py: Water conservation, magma flow, fluid gravity
-- rigid_body.py: Rigid body with enclosed fluid, rigid body fluid displacement, rigid body rotation
 - mechanics.py: Gravity fall, buoyancy, hydrostatic pressure
 - materials.py: Material stability, metamorphism, phase transitions
 
@@ -37,18 +36,12 @@ from .materials import (
     PhaseTransitionScenario,
 )
 
-from .rigid_body import (
-    RigidBodyWithEnclosedFluidScenario,
-    RigidBodyFluidDisplacementScenario,
-    RigidBodyRotationScenario,
-)
 
 # Define scenario groups for organization
 SCENARIO_GROUPS = {
     'fluids': ScenarioGroup('Fluid Dynamics', 'Tests for fluid behavior'),
     'mechanics': ScenarioGroup('Mechanical Physics', 'Tests for gravity, buoyancy, pressure'),
     'materials': ScenarioGroup('Material Physics', 'Tests for phase transitions and stability'),
-    'rigid_body': ScenarioGroup('Rigid Body Physics', 'Tests for rigid body dynamics'),
 }
 
 # Register fluid scenarios
@@ -69,10 +62,6 @@ SCENARIO_GROUPS['materials'].add_scenario('material_stability', MaterialStabilit
 SCENARIO_GROUPS['materials'].add_scenario('metamorphism', MetamorphismScenario)
 SCENARIO_GROUPS['materials'].add_scenario('phase_transition', PhaseTransitionScenario)
 
-# Register rigid body scenarios
-SCENARIO_GROUPS['rigid_body'].add_scenario('rigid_container', RigidBodyWithEnclosedFluidScenario)
-SCENARIO_GROUPS['rigid_body'].add_scenario('rigid_displacement', RigidBodyFluidDisplacementScenario)
-SCENARIO_GROUPS['rigid_body'].add_scenario('rigid_rotation', RigidBodyRotationScenario)
 
 # Flat dictionary for backward compatibility
 ALL_SCENARIOS = {}

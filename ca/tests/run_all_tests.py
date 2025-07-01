@@ -34,7 +34,6 @@ def run_unit_tests() -> bool:
     
     unit_test_modules = [
         'tests.unit.test_materials',
-        'tests.unit.test_pressure_solver', 
         'tests.unit.test_buoyancy_physics',
     ]
     
@@ -104,7 +103,6 @@ def list_scenarios() -> Dict[str, Dict[str, Callable]]:
     scenario_modules = [
         ('buoyancy', 'tests.scenarios.test_buoyancy'),
         ('fluids', 'tests.scenarios.test_fluids'),
-        ('rigid_body', 'tests.scenarios.test_rigid_body'),
         ('materials', 'tests.scenarios.test_materials'),
     ]
     
@@ -258,7 +256,7 @@ def main():
         print("Running complete test suite...\n")
         unit_success = run_unit_tests()
         integration_success = run_integration_tests()
-        scenario_success = run_scenarios(['buoyancy', 'fluids', 'rigid_body', 'materials'])
+        scenario_success = run_scenarios(['buoyancy', 'fluids', 'materials'])
         success = unit_success and integration_success and scenario_success
         
         print("\n" + "=" * 60)

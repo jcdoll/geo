@@ -1,6 +1,7 @@
 """Test suite for simulation engine"""
 
 import numpy as np
+import pytest
 from geo_game import GeoGame as GeologySimulation
 from materials import MaterialType
 
@@ -12,7 +13,7 @@ def test_simulation_initialization():
     assert sim.height == 15
     assert sim.time == 0
     assert sim.temperature.shape == (15, 20)
-    assert sim.pressure.shape == (15, 20)
+    # CA doesn't have pressure
 
 
 def test_heat_injection():
@@ -24,18 +25,6 @@ def test_heat_injection():
     assert new_temp > initial_temp
 
 
-def test_pressure_offset():
-    """Apply localized pressure offset via FluidDynamics API"""
-    sim = GeologySimulation(width=10, height=10)
-    sim.fluid_dynamics.calculate_planetary_pressure()
-    initial_pressure = np.max(sim.pressure)
-
-    # Apply offset and recalculate
-    sim.apply_tectonic_stress(5, 5, 2, 100)
-    sim.fluid_dynamics.calculate_planetary_pressure()
-
-    new_pressure = np.max(sim.pressure)
-    assert new_pressure > initial_pressure
 
 
 def test_time_stepping():
@@ -69,12 +58,12 @@ def test_basic_stats():
     # Non-space mask for averages
     non_space = sim.material_types != MaterialType.SPACE
     temps = sim.temperature[non_space]
-    press = sim.pressure[non_space]
+    # CA doesn't have pressure
 
     avg_temperature = float(np.mean(temps)) if temps.size else 0.0
     max_temperature = float(np.max(temps)) if temps.size else 0.0
-    avg_pressure = float(np.mean(press)) if press.size else 0.0
-    max_pressure = float(np.max(press)) if press.size else 0.0
+    avg_pressure = 0.0  # CA doesn't calculate pressure
+    max_pressure = 0.0  # CA doesn't calculate pressure
 
     # Material composition
     material_strings = np.array([m.value for m in sim.material_types.flatten()])

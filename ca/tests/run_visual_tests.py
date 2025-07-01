@@ -55,8 +55,7 @@ class VisualScenarioRunner:
         # Create simulation
         self.sim = GeoGame(
             grid_size, grid_size,
-            cell_size=50.0,
-            quality=1,
+            cell_size=1.0,
             log_level="INFO",
             setup_planet=False  # Scenarios set up their own environment
         )

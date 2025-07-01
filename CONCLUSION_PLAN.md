@@ -47,11 +47,13 @@ Next steps:
     - The dark side should be slightly darker and the light side should be slightly lighter
 - Add sun rotation
     - Add a sun angle parameter (like we do in the flux vesion) so that the solar heating direction varies over time.
+- Remove quality setting
+    - Use the high quality setting everywhere, remove the other downgraded versions
 
 2) Simplify the ca/ buoyancy and cell swapping behavior
 - Do not solve for pressure and velocity
 - Use a simple swapping rule based on density differences and the gravity vector (swap away from the gravity vector)
-- Add a probabilty to swap to each material
+- Add a probabilty to swap to each material (always <1 so that swapping takes some time - for a pair the probability is either the maximum of the two or the product of the two?)
 - Remove all rigid body mechanics code
 
 3) Attempt one minor ca/ improvement re: lateral buoyancy.

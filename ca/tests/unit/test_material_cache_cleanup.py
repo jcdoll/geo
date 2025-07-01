@@ -16,53 +16,48 @@ class TestMaterialCacheCleanup:
     """Test material cache cleanup functionality"""
     
     def test_cache_cleanup_after_delete(self):
-        """Test that material cache is cleaned up after delete operations"""
+        """Test that material properties are correctly updated after delete operations"""
         # Create small simulation for faster testing
-        sim = GeologySimulation(10, 10)
+        sim = GeologySimulation(10, 10, setup_planet=False)
         
-        # Add specific materials to create cache entries using public API
+        # Initialize with space
+        sim.material_types[:] = MaterialType.SPACE
+        sim.temperature[:] = 290.0
+        
+        # Add specific materials using public API
         sim.add_material_blob(5, 5, 2, MaterialType.BASALT)
         sim.add_material_blob(3, 3, 1, MaterialType.GRANITE)
         sim.add_material_blob(7, 7, 1, MaterialType.WATER)
+        sim._update_material_properties(force=True)
         
-        # Get initial state
-        initial_grid_materials = set(sim.material_types.flatten())
-        initial_cached_materials = set(sim._material_props_cache.keys())
+        # Verify materials were added
+        assert MaterialType.BASALT in sim.material_types
+        assert MaterialType.GRANITE in sim.material_types
+        assert MaterialType.WATER in sim.material_types
         
-        # Cache should match grid initially
-        assert initial_cached_materials == initial_grid_materials, \
-            "Initial cache should match grid materials"
+        # Check densities are correct
+        basalt_pos = np.where(sim.material_types == MaterialType.BASALT)
+        if len(basalt_pos[0]) > 0:
+            basalt_density = sim.density[basalt_pos[0][0], basalt_pos[1][0]]
+            assert basalt_density == sim.material_db.get_properties(MaterialType.BASALT).density
         
         # Delete some materials
         sim.delete_material_blob(5, 5, 3)  # Remove basalt area
         sim.delete_material_blob(3, 3, 2)  # Remove granite area
         
-        # Deletion sets dirty flag; update material properties
-        if sim._properties_dirty:
-            sim._update_material_properties()
+        # Run simulation step to trigger property update
+        sim.step_forward(0.1)
         
-        # Run simulation step to trigger cache update
-        sim.step_forward()
-        
-        # Get final state
-        final_grid_materials = set(sim.material_types.flatten())
-        final_cached_materials = set(sim._material_props_cache.keys())
-        
-        # Cache should match grid after cleanup
-        extra_in_cache = final_cached_materials - final_grid_materials
-        missing_from_cache = final_grid_materials - final_cached_materials
-        
-        assert not extra_in_cache, \
-            f"Cache contains materials not in grid: {[m.name for m in extra_in_cache]}"
-        assert not missing_from_cache, \
-            f"Cache missing materials from grid: {[m.name for m in missing_from_cache]}"
-        
-        # Properties should not be dirty after update
-        assert not sim._properties_dirty, "Properties should be clean after step"
+        # Check that deleted areas now have correct properties
+        space_density = sim.material_db.get_properties(MaterialType.SPACE).density
+        deleted_area_density = sim.density[5, 5]
+        assert deleted_area_density == space_density, f"Deleted area should have space density, got {deleted_area_density} instead of {space_density}"
     
     def test_cache_cleanup_during_phase_transitions(self):
-        """Test cache cleanup when materials change due to phase transitions"""
-        sim = GeologySimulation(8, 8)
+        """Test material properties are updated when materials change due to phase transitions"""
+        sim = GeologySimulation(8, 8, setup_planet=False)
+        sim.material_types[:] = MaterialType.SPACE
+        sim.temperature[:] = 290.0
         
         # Add water at high temperature to trigger evaporation
         sim.add_material_blob(4, 4, 2, MaterialType.WATER)
@@ -71,63 +66,80 @@ class TestMaterialCacheCleanup:
         water_mask = (sim.material_types == MaterialType.WATER)
         sim.temperature[water_mask] = 400.0  # Above boiling point
         
-        # Get initial cache state
-        initial_cached = set(sim._material_props_cache.keys())
+        # Force property update
+        sim._update_material_properties(force=True)
+        
+        # Store initial water density for comparison
+        water_density = sim.material_db.get_properties(MaterialType.WATER).density
         
         # Run several steps to allow phase transitions
         for _ in range(3):
-            sim.step_forward()
+            sim.step_forward(0.1)
         
-        # Check final cache state
-        final_grid_materials = set(sim.material_types.flatten())
-        final_cached_materials = set(sim._material_props_cache.keys())
-        
-        # Cache should still match grid
-        assert final_cached_materials == final_grid_materials, \
-            "Cache should match grid after phase transitions"
+        # Check that properties were updated correctly
+        # Some water should have evaporated to water vapor
+        vapor_mask = sim.material_types == MaterialType.WATER_VAPOR
+        if np.any(vapor_mask):
+            vapor_density = sim.density[vapor_mask][0]
+            expected_vapor_density = sim.material_db.get_properties(MaterialType.WATER_VAPOR).density
+            assert vapor_density == expected_vapor_density, "Vapor should have correct density"
     
     def test_cache_cleanup_with_material_swaps(self):
-        """Test cache cleanup when materials are swapped during fluid dynamics"""
-        sim = GeologySimulation(6, 6)
+        """Test material properties remain consistent when materials are swapped during fluid dynamics"""
+        sim = GeologySimulation(6, 6, setup_planet=False)
+        sim.material_types[:] = MaterialType.SPACE
+        sim.temperature[:] = 290.0
         
         # Create a scenario with different density materials
         sim.add_material_blob(3, 2, 1, MaterialType.GRANITE)  # Heavy
         sim.add_material_blob(3, 4, 1, MaterialType.AIR)     # Light
         
-        # Get initial state
-        initial_materials = set(sim.material_types.flatten())
+        # Force property update
+        sim._update_material_properties(force=True)
+        
+        # Get initial densities
+        granite_density = sim.material_db.get_properties(MaterialType.GRANITE).density
+        air_density = sim.material_db.get_properties(MaterialType.AIR).density
         
         # Run steps to allow material movement
         for _ in range(5):
-            sim.step_forward()
+            sim.step_forward(0.1)
             
-            # Cache should always match grid
-            current_grid = set(sim.material_types.flatten())
-            current_cache = set(sim._material_props_cache.keys())
-            
-            assert current_cache == current_grid, \
-                f"Cache mismatch at step: grid={len(current_grid)}, cache={len(current_cache)}"
+            # Check that all cells have correct densities
+            for j in range(sim.height):
+                for i in range(sim.width):
+                    mat = sim.material_types[j, i]
+                    actual_density = sim.density[j, i]
+                    expected_density = sim.material_db.get_properties(mat).density
+                    assert actual_density == expected_density, \
+                        f"Density mismatch at ({j},{i}): {actual_density} != {expected_density}"
     
     def test_no_memory_leak_in_cache(self):
-        """Test that cache doesn't grow indefinitely with repeated operations"""
-        sim = GeologySimulation(8, 8)
+        """Test that material properties remain consistent with repeated operations"""
+        sim = GeologySimulation(8, 8, setup_planet=False)
+        sim.material_types[:] = MaterialType.SPACE
+        sim.temperature[:] = 290.0
         
         # Perform many add/delete cycles
         for i in range(10):
             # Add material
             sim.add_material_blob(4, 4, 1, MaterialType.BASALT)
-            sim.step_forward()
+            sim.step_forward(0.1)
+            
+            # Check basalt density is correct
+            basalt_mask = sim.material_types == MaterialType.BASALT
+            if np.any(basalt_mask):
+                actual = sim.density[basalt_mask][0]
+                expected = sim.material_db.get_properties(MaterialType.BASALT).density
+                assert actual == expected, f"Basalt density mismatch at cycle {i}"
             
             # Delete material
             sim.delete_material_blob(4, 4, 2)
-            sim.step_forward()
+            sim.step_forward(0.1)
             
-            # Cache size should remain reasonable
-            cache_size = len(sim._material_props_cache)
-            grid_materials = len(set(sim.material_types.flatten()))
-            
-            assert cache_size == grid_materials, \
-                f"Cache size ({cache_size}) should match grid materials ({grid_materials}) at cycle {i}"
-            
-            # Cache should not grow beyond reasonable bounds
-            assert cache_size < 20, f"Cache size ({cache_size}) is too large at cycle {i}"
+            # Check space density is correct where deleted
+            space_mask = sim.material_types == MaterialType.SPACE
+            if np.any(space_mask):
+                actual = sim.density[space_mask][0]
+                expected = sim.material_db.get_properties(MaterialType.SPACE).density
+                assert actual == expected, f"Space density mismatch at cycle {i}"

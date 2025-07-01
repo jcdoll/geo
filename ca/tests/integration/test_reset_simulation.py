@@ -41,7 +41,7 @@ def test_simulate_reset_simulate_workflow():
 
     # Ensure core arrays remain intact
     assert sim.temperature.shape == (10, 12)
-    assert sim.pressure.shape == (10, 12)
+    # CA doesn't have pressure
 
     # --- Second simulation phase ----------------------------------------------
     second_steps = 5
@@ -54,7 +54,6 @@ def test_simulate_reset_simulate_workflow():
 
     # Validate numerical stability after second phase
     assert np.all(np.isfinite(sim.temperature))
-    assert np.all(np.isfinite(sim.pressure))
+    # CA doesn't have pressure
 
-    # Guard against negative pressures (should stay non-negative in model)
-    assert np.all(sim.pressure >= 0.0) 
+    # CA doesn't calculate pressure
