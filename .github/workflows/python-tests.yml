@@ -22,8 +22,35 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-    - name: Run tests
+        pip install pytest-benchmark
+    
+    # Run tests for each sub-project separately to avoid import conflicts
+    # Each sub-project has modules with the same names (gravity_solver.py, materials.py, etc.)
+    
+    - name: Run CA tests
+      env:
+        PYTHONPATH: ${{ github.workspace }}/ca
+        SDL_VIDEODRIVER: dummy
+        SDL_AUDIODRIVER: dummy
+        MPLBACKEND: Agg
+      run: |
+        pytest ca/tests/ -q --ignore=ca/tests/framework
+    
+    - name: Run Flux tests
+      env:
+        PYTHONPATH: ${{ github.workspace }}/flux
+        SDL_VIDEODRIVER: dummy
+        SDL_AUDIODRIVER: dummy
+        MPLBACKEND: Agg
+      run: |
+        # Run fast tests only - exclude slow integration tests that take >5 minutes
+        pytest flux/tests/test_scenarios.py flux/tests/test_temperature_stability.py flux/tests/unit/ -q
+    
+    - name: Run SPH tests
       env:
         PYTHONPATH: ${{ github.workspace }}
+        SDL_VIDEODRIVER: dummy
+        SDL_AUDIODRIVER: dummy
+        MPLBACKEND: Agg
       run: |
-        pytest -q
+        pytest sph/tests/ -q --ignore=sph/tests/archive

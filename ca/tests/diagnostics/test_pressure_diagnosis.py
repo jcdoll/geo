@@ -1,10 +1,12 @@
 """Diagnose pressure field and buoyancy force calculation"""
 
 import numpy as np
+import pytest
 from geo_game import GeoGame as GeoSimulation
 from materials import MaterialType
 
 
+@pytest.mark.skip(reason="CA simulation does not have pressure field - this diagnostic test is for future flux-based implementation")
 def test_pressure_field_diagnosis():
     """Analyze the pressure field and forces in detail"""
     
@@ -58,7 +60,6 @@ def test_pressure_field_diagnosis():
     
     # Check pressure calculation settings
     print(f"\nSimulation settings:")
-    print(f"  Enable pressure: {sim.enable_pressure}")
     print(f"  Enable self-gravity: {sim.enable_self_gravity}")
     print(f"  External gravity: {getattr(sim, 'external_gravity', 'None')}")
     

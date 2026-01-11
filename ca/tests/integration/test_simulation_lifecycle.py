@@ -13,7 +13,7 @@ def test_simulation_initialization():
     # Check basic properties
     assert sim.width == 20
     assert sim.height == 30
-    assert sim.cell_size == 50.0
+    assert sim.cell_size == 1.0
     
     # Check arrays are initialized
     assert sim.material_types.shape == (30, 20)

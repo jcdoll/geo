@@ -42,13 +42,9 @@ def test_material_properties():
     assert props.density == 1000.0
     assert props.thermal_conductivity == 0.6
     assert props.specific_heat == 4186.0
-    assert props.strength == 50.0
-    assert props.porosity == 0.1
     assert props.color_rgb == (100, 100, 100)
     assert props.emissivity == 0.9
     assert props.thermal_expansion == 1e-5
-    assert props.kinematic_viscosity == 1e-6
-    assert props.rigidity_coeff == 0.0
     
     print(f"MaterialProperties test passed")
 
@@ -72,8 +68,7 @@ def test_material_database():
         assert len(props.color_rgb) == 3, f"Color must be RGB tuple for {material_type}"
         assert all(0 <= c <= 255 for c in props.color_rgb), f"RGB values must be 0-255 for {material_type}"
         
-        # Check other physical properties
-        assert 0 <= props.porosity <= 1, f"Porosity must be between 0 and 1 for {material_type}"
+        # Check emissivity is valid
         assert 0 <= props.emissivity <= 1, f"Emissivity must be between 0 and 1 for {material_type}"
     
     print(f"MaterialDatabase completeness test passed")

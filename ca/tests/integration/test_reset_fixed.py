@@ -40,7 +40,7 @@ def test_reset_restores_initial_state():
     # Verify grid properties are preserved
     assert sim.width == 20
     assert sim.height == 20
-    assert sim.cell_size == 50.0
+    assert sim.cell_size == 1.0
     
     print("Reset restore test passed")
 

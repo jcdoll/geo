@@ -1,10 +1,16 @@
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
 
 def pytest_configure(config):
     """Configure pytest environment for headless operation."""
+    # Add ca directory to Python path so imports like 'from geo_game import ...' work
+    ca_dir = Path(__file__).parent
+    if str(ca_dir) not in sys.path:
+        sys.path.insert(0, str(ca_dir))
+    
     # Set SDL to use dummy video driver for headless operation
     os.environ['SDL_VIDEODRIVER'] = 'dummy'
     # Disable audio as well
