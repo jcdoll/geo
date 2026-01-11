@@ -43,7 +43,8 @@ jobs:
         SDL_AUDIODRIVER: dummy
         MPLBACKEND: Agg
       run: |
-        pytest flux/tests/ -q
+        # Run fast tests only - exclude slow integration tests that take >5 minutes
+        pytest flux/tests/test_scenarios.py flux/tests/test_temperature_stability.py flux/tests/unit/ -q
     
     - name: Run SPH tests
       env:

@@ -2,6 +2,7 @@
 import os
 import sys
 from pathlib import Path
+import pytest
 
 
 def pytest_configure(config):
@@ -15,3 +16,9 @@ def pytest_configure(config):
     os.environ['SDL_VIDEODRIVER'] = 'dummy'
     os.environ['SDL_AUDIODRIVER'] = 'dummy'
     os.environ['MPLBACKEND'] = 'Agg'
+
+
+@pytest.fixture(params=[32, 64])
+def grid_size(request):
+    """Fixture providing different grid sizes for testing."""
+    return request.param
