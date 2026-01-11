@@ -161,22 +161,24 @@ class TestPerformance:
     """
     
     @pytest.fixture
-    def benchmark(self, request):
+    def benchmark_fixture(self, request):
         """Provide benchmark fixture or skip if not available."""
         # Check if pytest-benchmark is installed
         try:
             from pytest_benchmark.fixture import BenchmarkFixture
             # Get the actual benchmark fixture from pytest-benchmark
+            # Note: We use a different name (benchmark_fixture) to avoid shadowing
+            # the pytest-benchmark fixture named 'benchmark'
             return request.getfixturevalue('benchmark')
         except (ImportError, pytest.FixtureLookupError):
             pytest.skip("pytest-benchmark not installed. Install with: pip install pytest-benchmark")
     
     @pytest.mark.parametrize("n_particles", [1000, 5000, 10000, 50000])
     @pytest.mark.parametrize("backend", ['cpu', 'numba', 'gpu'])
-    def test_performance(self, n_particles, backend, benchmark):
+    def test_performance(self, n_particles, backend, benchmark_fixture):
         """Benchmark SPH operations."""
         # Skip if benchmark fixture not available (already handled above)
-        if benchmark is None:
+        if benchmark_fixture is None:
             pytest.skip("Benchmark fixture not available")
         
         # Skip if backend not available
@@ -203,7 +205,7 @@ class TestPerformance:
             sph.integrate(particles, n_particles, dt=0.001)
         
         # Run benchmark
-        benchmark(timestep)
+        benchmark_fixture(timestep)
 
 
 def main():
